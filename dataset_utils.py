@@ -10,6 +10,9 @@ import yaml
 from utils import *
 
 
+NUM_PROC = os.cpu_count() // 2
+
+
 def yield_sequences_from_token_batch(tokenizer, token_batch, sequence_len):
     # Initialize sequence_tokens with BOS token if it exists
     sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
@@ -52,9 +55,26 @@ def load_raw_dataset(dataset_path, tokenizer, sequence_len, eval_size, overlap=0
     if subsample_documents:
         dataset = dataset.shuffle(seed=13).select(list(range(int(subsample_documents*len(dataset)))))
 
-    dataset = dataset.map(lambda x: tokenizer(x['text']), batched=True, batch_size=10, remove_columns=dataset.column_names, desc='tokenizing', num_proc=num_proc)
-    dataset = dataset.map(lambda x: {'input_ids': list(yield_sequences_from_token_batch(tokenizer, x['input_ids'], sequence_len))}, batched=True, batch_size=None, remove_columns=dataset.column_names, desc='splitting')
-    dataset = dataset.map(lambda x: {'attention_mask': torch.ones_like(x['input_ids']), 'labels': x['input_ids']}, desc='adding attention_mask and labels')
+    dataset = dataset.map(
+        lambda x: tokenizer(x['text']),
+        batched=True,
+        batch_size=10,
+        remove_columns=dataset.column_names,
+        desc='tokenizing',
+        num_proc=NUM_PROC,
+    )
+    dataset = dataset.map(
+        lambda x: {'input_ids': list(yield_sequences_from_token_batch(tokenizer, x['input_ids'], sequence_len))},
+        batched=True,
+        batch_size=100,
+        remove_columns=dataset.column_names,
+        desc='splitting',
+        num_proc=NUM_PROC,
+    )
+    dataset = dataset.map(
+        lambda x: {'attention_mask': torch.ones_like(x['input_ids']), 'labels': x['input_ids']},
+        desc='adding attention_mask and labels',
+    )
     if eval_size > 0:
         split_datasets = dataset.train_test_split(test_size=eval_size, shuffle=True, seed=42)
         train_data = split_datasets['train']
