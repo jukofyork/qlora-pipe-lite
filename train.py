@@ -305,13 +305,15 @@ def load_pipeline_model_with_lora(config, model_type):
             activation_checkpoint_interval=1,
             checkpointable_layers=checkpointable_layers,
             activation_checkpoint_func=checkpoint_func,
-            partition_method=partition_method
+            partition_method=partition_method,
+            use_column_major_topology=config.get('use_column_major_topology', False)
         )
     else:
         pipeline_model = engine.CustomPipelineModule(
             layers=layers,
             num_stages=config['pipeline_stages'],
-            partition_method=partition_method
+            partition_method=partition_method,
+            use_column_major_topology=config.get('use_column_major_topology', False)
         )
 
     target_modules = config['target_modules'] if 'target_modules' in config else 'all-linear'
