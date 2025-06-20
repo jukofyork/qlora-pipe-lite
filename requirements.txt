@@ -20,16 +20,3 @@ tqdm
 triton
 hqq
 torch-optimi
-
-# minimum Axolotl dependencies for what we use
-addict
-optimum
-pynvml
-evaluate
-wandb
-numba
-colorama
-trl
-mlflow
-termcolor
-fastcore
