@@ -1,16 +1,12 @@
 import math
-import sys
-import os.path
-sys.path.insert(0, os.path.abspath('axolotl/src'))
-
 import torch
 from torch.utils.data import DataLoader
 import transformers
+from transformers import DataCollatorForSeq2Seq
 import accelerate
 from deepspeed import comm as dist
 from tqdm import tqdm
 
-from axolotl.utils.collators import DataCollatorForSeq2Seq
 from utils import *
 
 # A100 wants padding to multiple of 64, other cards are efficient with smaller, so just do 64
@@ -182,13 +178,27 @@ class PipelineDataLoader:
                 yield micro_batch
 
     def _create_dataloader(self):
-        data_collator = DataCollatorForSeq2Seq(self.tokenizer, pad_to_multiple_of=self.pad_to_multiple_of)
+        # Use transformers DataCollatorForSeq2Seq
+        data_collator = DataCollatorForSeq2Seq(
+            self.tokenizer, 
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt"  # Ensure we get PyTorch tensors
+        )
+        
         def collate_fn(examples):
             batch = data_collator(examples)
-            # input to pipeline is (input_ids, attention_mask, labels)
-            # this needs to return (features, labels)
-            # it is OK if labels is None (the model just returns the loss anyway)
-            return ((batch['input_ids'], batch['attention_mask'], batch['labels']), None)
+            # Transformers collator returns dict with keys: 
+            # input_ids, attention_mask, labels (plus optional decoder_input_ids)
+            # We need to return ((input_ids, attention_mask, labels), None)
+            return (
+                (
+                    batch['input_ids'], 
+                    batch['attention_mask'], 
+                    batch.get('labels', None)  # Use get() for safety
+                ), 
+                None
+            )
+        
         self.dataloader = DataLoader(
             self.dataset,
             pin_memory=True,
@@ -225,64 +235,3 @@ class PipelineDataLoader:
         for epoch in result:
             max_epoch = max(epoch, max_epoch)
         self.epoch = max_epoch
-
-
-# for testing
-if __name__ == '__main__':
-    tokenizer = transformers.AutoTokenizer.from_pretrained(sys.argv[1], local_files_only=True)
-    tokenizer.pad_token_id = 1000
-
-    from datasets import Dataset
-    data = []
-    for i in range(1, 41):
-        input_ids = torch.tensor([i]*i)
-        data.append({'input_ids': input_ids, 'attention_mask': torch.ones_like(input_ids), 'labels': input_ids, 'length': len(input_ids)})
-    dataset = Dataset.from_list(data)
-
-    # dataloader = PipelineDataLoader(dataset, tokenizer, batch_size=2, gradient_accumulation_steps=2, data_parallel_world_size=1, data_parallel_rank=0, group_by_length=True, pad_to_multiple_of=None)
-    # for batch in dataloader:
-    #     if dataloader.epoch > 1:
-    #         break
-    #     print(batch)
-    #     print()
-
-    batch_size = 2
-    gradient_accumulation_steps = 2
-    data_parallel_world_size = 2
-    data_parallel_rank = 0
-    dataloader = PipelineDataLoader(
-        dataset,
-        tokenizer,
-        batch_size=batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        data_parallel_world_size=data_parallel_world_size,
-        data_parallel_rank=data_parallel_rank,
-        shuffle=False,
-        group_by_length=False,
-        pad_to_multiple_of=None
-    )
-    print(next(dataloader)[0][0])
-    print(next(dataloader)[0][0])
-    print(next(dataloader)[0][0])
-    print(next(dataloader)[0][0])
-
-    state_dict = dataloader.state_dict()
-    dataloader = PipelineDataLoader(
-        dataset,
-        tokenizer,
-        batch_size=batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        data_parallel_world_size=data_parallel_world_size,
-        data_parallel_rank=data_parallel_rank,
-        shuffle=False,
-        group_by_length=False,
-        pad_to_multiple_of=None
-    )
-    dataloader.load_state_dict(state_dict)
-    print()
-    print('-'*80)
-    print()
-    print(next(dataloader)[0][0])
-    print(next(dataloader)[0][0])
-    print(next(dataloader)[0][0])
-    print(next(dataloader)[0][0])
