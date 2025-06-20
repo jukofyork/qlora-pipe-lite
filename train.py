@@ -18,7 +18,6 @@ import deepspeed
 from deepspeed.runtime.pipe.module import LayerSpec
 import toml
 import bitsandbytes
-from hqq.core import quantize as hqq_quantize
 
 from dataset_utils import load_datasets
 import dataloader
@@ -28,7 +27,6 @@ import engine
 import llama_pipe
 import mixtral_pipe
 import unsloth_utils
-import hqq_utils
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', help='Path to TOML configuration file.')
@@ -252,10 +250,6 @@ def load_pipeline_model_with_lora(config, model_type):
                 no_quant_modules = list(set(no_quant_modules))
             bnb_quant_config['llm_int8_skip_modules'] = no_quant_modules
             quantization_config = transformers.BitsAndBytesConfig(**bnb_quant_config)
-        elif hqq_quant_config := config['quantization'].get('hqq', None):
-            quantization_config = hqq_utils.CustomHQQConfig(**hqq_quant_config)
-            # Use ATEN backend if possible, else PYTORCH. PYTORCH_COMPILE was only a tiny bit faster, and requires triton nightly.
-            hqq_quantize.HQQLinear.set_backend(hqq_quantize.HQQBackend.ATEN if quantization_config.use_aten() else hqq_quantize.HQQBackend.PYTORCH)
         else:
             raise NotImplementedError(f'Invalid quantization config')
         if is_main_process():

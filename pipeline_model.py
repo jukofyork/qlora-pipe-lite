@@ -10,11 +10,9 @@ from transformers.integrations import get_keys_to_not_convert
 from deepspeed.runtime.pipe import module as ds_pipe_module
 import bitsandbytes as bnb
 import accelerate
-from hqq.core import quantize as hqq_quantize
 
 from utils import is_main_process
 from kernels.cross_entropy_loss import Fast_CrossEntropyLoss
-import hqq_utils
 
 
 def move_data_to_device(module, device):
@@ -172,15 +170,6 @@ def _partial_module_name_match(full_name, list_to_match):
     return any(key in full_name for key in list_to_match)
 
 
-def _replace_with_quantized_linear(parent_modules_map, name, full_name, quantization_config):
-    if isinstance(quantization_config, transformers.BitsAndBytesConfig):
-        _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_config)
-    elif isinstance(quantization_config, hqq_utils.CustomHQQConfig):
-        _replace_with_hqq_linear(parent_modules_map, name, full_name, quantization_config)
-    else:
-        raise NotImplementedError(f'Quantization config not implemented: {quantization_config}')
-
-
 def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_config):
     '''Replace a Linear layer with a BNB quantized version.'''
     if quantization_config.llm_int8_skip_modules is not None and _partial_module_name_match(full_name, quantization_config.llm_int8_skip_modules):
@@ -222,71 +211,6 @@ def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_c
         parent_modules_map[name].requires_grad_(False)
 
 
-def _replace_with_hqq_linear(parent_modules_map, name, full_name, quantization_config):
-    '''Replace a Linear layer with a HQQ quantized version.'''
-    if _partial_module_name_match(full_name, quantization_config.skip_modules):
-        return
-    module = parent_modules_map[name]
-    quant_config_dict = quantization_config.get_dict(full_name)
-    hqq_linear = hqq_quantize.HQQLinear(
-        module,
-        quant_config=quant_config_dict,
-        compute_dtype=quantization_config.compute_dtype,
-        device=module.weight.device,
-        initialize=True,
-        del_orig=True
-    )
-    # Quantization itself uses a decent amount of VRAM. Temporarily move each quantized parameter to the CPU as we
-    # finish, so the quant process doesn't OOM. Deepspeed will move everything to the correct device later.
-    hqq_linear.W_q.data = hqq_linear.W_q.data.to('cpu')
-    # Store the module class in case we need to transpose the weight later
-    hqq_linear.source_cls = type(module)
-    # Force requires grad to False to avoid unexpected errors
-    hqq_linear.requires_grad_(False)
-    parent_modules_map[name] = hqq_linear
-
-
-# modified from: https://github.com/huggingface/transformers/blob/main/src/transformers/integrations/bitsandbytes.py
-def _recursively_replace_with_quantized_linear(
-    model,
-    modules_to_not_convert=None,
-    current_key_name=None,
-    quantization_config=None,
-):
-    """
-    Returns the converted model and a boolean that indicates if the conversion has been successful or not.
-    """
-    for name, module in model.named_children():
-        if current_key_name is None:
-            current_key_name = []
-        current_key_name.append(name)
-
-        if (isinstance(module, nn.Linear) or isinstance(module, nn.Conv1d)) and name not in modules_to_not_convert:
-            # Check if the current key is not in the `modules_to_not_convert`
-            current_key_name_str = ".".join(current_key_name)
-            if not any(
-                (key + "." in current_key_name_str) or (key == current_key_name_str) for key in modules_to_not_convert
-            ):
-                _replace_with_quantized_linear(model._modules, name, current_key_name_str, quantization_config)
-
-                # copy over the original_name attribute we added earlier (needed for loading weights)
-                for orig_name, orig_p in module.named_parameters():
-                    if hasattr(orig_p, 'original_name'):
-                        for new_name, new_p in model._modules[name].named_parameters():
-                            if new_name == orig_name:
-                                new_p.original_name = orig_p.original_name
-
-        if len(list(module.children())) > 0:
-            _recursively_replace_with_quantized_linear(
-                module,
-                modules_to_not_convert,
-                current_key_name,
-                quantization_config,
-            )
-        # Remove the last key for recursion
-        current_key_name.pop(-1)
-
-
 class LoaderUtil:
 
     def __init__(self, model_path, quantization_config, modules_to_not_quantize):
@@ -322,7 +246,7 @@ class LoaderUtil:
         modules_to_not_convert = self.modules_to_not_quantize
         if not isinstance(modules_to_not_convert, list):
             modules_to_not_convert = [modules_to_not_convert]
-        _recursively_replace_with_quantized_linear(
+        _replace_with_bnb_linear(
             module, modules_to_not_convert=modules_to_not_convert, quantization_config=self.quantization_config
         )
         # Make sure to set this or PEFT (and probably other things) will break in strange ways.
@@ -331,9 +255,8 @@ class LoaderUtil:
 
     def load_state_dict_into_module(self, module):
         print(f'load params into module {type(module)}')
-        if isinstance(self.quantization_config, transformers.BitsAndBytesConfig):
-            # bnb needs to replace with quantized linear before weights are loaded
-            self.maybe_quantize(module)
+        # bnb needs to replace with quantized linear before weights are loaded
+        self.maybe_quantize(module)
         param_renaming_map = {p.original_name: new_name for new_name, p in module.named_parameters()}
         expected_keys = [p.original_name for p in module.parameters()]
         # If we have any extra attributes on the parameter, loading with BNB 4bit params breaks, so delete them.
@@ -359,5 +282,3 @@ class LoaderUtil:
             )
 
         module.to(self.device)
-        if not isinstance(self.quantization_config, transformers.BitsAndBytesConfig):
-            self.maybe_quantize(module)
