@@ -1,6 +1,6 @@
 import argparse
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import shutil
 import glob
 import time
@@ -369,7 +369,7 @@ if __name__ == '__main__':
         else False
     )
 
-    deepspeed.init_distributed()
+    deepspeed.init_distributed(timeout=timedelta(hours=2))
 
     with open(os.path.join(config['model'], 'config.json')) as f:
         model_config = json.load(f)
