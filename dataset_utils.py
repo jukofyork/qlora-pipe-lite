@@ -9,6 +9,10 @@ import yaml
 
 from utils import *
 
+# Dataset preprocessing batch sizes
+TOKENIZE_BATCH_SIZE = 10
+SPLIT_BATCH_SIZE = 100
+
 
 def yield_sequences_from_token_batch(tokenizer, token_batch, sequence_len):
     # Initialize sequence_tokens with BOS token if it exists
@@ -54,7 +58,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     dataset = dataset.map(
         lambda x: tokenizer(x['text']),
         batched=True,
-        batch_size=10,
+        batch_size=TOKENIZE_BATCH_SIZE,
         remove_columns=dataset.column_names,
         desc='tokenizing',
         num_proc=num_proc,
@@ -62,18 +66,19 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     dataset = dataset.map(
         lambda x: {'input_ids': list(yield_sequences_from_token_batch(tokenizer, x['input_ids'], sequence_len))},
         batched=True,
-        batch_size=100,
+        batch_size=SPLIT_BATCH_SIZE,
         remove_columns=dataset.column_names,
         desc='splitting',
         num_proc=num_proc,
     )
     dataset = dataset.map(
-        lambda x: {'attention_mask': torch.ones_like(x['input_ids']), 'labels': x['input_ids']},
-        desc='adding attention_mask and labels',
-    )
-    dataset = dataset.map(
-        lambda x: {'length': len(x['input_ids'])},
-        desc='adding length field'
+        lambda x: {
+            'input_ids': torch.tensor(x['input_ids']),
+            'attention_mask': torch.ones(len(x['input_ids']), dtype=torch.long), 
+            'labels': torch.tensor(x['input_ids']),
+            'length': len(x['input_ids'])
+        },
+        desc='adding attention_mask, labels, and length',
     )
 
     return dataset
