@@ -239,13 +239,12 @@ if __name__ == '__main__':
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
     def get_optimizer(model_parameters):
-        optim_config = config['optimizer']
         optimizer_kwargs = {
             "params": model_parameters,
-            "lr": optim_config['lr'],
-            "betas": (optim_config.get('beta1', 0.9), optim_config.get('beta2', 0.99)),
-            "weight_decay": optim_config.get('weight_decay', 0.0),
-            "eps": optim_config.get('eps', 1e-6),
+            "lr": config['lr'],
+            "betas": (config.get('beta1', 0.9), config.get('beta2', 0.99)),
+            "weight_decay": config.get('weight_decay', 0.0),
+            "eps": config.get('eps', 1e-6),
             "kahan_sum": True
         }
         return optimi.AdamW(**optimizer_kwargs) 
@@ -271,7 +270,7 @@ if __name__ == '__main__':
     )
     model_engine.set_dataloader(train_dataloader)
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
-    model_engine.total_steps = steps_per_epoch * config['epochs']
+    model_engine.total_steps = steps_per_epoch * config.get('epochs', 1)
     
     # Calculate evaluation step indices to use across the entire run
     evals_per_run = config.get('evals_per_run', 10)
@@ -330,7 +329,7 @@ if __name__ == '__main__':
     # Initialize checkpoint timing on main process only
     last_checkpoint_time = time.time() if is_main_process() else None
     
-    while train_dataloader.epoch <= config['epochs']:
+    while train_dataloader.epoch <= config.get('epochs', 1):
         # Memory cleanup before each training step
         gc.collect()
         torch.cuda.empty_cache()
@@ -342,7 +341,6 @@ if __name__ == '__main__':
         # Log training metrics to tensorboard
         if is_main_process():
             write_metrics(tb_writer, 'train', metrics, step)
-            tb_writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], step)
         
         # Periodic evaluation based on global step
         if step in eval_step_indices:
@@ -366,7 +364,7 @@ if __name__ == '__main__':
         if do_checkpoint:
             save_checkpoint(model_engine, train_dataloader, run_dir, step)
             if is_main_process():
-                prune_checkpoints(run_dir, config.get('keep_states', -1))
+                prune_checkpoints(run_dir, config.get('max_checkpoints', -1))
 
         step += 1
     

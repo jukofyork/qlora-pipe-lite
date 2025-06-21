@@ -102,8 +102,8 @@ def save_checkpoint(model_engine, train_dataloader, run_dir, step):
     )
     
     
-def prune_checkpoints(run_dir, keep_states):
-    if keep_states <= 0:
+def prune_checkpoints(run_dir, max_checkpoints):
+    if max_checkpoints <= 0:
         return
 
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
@@ -126,7 +126,7 @@ def prune_checkpoints(run_dir, keep_states):
     # Sort by step number and keep only the most recent ones
     checkpoints.sort(key=lambda x: x[0])
     
-    while len(checkpoints) > keep_states:
+    while len(checkpoints) > max_checkpoints:
         step_num, path = checkpoints.pop(0)
         print(f'Deleting checkpoint: global_step{step_num}')
         safe_rmtree(path)
