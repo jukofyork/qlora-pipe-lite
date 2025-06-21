@@ -62,21 +62,12 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
         num_proc=num_proc,
     )
     dataset = dataset.map(
-        lambda x: {'input_ids': list(yield_sequences_from_token_batch(tokenizer, x['input_ids'], sequence_len))},
+        lambda x: {'input_ids': [torch.as_tensor(seq) for seq in yield_sequences_from_token_batch(tokenizer, x['input_ids'], sequence_len)]},
         batched=True,
         batch_size=SPLIT_BATCH_SIZE,
         remove_columns=dataset.column_names,
-        desc='splitting',
+        desc='splitting and converting to tensors',
         num_proc=num_proc,
-    )
-    dataset = dataset.map(
-        lambda x: {
-            'input_ids': torch.as_tensor(x['input_ids']),
-            'attention_mask': torch.ones(len(x['input_ids']), dtype=torch.long), 
-            'labels': torch.as_tensor(x['input_ids']),
-            'length': len(x['input_ids'])
-        },
-        desc='adding attention_mask, labels, and length',
     )
 
     return dataset

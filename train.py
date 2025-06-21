@@ -265,7 +265,6 @@ if __name__ == '__main__':
 
     train_dataloader = dataloader.PipelineDataLoader(
         train_data,
-        tokenizer,
         model_engine.train_micro_batch_size_per_gpu(),
         model_engine.gradient_accumulation_steps(),
         model_engine.grid.get_data_parallel_world_size(),
@@ -313,7 +312,6 @@ if __name__ == '__main__':
     # Eval dataset doesn't need to repeat; we just use this to track "epoch" so we know when we're done iterating over it.
     eval_dataloader = dataloader.PipelineDataLoader(
         eval_data,
-        tokenizer,
         model_engine.train_micro_batch_size_per_gpu(),
         model_engine.gradient_accumulation_steps(),
         model_engine.grid.get_data_parallel_world_size(),
