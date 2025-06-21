@@ -45,19 +45,14 @@ def get_most_recent_run_dir(output_dir):
 
 def write_metrics(tb_writer, prefix, metrics, step):
     loss = metrics[0].mean().item()
-    tb_writer.add_scalar(f'{prefix}/loss', loss, step)
+    tb_writer.add_scalar(f'{prefix}/cross_entropy_loss', loss, step)
 
     if len(metrics) > 1:
-        losses = metrics[1].view(-1)
-        positive_losses = (losses > 0)
-        tb_writer.add_histogram(f'{prefix}/log_loss_hist',  torch.log(losses[positive_losses]), step)
+        tb_writer.add_scalar(f'{prefix}/entropy', metrics[1].view(-1).mean().item(), step)
 
     if len(metrics) > 2:
-        tb_writer.add_scalar(f'{prefix}/entropy', metrics[2].view(-1).mean().item(), step)
-
-    if len(metrics) > 3:
-        tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[3].mean().item(), step)
-        tb_writer.add_scalar(f'{prefix}/top3_accuracy', metrics[4].mean().item(), step)
+        tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[2].mean().item(), step)
+        tb_writer.add_scalar(f'{prefix}/top3_accuracy', metrics[3].mean().item(), step)
 
     return loss
 
@@ -345,7 +340,7 @@ if __name__ == '__main__':
         
         if is_main_process():
             write_metrics(tb_writer, 'train', metrics, step)
-            tb_writer.add_scalar('train/lr', optimizer.param_groups[0]['lr'], step)
+            tb_writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], step)
     
         if step % config['eval_steps'] == 0:
             save_checkpoint(model_engine, train_dataloader, run_dir, step)
