@@ -4,8 +4,6 @@ from datetime import datetime, timedelta, timezone
 import shutil
 import glob
 import time
-import itertools
-from contextlib import contextmanager
 import json
 import gc
 
@@ -13,7 +11,6 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import transformers
 from peft import LoraConfig, get_peft_model
-from peft.optimizers import create_loraplus_optimizer
 import deepspeed
 from deepspeed.runtime.pipe.module import LayerSpec
 import toml

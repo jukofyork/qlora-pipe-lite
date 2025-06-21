@@ -1,5 +1,4 @@
 import os
-import math
 import re
 from inspect import signature
 
@@ -207,7 +206,8 @@ class LoaderUtil:
 
     def get_partial_state_dict(self, leaf_file):
         if self.loaded_state_dict is None or leaf_file != self.loaded_state_dict[0]:
-            print(f'loading checkpoint file {leaf_file}')
+            if is_main_process():
+                print(f'loading checkpoint file {leaf_file}')
             state_dict = transformers.modeling_utils.load_state_dict(os.path.join(self.model_path, leaf_file))
             state_dict = {re.sub(LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX, '', k): v for k, v in state_dict.items()}
             self.loaded_state_dict = (leaf_file, state_dict)
@@ -227,7 +227,8 @@ class LoaderUtil:
         self.is_loaded_in_4bit = True
 
     def load_state_dict_into_module(self, module):
-        print(f'load params into module {type(module)}')
+        if is_main_process():
+            print(f'load params into module {type(module)}')
         if isinstance(self.quantization_config, transformers.BitsAndBytesConfig):
             # bnb needs to replace with quantized linear before weights are loaded
             self.maybe_quantize(module)

@@ -1,7 +1,4 @@
 from datetime import datetime
-import sys
-import os.path
-import torch
 from deepspeed import comm as dist
 from contextlib import contextmanager
 import shutil

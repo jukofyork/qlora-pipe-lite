@@ -1,11 +1,9 @@
 import os
 import os.path
-import sys
 
 import torch
 import datasets
 from tqdm import tqdm
-import yaml
 
 from utils import *
 
