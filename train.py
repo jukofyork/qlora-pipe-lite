@@ -336,7 +336,7 @@ if __name__ == '__main__':
    
     last_eval_loss = evaluate(model_engine, eval_dataloader, tb_writer, step - 1)
     if is_main_process():
-        print(f'Initial evaluation loss: {last_eval_loss:.4f}')
+        print(f'- Initial evaluation loss: {last_eval_loss:.4f}')
     
     # Initialize checkpoint timing on main process only
     last_checkpoint_time = time.time() if is_main_process() else None
@@ -360,9 +360,8 @@ if __name__ == '__main__':
         if step_in_epoch in eval_steps_in_epoch:
             loss = evaluate(model_engine, eval_dataloader, tb_writer, step)
             if is_main_process():
-                delta = last_eval_loss - loss if last_eval_loss is not None else 0
-                percent_change = 100 * (1 - loss / last_eval_loss) if last_eval_loss and last_eval_loss != 0 else 0
-                print(f'Evaluation loss: {loss:.4f} (last: {last_eval_loss:.4f}, Δ: {delta:.5f} [{percent_change:.2f}%])')
+                percent_change = (loss - last_eval_loss) / 100
+                print(f'- Step {step} evaluation loss: {loss:.4f} (last: {last_eval_loss:.4f}, Δ: {percent_change:.2f}%)')
             last_eval_loss = loss
         
         # Time-based checkpointing: main process decides, broadcasts to all
