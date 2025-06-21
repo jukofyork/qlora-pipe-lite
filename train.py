@@ -86,23 +86,31 @@ def create_model(config, model_type):
     if config.get('full_fine_tune', False):
         quantization_config = None
     else:
+        no_quant_modules = ['lm_head']
+        if model_type == 'mixtral':
+            # the expert routing weights are tiny and probably important, don't quantize
+            no_quant_modules.append('gate')
         quantization_config = transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_quant_type="nf4",
-            llm_int8_skip_modules=["lm_head"]
+            llm_int8_skip_modules=no_quant_modules,
         )       
 
     if model_type == 'llama':
         model = llama_pipe.LlamaForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'mistral':
+    elif model_type == 'mistral' or model_type == 'mistral3':
         model = llama_pipe.MistralForCausalLMPipe(config, quantization_config=quantization_config)
+    elif model_type == 'mixtral':
+        model = llama_pipe.MixtralForCausalLMPipe(config, quantization_config=quantization_config)
     elif model_type == 'qwen2':
         model = llama_pipe.Qwen2ForCausalLMPipe(config, quantization_config=quantization_config)
     elif model_type == 'phi3':
         model = llama_pipe.Phi3ForCausalLMPipe(config, quantization_config=quantization_config)
     elif model_type == 'cohere':
         model = llama_pipe.CohereForCausalLMPipe(config, quantization_config=quantization_config)
+    elif model_type == 'cohere2':
+        model = llama_pipe.Cohere2ForCausalLMPipe(config, quantization_config=quantization_config)
     elif model_type == 'gemma2':
         model = llama_pipe.Gemma2ForCausalLMPipe(config, quantization_config=quantization_config)
     else:

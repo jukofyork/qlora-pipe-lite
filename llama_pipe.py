@@ -33,7 +33,7 @@ class EmbeddingPipe(nn.Module):
         )
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
-        if self.model[0].config.model_type == 'mistral':
+        if self.model[0].config.model_type in ['mistral', 'mixtral']:
             attention_mask = self.model[0]._update_causal_mask(
                 attention_mask, inputs_embeds, cache_position, past_key_values, False
             )
@@ -220,7 +220,46 @@ class MistralForCausalLMPipe(PipelineModel, transformers.MistralForCausalLM):
         result.append(LayerSpec(ComputeMetrics))
         return result
     
-    
+
+class MixtralForCausalLMPipe(PipelineModel, transformers.MixtralForCausalLM):
+    def __init__(self, config, quantization_config):
+        model_config = transformers.MixtralConfig.from_pretrained(config['model'])
+        model_config._attn_implementation = 'flash_attention_2'
+        torch.set_default_dtype(torch.bfloat16)
+        with accelerate.init_empty_weights():
+            transformers.MixtralForCausalLM.__init__(self, model_config)
+            PipelineModel.__init__(self, config, quantization_config, model_config)
+        torch.set_default_dtype(torch.float32)
+
+    def to_layer_specs(self):
+        def initial_layer(inputs):
+            input_ids, attention_mask, labels = inputs
+            batch_size, seq_length = input_ids.shape[:2]
+            device = input_ids.device
+            position_ids = torch.arange(
+                0, seq_length, dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0)
+            return input_ids, attention_mask, position_ids, labels
+
+        result = [
+            initial_layer,
+            LayerSpec(
+                EmbeddingPipe,
+                self.loader_util,
+                self.model.embed_tokens,
+                self.model,
+                embedding_on_cpu=not self.full_fine_tune
+            ),
+        ]
+        for block in self.model.layers:
+            result.append(LayerSpec(LlamaDecoderLayerPipe, self.loader_util, block))
+        result.append(LayerSpec(LlamaRMSNormPipe, self.loader_util, self.model.norm, _estimated_size=0))
+        result.append(LayerSpec(LmHeadPipe, self.loader_util, self.lm_head, _estimated_size=0))
+        result.append(LayerSpec(ComputeMetrics))
+        return result
+
+
 class Qwen2ForCausalLMPipe(PipelineModel, transformers.Qwen2ForCausalLM):
     def __init__(self, config, quantization_config):
         model_config = transformers.Qwen2Config.from_pretrained(config['model'])
@@ -339,6 +378,58 @@ class CohereForCausalLMPipe(PipelineModel, transformers.CohereForCausalLM):
                 self.model,
                 embedding_on_cpu=embedding_on_cpu,
                 _estimated_size=1 if embedding_on_cpu else embedding_relative_size,
+            ),
+        ]
+        for block in self.model.layers:
+            result.append(LayerSpec(LlamaDecoderLayerPipe, self.loader_util, block))
+        result.append(LayerSpec(LlamaRMSNormPipe, self.loader_util, self.model.norm, _estimated_size=0))
+        result.append(
+            LayerSpec(
+                LmHeadPipe,
+                self.loader_util,
+                self.lm_head,
+                logit_scale=self.logit_scale,
+                tie_weights='model.embed_tokens.weight'
+            )
+        )
+        result.append(LayerSpec(ComputeMetrics))
+        return result
+
+
+class Cohere2ForCausalLMPipe(PipelineModel, transformers.Cohere2ForCausalLM):
+    def __init__(self, config, quantization_config):
+        model_config = transformers.Cohere2Config.from_pretrained(config['model'])
+        model_config._attn_implementation = 'flash_attention_2'
+        torch.set_default_dtype(torch.bfloat16)
+        with accelerate.init_empty_weights():
+            transformers.Cohere2ForCausalLM.__init__(self, model_config)
+            PipelineModel.__init__(self, config, quantization_config, model_config)
+        torch.set_default_dtype(torch.float32)
+
+    def to_layer_specs(self):
+        # the embedding table for this model is huge; load balance it better with some heuristics
+        embedding_relative_size = 8
+
+        def initial_layer(inputs):
+            input_ids, attention_mask, labels = inputs
+            batch_size, seq_length = input_ids.shape[:2]
+            device = input_ids.device
+            position_ids = torch.arange(
+                0, seq_length, dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0)
+            return input_ids, attention_mask, position_ids, labels
+
+        embedding_on_cpu = not self.full_fine_tune
+        result = [
+            initial_layer,
+            LayerSpec(
+                EmbeddingPipe,
+                self.loader_util,
+                self.model.embed_tokens,
+                self.model,
+                embedding_on_cpu=embedding_on_cpu,
+                _estimated_size=2 if embedding_on_cpu else embedding_relative_size,
             ),
         ]
         for block in self.model.layers:
