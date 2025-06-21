@@ -57,16 +57,12 @@ def write_metrics(tb_writer, prefix, metrics, step):
 
     if len(metrics) > 3:
         tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[3].mean().item(), step)
-        tb_writer.add_scalar(f'{prefix}/top5_accuracy', metrics[4].mean().item(), step)
-        tb_writer.add_scalar(f'{prefix}/top20_accuracy', metrics[5].mean().item(), step)
+        tb_writer.add_scalar(f'{prefix}/top3_accuracy', metrics[4].mean().item(), step)
 
     return loss
 
 
 def evaluate(model_engine, eval_dataloader, tb_writer, step):
-    if is_main_process():
-        print('Running eval')
-        start = time.time()
     orig_micro_batches = model_engine.micro_batches
     model_engine.micro_batches = 1
     iterator = iter(eval_dataloader)
@@ -86,8 +82,6 @@ def evaluate(model_engine, eval_dataloader, tb_writer, step):
     eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
     loss = None
     if is_main_process():
-        duration = time.time() - start
-        tb_writer.add_scalar('eval/eval_time_sec', duration, step)
         loss = write_metrics(tb_writer, f'eval', eval_metrics, step)
     return loss
 
@@ -303,13 +297,11 @@ if __name__ == '__main__':
         def rms_ratio_fn(step):
             return torch.sqrt(torch.tensor((1 - beta**step)/(1 + beta**step))).item()
         return rms_ratio_fn
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+    model_engine.lr_scheduler  = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lr_lambda=make_rms_ratio_fn(config['optimizer'].get('beta2', 0.99))
     )
         
-    model_engine.lr_scheduler = lr_scheduler
-
     step = 1
     if args.resume_from_checkpoint:
         load_path, client_state = model_engine.load_checkpoint(
@@ -354,10 +346,9 @@ if __name__ == '__main__':
         if is_main_process():
             write_metrics(tb_writer, 'train', metrics, step)
             tb_writer.add_scalar('train/lr', optimizer.param_groups[0]['lr'], step)
-            tb_writer.add_scalar('train/epoch', step/steps_per_epoch, step)
     
         if step % config['eval_steps'] == 0:
-            saver.save_checkpoint(model_engine, train_dataloader, run_dir, step)
+            save_checkpoint(model_engine, train_dataloader, run_dir, step)
             loss = evaluate(model_engine, eval_dataloader, tb_writer, step)
             if is_main_process():
                 delta = last_eval_loss - loss if last_eval_loss is not None else 0
@@ -368,9 +359,9 @@ if __name__ == '__main__':
         step += 1
 
     if lora_config is None:
-        saver.save_full_model(model_engine, pipeline_model, run_dir, args, config, 'final_model')
+        save_full_model(model_engine, pipeline_model, run_dir, args, config, 'final_model')
     else:
-        saver.save_lora(model_engine, pipeline_model, lora_config, run_dir, args, config, 'final_lora')
+        save_lora(model_engine, pipeline_model, lora_config, run_dir, args, config, 'final_lora')
 
     if is_main_process():
         print('TRAINING COMPLETE!')
