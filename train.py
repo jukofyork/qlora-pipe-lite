@@ -90,6 +90,8 @@ def evaluate(model_engine, eval_dataloader, tb_writer, step):
     if is_main_process():
         print('Running eval')
         start = time.time()
+    orig_micro_batches = model_engine.micro_batches
+    model_engine.micro_batches = 1
     iterator = iter(eval_dataloader)
     all_metrics = None
     while True:
@@ -103,6 +105,7 @@ def evaluate(model_engine, eval_dataloader, tb_writer, step):
             all_metrics[i].append(metric)
 
     eval_dataloader.reset()
+    model_engine.micro_batches = orig_micro_batches
     eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
     loss = None
     if is_main_process():
