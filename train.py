@@ -343,20 +343,17 @@ if __name__ == '__main__':
             tb_writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], step)
     
         if step % config['eval_steps'] == 0:
-            save_checkpoint(model_engine, train_dataloader, run_dir, step)
             loss = evaluate(model_engine, eval_dataloader, tb_writer, step)
             if is_main_process():
                 delta = last_eval_loss - loss if last_eval_loss is not None else 0
                 percent_change = 100 * (1 - loss / last_eval_loss) if last_eval_loss and last_eval_loss != 0 else 0
                 print(f'Evaluation loss: {loss:.4f} (last: {last_eval_loss:.4f}, Δ: {delta:.5f} [{percent_change:.2f}%])')
             last_eval_loss = loss
-    
+            save_checkpoint(model_engine, train_dataloader, run_dir, step)
+
         step += 1
 
-    if lora_config is None:
-        save_full_model(model_engine, pipeline_model, run_dir, args, config, 'final_model')
-    else:
-        save_lora(model_engine, pipeline_model, lora_config, run_dir, args, config, 'final_lora')
+    save_model(model_engine, pipeline_model, args, lora_config, config, run_dir, 'final')
 
     if is_main_process():
         print('TRAINING COMPLETE!')

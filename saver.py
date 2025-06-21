@@ -11,11 +11,11 @@ from huggingface_hub import save_torch_state_dict
 from utils import is_main_process, safe_rmtree
 
 
-def save_lora(model_engine, pipeline_model, lora_config, run_dir, args, config, name):
+def save_lora(model_engine, pipeline_model, args, lora_config, run_dir, name):
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
     dp_id = model_engine.grid.get_data_parallel_rank()
     stage_id = model_engine.grid.get_pipe_parallel_rank()
-    save_dir = save_root + name
+    save_dir = save_root + name + '_lora'
     tmp_dir = os.path.join(save_dir, 'tmp')
     if dp_id == 0 and stage_id == 0:
         os.makedirs(tmp_dir, exist_ok=False)
@@ -46,11 +46,11 @@ def save_lora(model_engine, pipeline_model, lora_config, run_dir, args, config, 
         safe_rmtree(tmp_dir)
 
 
-def save_full_model(model_engine, pipeline_model, run_dir, args, config, name, max_shard_size='5GB'):
+def save_full_model(model_engine, pipeline_model, args, config, run_dir, name):
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
     dp_id = model_engine.grid.get_data_parallel_rank()
     stage_id = model_engine.grid.get_pipe_parallel_rank()
-    save_dir = save_root + name
+    save_dir = save_root + name + '_model'
     tmp_dir = os.path.join(save_dir, 'tmp')
     if dp_id == 0 and stage_id == 0:
         os.makedirs(tmp_dir, exist_ok=False)
@@ -63,7 +63,7 @@ def save_full_model(model_engine, pipeline_model, run_dir, args, config, name, m
         state_dict = {}
         for path in glob.glob(os.path.join(tmp_dir, '*.bin')):
             state_dict.update(torch.load(path, map_location='cpu'))
-        save_torch_state_dict(state_dict, save_dir, max_shard_size=max_shard_size)
+        save_torch_state_dict(state_dict, save_dir, max_shard_size='5GB')
         shutil.copy(args.config, save_dir)
         if hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None:
             shutil.copy(args.deepspeed_config, save_dir)
@@ -80,6 +80,13 @@ def save_full_model(model_engine, pipeline_model, run_dir, args, config, name, m
             if os.path.basename(path) in additional_files_to_copy:
                 shutil.copy(path, save_dir)
         safe_rmtree(tmp_dir)
+
+
+def save_model(model_engine, pipeline_model, args, lora_config, config, run_dir, name):
+    if lora_config is None:
+        save_full_model(model_engine, pipeline_model, args, config, run_dir, name)
+    else:
+        save_lora(model_engine, pipeline_model, args, lora_config, run_dir, name)
 
 
 def save_checkpoint(model_engine, train_dataloader, run_dir, step):
