@@ -156,8 +156,7 @@ def create_lora_config(config, target_modules, layers_to_transform):
         lora_dropout=config['lora_dropout'] if 'lora_dropout' in config else 0,
         layers_to_transform=layers_to_transform if layers_to_transform else None,
         bias='none',
-        task_type='CAUSAL_LM',
-        use_dora=config.get('use_dora', False)
+        task_type='CAUSAL_LM'
     )
 
 
@@ -368,7 +367,7 @@ if __name__ == '__main__':
         do_checkpoint = False
         if is_main_process():
             current_time = time.time()
-            if (current_time - last_checkpoint_time) / 60 >= config.get('checkpoint_every_n_minutes', 60):
+            if (current_time - last_checkpoint_time) / 60 >= config.get('checkpoint_interval', 60):
                 do_checkpoint = True
                 last_checkpoint_time = current_time
         # Broadcast decision to ensure all processes checkpoint together

@@ -1,5 +1,6 @@
 import os
 import math
+import re
 from inspect import signature
 
 import torch
@@ -14,6 +15,9 @@ from accelerate.utils import set_module_tensor_to_device
 
 from utils import is_main_process
 from kernels.cross_entropy_loss import Fast_CrossEntropyLoss
+
+
+LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX = r'^language_model\.'
 
 
 def move_data_to_device(module, device):
@@ -123,8 +127,10 @@ def _partial_module_name_match(full_name, list_to_match):
 
 
 def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_config):
-    '''Replace a Linear layer with a BNB quantized version.'''
-    if quantization_config.llm_int8_skip_modules is not None and _partial_module_name_match(full_name, quantization_config.llm_int8_skip_modules):
+    """Replace a Linear layer with a BNB quantized version."""
+    if quantization_config.llm_int8_skip_modules is not None and _partial_module_name_match(
+        full_name, quantization_config.llm_int8_skip_modules
+    ):
         return
     module = parent_modules_map[name]
     with accelerate.init_empty_weights():
@@ -134,7 +140,7 @@ def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_c
             in_features = module.in_features
             out_features = module.out_features
 
-        if quantization_config.quantization_method() == "llm_int8":
+        if quantization_config.quantization_method() == 'llm_int8':
             parent_modules_map[name] = bnb.nn.Linear8bitLt(
                 in_features,
                 out_features,
@@ -144,8 +150,8 @@ def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_c
             )
         else:
             extra_kwargs = (
-                {"quant_storage": quantization_config.bnb_4bit_quant_storage}
-                if "quant_storage" in list(signature(bnb.nn.Linear4bit).parameters)
+                {'quant_storage': quantization_config.bnb_4bit_quant_storage}
+                if 'quant_storage' in list(signature(bnb.nn.Linear4bit).parameters)
                 else {}
             )
             parent_modules_map[name] = bnb.nn.Linear4bit(
@@ -161,6 +167,46 @@ def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_c
         parent_modules_map[name].source_cls = type(module)
         # Force requires grad to False to avoid unexpected errors
         parent_modules_map[name].requires_grad_(False)
+
+
+def _recursively_replace_with_quantized_linear(
+    model,
+    modules_to_not_convert=None,
+    current_key_name=None,
+    quantization_config=None,
+):
+    """
+    Returns the converted model and a boolean that indicates if the conversion has been successful or not.
+    """
+    for name, module in model.named_children():
+        if current_key_name is None:
+            current_key_name = []
+        current_key_name.append(name)
+
+        if (isinstance(module, nn.Linear) or isinstance(module, nn.Conv1d)) and name not in modules_to_not_convert:
+            # Check if the current key is not in the `modules_to_not_convert`
+            current_key_name_str = '.'.join(current_key_name)
+            if not any(
+                (key + '.' in current_key_name_str) or (key == current_key_name_str) for key in modules_to_not_convert
+            ):
+                _replace_with_bnb_linear(model._modules, name, current_key_name_str, quantization_config)
+
+                # copy over the original_name attribute we added earlier (needed for loading weights)
+                for orig_name, orig_p in module.named_parameters():
+                    if hasattr(orig_p, 'original_name'):
+                        for new_name, new_p in model._modules[name].named_parameters():
+                            if new_name == orig_name:
+                                new_p.original_name = orig_p.original_name
+
+        if len(list(module.children())) > 0:
+            _recursively_replace_with_quantized_linear(
+                module,
+                modules_to_not_convert,
+                current_key_name,
+                quantization_config,
+            )
+        # Remove the last key for recursion
+        current_key_name.pop(-1)
 
 
 class LoaderUtil:
@@ -189,6 +235,7 @@ class LoaderUtil:
         if self.loaded_state_dict is None or leaf_file != self.loaded_state_dict[0]:
             print(f'loading checkpoint file {leaf_file}')
             state_dict = transformers.modeling_utils.load_state_dict(os.path.join(self.model_path, leaf_file))
+            state_dict = {re.sub(LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX, '', k): v for k, v in state_dict.items()}
             self.loaded_state_dict = (leaf_file, state_dict)
         return self.loaded_state_dict[1]
 
@@ -198,7 +245,7 @@ class LoaderUtil:
         modules_to_not_convert = self.modules_to_not_quantize
         if not isinstance(modules_to_not_convert, list):
             modules_to_not_convert = [modules_to_not_convert]
-        _replace_with_bnb_linear(
+        _recursively_replace_with_quantized_linear(
             module, modules_to_not_convert=modules_to_not_convert, quantization_config=self.quantization_config
         )
         # Make sure to set this or PEFT (and probably other things) will break in strange ways.
