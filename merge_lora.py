@@ -37,7 +37,7 @@ if (lora_path / 'adapter_model.safetensors').exists():
         for key, value in tqdm(lora_state.items()):
             lora_state[key] = value.to('cuda')
 else:
-    lora_state = torch.load(lora_path / 'adapter_model.bin', map_location=device)
+    lora_state = torch.load(lora_path / 'adapter_model.bin', map_location=device, weights_only=True)
 
 def find_lora_weights(key):
     lora_A = None

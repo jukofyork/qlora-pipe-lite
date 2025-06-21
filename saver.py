@@ -35,7 +35,7 @@ def save_lora(model_engine, pipeline_model, args, lora_config, run_dir, name):
     if dp_id == 0 and stage_id == 0:
         state_dict = {}
         for path in glob.glob(os.path.join(tmp_dir, '*.bin')):
-            state_dict.update(torch.load(path, map_location='cpu'))
+            state_dict.update(torch.load(path, map_location='cpu', weights_only=True))
         torch.save(state_dict, os.path.join(save_dir, 'adapter_model.bin'))
         lora_config.save_pretrained(save_dir)
         shutil.copy(args.config, save_dir)
@@ -60,7 +60,7 @@ def save_full_model(model_engine, pipeline_model, args, config, run_dir, name):
     if dp_id == 0 and stage_id == 0:
         state_dict = {}
         for path in glob.glob(os.path.join(tmp_dir, '*.bin')):
-            state_dict.update(torch.load(path, map_location='cpu'))
+            state_dict.update(torch.load(path, map_location='cpu', weights_only=True))
         save_torch_state_dict(state_dict, save_dir, max_shard_size='5GB')
         shutil.copy(args.config, save_dir)
         if hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None:
