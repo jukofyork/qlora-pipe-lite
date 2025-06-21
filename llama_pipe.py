@@ -179,9 +179,6 @@ class Phi3DecoderLayerPipe(nn.Module):
         return result
 
 
-# A little bit of inheritance and MRO trickery since LlamaForCausalLM.__init__ only takes a
-# positional argument. We inherit PipelineModel first, but call LlamaForCausalLM init first,
-# and make sure PipelineModel doesn't have a super().__init__() call.
 class LlamaForCausalLMPipe(PipelineModel, transformers.LlamaForCausalLM):
     def __init__(self, config, quantization_config):
         model_config = transformers.LlamaConfig.from_pretrained(config['model'])

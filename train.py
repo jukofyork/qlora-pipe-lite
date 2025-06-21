@@ -45,16 +45,7 @@ def get_most_recent_run_dir(output_dir):
 
 def write_metrics(tb_writer, prefix, metrics, step):
     loss = metrics[0].mean().item()
-    tb_writer.add_scalar(f'{prefix}/cross_entropy_loss', loss, step)
-
-    if len(metrics) > 1:
-        tb_writer.add_scalar(f'{prefix}/entropy', metrics[1].view(-1).mean().item(), step)
-
-    if len(metrics) > 2:
-        tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[2].mean().item(), step)
-        tb_writer.add_scalar(f'{prefix}/top3_accuracy', metrics[3].mean().item(), step)
-        tb_writer.add_scalar(f'{prefix}/top10_accuracy', metrics[4].mean().item(), step)
-
+    tb_writer.add_scalar(f'{prefix}/loss', loss, step)
     return loss
 
 
@@ -151,12 +142,10 @@ def create_lora_config(config, target_modules, layers_to_transform):
     """Create LoRA configuration."""
     return LoraConfig(
         r=config['lora_rank'],
-        lora_alpha=config['lora_alpha'],
+        lora_alpha=config.get('lora_alpha', round(config['lora_rank'] ** 0.5)),  # rslora: s = 1/sqrt(rank)
+        lora_dropout=config['lora_dropout'] if 'lora_dropout' in config else 0.0,
         target_modules=target_modules if target_modules else 'all-linear',
-        modules_to_save=config['modules_to_save'] if 'modules_to_save' in config else [],
-        lora_dropout=config['lora_dropout'] if 'lora_dropout' in config else 0,
         layers_to_transform=layers_to_transform if layers_to_transform else None,
-        bias='none',
         task_type='CAUSAL_LM'
     )
 
@@ -255,11 +244,11 @@ if __name__ == '__main__':
             "params": model_parameters,
             "lr": optim_config['lr'],
             "betas": (optim_config.get('beta1', 0.9), optim_config.get('beta2', 0.99)),
-            "weight_decay": optim_config.get('weight_decay', 0.01),
+            "weight_decay": optim_config.get('weight_decay', 0.0),
             "eps": optim_config.get('eps', 1e-6),
             "kahan_sum": True
         }
-        return optimi.AdamW(**optimizer_kwargs)            
+        return optimi.AdamW(**optimizer_kwargs) 
 
     model_engine, optimizer = engine.initialize(
         args=args,
@@ -283,13 +272,13 @@ if __name__ == '__main__':
     model_engine.set_dataloader(train_dataloader)
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
     model_engine.total_steps = steps_per_epoch * config['epochs']
-
-    # Calculate evaluation steps within each epoch
-    evals_per_epoch = config.get('evals_per_epoch', 10)
-    eval_steps_in_epoch = set()
-    for i in range(1, evals_per_epoch + 1):
-        step_in_epoch = round(i * steps_per_epoch / evals_per_epoch)
-        eval_steps_in_epoch.add(step_in_epoch)
+    
+    # Calculate evaluation step indices to use across the entire run
+    evals_per_run = config.get('evals_per_run', 10)
+    eval_step_indices = set()
+    for i in range(1, evals_per_run):
+        step_in_run = round(i * model_engine.total_steps / (evals_per_run - 1))
+        eval_step_indices.add(step_in_run)
     
     # handle Deepspeed optimizer wrapper (e.g. BF16_Optimizer)
     optimizer = getattr(optimizer, 'optimizer', optimizer)
@@ -355,9 +344,8 @@ if __name__ == '__main__':
             write_metrics(tb_writer, 'train', metrics, step)
             tb_writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], step)
         
-        # Periodic evaluation based on position within epoch
-        step_in_epoch = (step - 1) % steps_per_epoch + 1
-        if step_in_epoch in eval_steps_in_epoch:
+        # Periodic evaluation based on global step
+        if step in eval_step_indices:
             loss = evaluate(model_engine, eval_dataloader, tb_writer, step)
             if is_main_process():
                 percent_change = (loss / last_eval_loss - 1) * 100

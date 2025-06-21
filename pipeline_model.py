@@ -45,28 +45,6 @@ def set_data(module, data):
         module.weight.data = data
 
 
-def entropy_fn(logits):
-    result = []
-    # There is a very wide range of chuck sizes that cause no increase in memory reported by
-    # nvidia-smi (Torch re-using blocks of memory?). If you try to compute it as one tensor,
-    # memory usage is huge. Chuck size of 128 seems good enough for now.
-    for logits_chuck in torch.split(logits, 128):
-        result.append(torch.distributions.Categorical(logits=logits_chuck).entropy())
-    return torch.cat(result).float()
-
-
-def top_k_accuracy(logits, labels, k_list, ignore_index=-100):
-    keep = (labels != ignore_index)
-    labels = labels[keep].view(-1, 1)
-    max_k = max(k_list)
-    _, top_k_predictions = torch.topk(logits, max_k, dim=-1, sorted=True)
-    top_k_predictions = top_k_predictions[keep]
-    accuracies = []
-    for k in k_list:
-        accuracies.append(torch.any(top_k_predictions[:, :k] == labels, dim=-1).to(torch.float32).mean())
-    return accuracies
-
-
 class LayerSpec(ds_pipe_module.LayerSpec):
     def __init__(self, typename, *module_args, **module_kwargs):
         super().__init__(typename, *module_args, **module_kwargs)
@@ -99,11 +77,7 @@ class ComputeMetrics(nn.Module):
 
         loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels)[valid_loss]
        
-        with torch.no_grad():
-            entropy = entropy_fn(shift_logits)[valid_loss]   
-            accuracies = top_k_accuracy(shift_logits, shift_labels, k_list=[1, 3, 10])
-        loss = loss_unreduced.mean()
-        return loss, entropy, *accuracies
+        return loss_unreduced.mean()
 
 
 class PipelineModel(nn.Module):
