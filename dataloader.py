@@ -145,10 +145,10 @@ class PipelineDataLoader:
 
     def _create_dataloader(self):
         def collate_fn(examples):
-            # Simple collation since all sequences are same length
-            input_ids = torch.stack([torch.tensor(ex['input_ids']) for ex in examples])
-            attention_mask = torch.stack([torch.tensor(ex['attention_mask']) for ex in examples])
-            labels = torch.stack([torch.tensor(ex['labels']) for ex in examples])
+            # Use as_tensor to handle both lists and tensors gracefully
+            input_ids = torch.stack([torch.as_tensor(ex['input_ids']) for ex in examples])
+            attention_mask = torch.stack([torch.as_tensor(ex['attention_mask']) for ex in examples])
+            labels = torch.stack([torch.as_tensor(ex['labels']) for ex in examples])
             
             return ((input_ids, attention_mask, labels), None)
         

@@ -73,9 +73,9 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     )
     dataset = dataset.map(
         lambda x: {
-            'input_ids': torch.tensor(x['input_ids']),
+            'input_ids': torch.as_tensor(x['input_ids']),
             'attention_mask': torch.ones(len(x['input_ids']), dtype=torch.long), 
-            'labels': torch.tensor(x['input_ids']),
+            'labels': torch.as_tensor(x['input_ids']),
             'length': len(x['input_ids'])
         },
         desc='adding attention_mask, labels, and length',
