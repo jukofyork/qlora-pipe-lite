@@ -223,13 +223,7 @@ class LlamaForCausalLMPipe(PipelineModel, transformers.LlamaForCausalLM):
             tie_weights='model.embed_tokens.weight' if self.config.tie_word_embeddings else None,
             _estimated_size=0
         ))
-        result.append(
-            LayerSpec(
-                ComputeMetrics,
-                loss_type=self.loss_type,
-                focal_loss_gamma=self.focal_loss_gamma
-            )
-        )
+        result.append(LayerSpec(ComputeMetrics))
         return result
 
 
@@ -274,13 +268,7 @@ class Qwen2ForCausalLMPipe(PipelineModel, transformers.Qwen2ForCausalLM):
             tie_weights='model.embed_tokens.weight' if self.config.tie_word_embeddings else None,
             _estimated_size=0
         ))
-        result.append(
-            LayerSpec(
-                ComputeMetrics,
-                loss_type=self.loss_type,
-                focal_loss_gamma=self.focal_loss_gamma
-            )
-        )
+        result.append(LayerSpec(ComputeMetrics))
         return result
 
 class CohereForCausalLMPipe(PipelineModel, transformers.CohereForCausalLM):
