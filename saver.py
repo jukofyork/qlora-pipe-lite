@@ -6,7 +6,7 @@ import shutil
 import deepspeed
 import torch
 import transformers
-from safetensors.torch import save_file
+from huggingface_hub import save_torch_state_dict
 
 from utils import is_main_process, safe_rmtree
 
@@ -63,17 +63,7 @@ def save_full_model(model_engine, pipeline_model, run_dir, args, config, name, m
         state_dict = {}
         for path in glob.glob(os.path.join(tmp_dir, '*.bin')):
             state_dict.update(torch.load(path, map_location='cpu'))
-        shards, index = transformers.modeling_utils.shard_checkpoint(
-            state_dict, max_shard_size=max_shard_size, weights_name='model.safetensors'
-        )
-        for shard_file, shard in shards.items():
-            save_file(shard, os.path.join(save_dir, shard_file), metadata={'format': 'pt'})
-        if index is not None:
-            save_index_file = 'model.safetensors.index.json'
-            save_index_file = os.path.join(save_dir, save_index_file)
-            with open(save_index_file, 'w', encoding='utf-8') as f:
-                content = json.dumps(index, indent=2, sort_keys=True) + '\n'
-                f.write(content)
+        save_torch_state_dict(state_dict, save_dir, max_shard_size=max_shard_size)
         shutil.copy(args.config, save_dir)
         if hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None:
             shutil.copy(args.deepspeed_config, save_dir)
