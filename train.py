@@ -327,7 +327,7 @@ if __name__ == '__main__':
 
     tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
    
-    last_eval_loss = evaluate(model_engine, eval_dataloader, tb_writer, 0)
+    last_eval_loss = evaluate(model_engine, eval_dataloader, tb_writer, step - 1)
     if is_main_process():
         print(f'Initial evaluation loss: {last_eval_loss:.4f}')
     
