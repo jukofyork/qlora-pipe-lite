@@ -10,6 +10,7 @@ from transformers.integrations import get_keys_to_not_convert
 from deepspeed.runtime.pipe import module as ds_pipe_module
 import bitsandbytes as bnb
 import accelerate
+from accelerate.utils import set_module_tensor_to_device
 
 from utils import is_main_process
 from kernels.cross_entropy_loss import Fast_CrossEntropyLoss
@@ -255,8 +256,9 @@ class LoaderUtil:
 
     def load_state_dict_into_module(self, module):
         print(f'load params into module {type(module)}')
-        # bnb needs to replace with quantized linear before weights are loaded
-        self.maybe_quantize(module)
+        if isinstance(self.quantization_config, transformers.BitsAndBytesConfig):
+            # bnb needs to replace with quantized linear before weights are loaded
+            self.maybe_quantize(module)
         param_renaming_map = {p.original_name: new_name for new_name, p in module.named_parameters()}
         expected_keys = [p.original_name for p in module.parameters()]
         # If we have any extra attributes on the parameter, loading with BNB 4bit params breaks, so delete them.
@@ -265,20 +267,18 @@ class LoaderUtil:
 
         if self.checkpoint_metadata is not None:
             weight_map = self.checkpoint_metadata['weight_map']
-            needed_checkpoint_files = set(weight_map[key.replace('orig.', '')] for key in expected_keys)
+            weight_map = {re.sub(LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX, '', k): v for k, v in weight_map.items()}
+            needed_checkpoint_files = {weight_map[key.replace('orig.', '')] for key in expected_keys}
         else:
             needed_checkpoint_files = ['model.safetensors']
 
         for checkpoint_file in needed_checkpoint_files:
             state_dict = self.get_partial_state_dict(checkpoint_file)
             renamed_state_dict = {param_renaming_map[k]: v for k, v in state_dict.items() if k in param_renaming_map}
-            # Use some transformers internals to avoid writing a bunch of code ourselves.
-            # Might be a bit brittle...
-            transformers.modeling_utils._load_state_dict_into_meta_model(
-                module,
-                renamed_state_dict,
-                '',
-                list(renamed_state_dict.keys()),
-            )
+            for name, param in module.named_parameters():
+                if name in renamed_state_dict:
+                    set_module_tensor_to_device(module, name, device='cpu', value=renamed_state_dict[name])
 
         module.to(self.device)
+        if not isinstance(self.quantization_config, transformers.BitsAndBytesConfig):
+            self.maybe_quantize(module)
