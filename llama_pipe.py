@@ -4,7 +4,6 @@ import transformers
 import accelerate
 
 from pipeline_model import ComputeMetrics, LayerSpec, PipelineModel, move_data_to_device, set_data
-from utils import DTYPE_MAP
 
 class EmbeddingPipe(nn.Module):
     def __init__(self, loader_util, orig, model, embedding_on_cpu=False):
@@ -139,12 +138,6 @@ class LlamaDecoderLayerPipe(nn.Module):
             set_cpu_data()
         return result
 
-    def offload_mlp_to_cpu(self):
-        self.mlp_offloaded_to_cpu = True
-        move_data_to_device(self.orig.mlp.up_proj, 'cpu')
-        move_data_to_device(self.orig.mlp.down_proj, 'cpu')
-        move_data_to_device(self.orig.mlp.gate_proj, 'cpu')
-
 
 class Phi3DecoderLayerPipe(nn.Module):
     def __init__(self, loader_util, orig):
@@ -178,11 +171,6 @@ class Phi3DecoderLayerPipe(nn.Module):
             set_cpu_data()
         return result
 
-    def offload_mlp_to_cpu(self):
-        self.mlp_offloaded_to_cpu = True
-        move_data_to_device(self.orig.mlp.gate_up_proj, 'cpu')
-        move_data_to_device(self.orig.mlp.down_proj, 'cpu')
-
 
 # A little bit of inheritance and MRO trickery since LlamaForCausalLM.__init__ only takes a
 # positional argument. We inherit PipelineModel first, but call LlamaForCausalLM init first,
@@ -191,7 +179,7 @@ class LlamaForCausalLMPipe(PipelineModel, transformers.LlamaForCausalLM):
     def __init__(self, config, quantization_config):
         model_config = transformers.LlamaConfig.from_pretrained(config['model'])
         model_config._attn_implementation = 'flash_attention_2'
-        torch.set_default_dtype(DTYPE_MAP[config.get('model_weight_dtype', 'bfloat16')])
+        torch.set_default_dtype(torch.bfloat16)
         with accelerate.init_empty_weights():
             transformers.LlamaForCausalLM.__init__(self, model_config)
             PipelineModel.__init__(self, config, quantization_config, model_config)
@@ -215,7 +203,7 @@ class LlamaForCausalLMPipe(PipelineModel, transformers.LlamaForCausalLM):
                 self.loader_util,
                 self.model.embed_tokens,
                 self.model,
-                embedding_on_cpu=not self.train_config['full_fine_tune']
+                embedding_on_cpu=not self.full_fine_tune
             ),
         ]
         for block in self.model.layers:
@@ -242,7 +230,7 @@ class Qwen2ForCausalLMPipe(PipelineModel, transformers.Qwen2ForCausalLM):
     def __init__(self, config, quantization_config):
         model_config = transformers.Qwen2Config.from_pretrained(config['model'])
         model_config._attn_implementation = 'flash_attention_2'
-        torch.set_default_dtype(DTYPE_MAP[config.get('model_weight_dtype', 'bfloat16')])
+        torch.set_default_dtype(torch.bfloat16)
         with accelerate.init_empty_weights():
             transformers.Qwen2ForCausalLM.__init__(self, model_config)
             PipelineModel.__init__(self, config, quantization_config, model_config)
@@ -266,7 +254,7 @@ class Qwen2ForCausalLMPipe(PipelineModel, transformers.Qwen2ForCausalLM):
                 self.loader_util,
                 self.model.embed_tokens,
                 self.model,
-                embedding_on_cpu=not self.train_config['full_fine_tune']
+                embedding_on_cpu=not self.full_fine_tune
             ),
         ]
         for block in self.model.layers:
@@ -292,7 +280,7 @@ class CohereForCausalLMPipe(PipelineModel, transformers.CohereForCausalLM):
     def __init__(self, config, quantization_config):
         model_config = transformers.CohereConfig.from_pretrained(config['model'])
         model_config._attn_implementation = 'flash_attention_2'
-        torch.set_default_dtype(DTYPE_MAP[config.get('model_weight_dtype', 'bfloat16')])
+        torch.set_default_dtype(torch.bfloat16)
         with accelerate.init_empty_weights():
             transformers.CohereForCausalLM.__init__(self, model_config)
             PipelineModel.__init__(self, config, quantization_config, model_config)
@@ -312,7 +300,7 @@ class CohereForCausalLMPipe(PipelineModel, transformers.CohereForCausalLM):
             position_ids = position_ids.unsqueeze(0)
             return input_ids, attention_mask, position_ids, labels
 
-        embedding_on_cpu = not self.train_config['full_fine_tune']
+        embedding_on_cpu = not self.full_fine_tune
         result = [
             initial_layer,
             LayerSpec(
@@ -351,7 +339,7 @@ class Phi3ForCausalLMPipe(PipelineModel, transformers.Phi3ForCausalLM):
     def __init__(self, config, quantization_config):
         model_config = transformers.Phi3Config.from_pretrained(config['model'])
         model_config._attn_implementation = 'flash_attention_2'
-        torch.set_default_dtype(DTYPE_MAP[config.get('model_weight_dtype', 'bfloat16')])
+        torch.set_default_dtype(torch.bfloat16)
         with accelerate.init_empty_weights():
             transformers.Phi3ForCausalLM.__init__(self, model_config)
             PipelineModel.__init__(self, config, quantization_config, model_config)
@@ -375,7 +363,7 @@ class Phi3ForCausalLMPipe(PipelineModel, transformers.Phi3ForCausalLM):
                 self.loader_util,
                 self.model.embed_tokens,
                 self.model,
-                embedding_on_cpu=not self.train_config['full_fine_tune']
+                embedding_on_cpu=not self.full_fine_tune
             ),
         ]
         for block in self.model.layers:
@@ -396,7 +384,7 @@ class Gemma2ForCausalLMPipe(PipelineModel, transformers.Gemma2ForCausalLM):
         model_config = transformers.Gemma2Config.from_pretrained(config['model'])
         # TODO: change this when Gemma works with other attn implementations
         model_config._attn_implementation = 'eager'
-        torch.set_default_dtype(DTYPE_MAP[config.get('model_weight_dtype', 'bfloat16')])
+        torch.set_default_dtype(torch.bfloat16)
         with accelerate.init_empty_weights():
             transformers.Gemma2ForCausalLM.__init__(self, model_config)
             PipelineModel.__init__(self, config, quantization_config, model_config)
@@ -417,7 +405,7 @@ class Gemma2ForCausalLMPipe(PipelineModel, transformers.Gemma2ForCausalLM):
             position_ids = position_ids.unsqueeze(0)
             return input_ids, attention_mask, position_ids, labels
 
-        embedding_on_cpu = not self.train_config['full_fine_tune']
+        embedding_on_cpu = not self.full_fine_tune
         result = [
             initial_layer,
             LayerSpec(
@@ -448,7 +436,7 @@ class MistralForCausalLMPipe(PipelineModel, transformers.MistralForCausalLM):
     def __init__(self, config, quantization_config):
         model_config = transformers.MistralConfig.from_pretrained(config['model'])
         model_config._attn_implementation = 'flash_attention_2'
-        torch.set_default_dtype(DTYPE_MAP[config.get('model_weight_dtype', 'bfloat16')])
+        torch.set_default_dtype(torch.bfloat16)
         with accelerate.init_empty_weights():
             transformers.MistralForCausalLM.__init__(self, model_config)
             PipelineModel.__init__(self, config, quantization_config, model_config)
@@ -472,7 +460,7 @@ class MistralForCausalLMPipe(PipelineModel, transformers.MistralForCausalLM):
                 self.loader_util,
                 self.model.embed_tokens,
                 self.model,
-                embedding_on_cpu=not self.train_config['full_fine_tune']
+                embedding_on_cpu=not self.full_fine_tune
             ),
         ]
         for block in self.model.layers:

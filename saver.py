@@ -10,7 +10,7 @@ import torch
 import transformers
 
 from safetensors.torch import save_file
-from utils import is_main_process, DTYPE_MAP
+from utils import is_main_process
 
 
 last_checkpoint_time = None
@@ -28,11 +28,6 @@ def need_to_checkpoint(config):
     result = [checkpoint]
     torch.distributed.broadcast_object_list(result, src=0)
     return result[0]
-
-
-def convert_state_dict_dtype(state_dict, dtype):
-    for key, v in state_dict.items():
-        state_dict[key] = v.to(device='cpu', dtype=DTYPE_MAP[dtype])
 
 
 class Saver:
@@ -77,8 +72,6 @@ class Saver:
                         print(f'WARNING: parameter {name} requires_grad but does not have original_name. Not saving it.')
                         continue
                     partial_state_dict[p.original_name.replace('.default', '').replace('.modules_to_save', '')] = p.detach()
-                    if 'save_dtype' in self.config:
-                        convert_state_dict_dtype(partial_state_dict, self.config['save_dtype'])
             torch.save(partial_state_dict, os.path.join(tmp_dir, f'state_dict_{stage_id}.bin'))
         deepspeed.comm.barrier()
         if dp_id == 0 and stage_id == 0:
@@ -103,8 +96,6 @@ class Saver:
         if dp_id == 0:
             # With BF16_Optimizer, we get pickle errors unless we do p.detach(). I have no idea why.
             partial_state_dict = {p.original_name: p.detach() for p in self.pipeline_model.parameters()}
-            if 'save_dtype' in self.config:
-                convert_state_dict_dtype(partial_state_dict, self.config['save_dtype'])
             torch.save(partial_state_dict, os.path.join(tmp_dir, f'state_dict_{stage_id}.bin'))
         deepspeed.comm.barrier()
         if dp_id == 0 and stage_id == 0:

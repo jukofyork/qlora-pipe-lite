@@ -5,8 +5,6 @@ import torch
 from deepspeed import comm as dist
 from contextlib import contextmanager
 
-DTYPE_MAP = {'float32': torch.float32, 'float16': torch.float16, 'bfloat16': torch.bfloat16}
-
 def is_main_process():
     return dist.get_rank() == 0
 
