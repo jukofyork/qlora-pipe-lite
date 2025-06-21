@@ -8,7 +8,7 @@ import torch
 import transformers
 from safetensors.torch import save_file
 
-from utils.utils import is_main_process, safe_rmtree
+from utils import is_main_process, safe_rmtree
 
 
 def save_lora(model_engine, pipeline_model, lora_config, run_dir, args, config, name):
