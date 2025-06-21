@@ -284,6 +284,13 @@ if __name__ == '__main__':
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
     model_engine.total_steps = steps_per_epoch * config['epochs']
 
+    # Calculate evaluation steps within each epoch
+    evals_per_epoch = config.get('evals_per_epoch', 10)
+    eval_steps_in_epoch = set()
+    for i in range(1, evals_per_epoch + 1):
+        step_in_epoch = round(i * steps_per_epoch / evals_per_epoch)
+        eval_steps_in_epoch.add(step_in_epoch)
+    
     # handle Deepspeed optimizer wrapper (e.g. BF16_Optimizer)
     optimizer = getattr(optimizer, 'optimizer', optimizer)
    
@@ -331,29 +338,53 @@ if __name__ == '__main__':
     if is_main_process():
         print(f'Initial evaluation loss: {last_eval_loss:.4f}')
     
+    # Initialize checkpoint timing on main process only
+    last_checkpoint_time = time.time() if is_main_process() else None
+    
     while train_dataloader.epoch <= config['epochs']:
+        # Memory cleanup before each training step
         gc.collect()
         torch.cuda.empty_cache()
         
+        # Forward/backward pass and optimizer step
         metrics = model_engine.train_batch()
         train_dataloader.sync_epoch()
         
+        # Log training metrics to tensorboard
         if is_main_process():
             write_metrics(tb_writer, 'train', metrics, step)
             tb_writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], step)
-    
-        if step % config['eval_steps'] == 0:
+        
+        # Periodic evaluation based on position within epoch
+        step_in_epoch = (step - 1) % steps_per_epoch + 1
+        if step_in_epoch in eval_steps_in_epoch:
             loss = evaluate(model_engine, eval_dataloader, tb_writer, step)
             if is_main_process():
                 delta = last_eval_loss - loss if last_eval_loss is not None else 0
                 percent_change = 100 * (1 - loss / last_eval_loss) if last_eval_loss and last_eval_loss != 0 else 0
                 print(f'Evaluation loss: {loss:.4f} (last: {last_eval_loss:.4f}, Δ: {delta:.5f} [{percent_change:.2f}%])')
             last_eval_loss = loss
+        
+        # Time-based checkpointing: main process decides, broadcasts to all
+        do_checkpoint = False
+        if is_main_process():
+            current_time = time.time()
+            if (current_time - last_checkpoint_time) / 60 >= config.get('checkpoint_every_n_minutes', 60):
+                do_checkpoint = True
+                last_checkpoint_time = current_time
+        # Broadcast decision to ensure all processes checkpoint together
+        result = [do_checkpoint]
+        torch.distributed.broadcast_object_list(result, src=0)
+        do_checkpoint = result[0]
+        if do_checkpoint:
             save_checkpoint(model_engine, train_dataloader, run_dir, step)
+            if is_main_process():
+                prune_checkpoints(run_dir, config.get('keep_states', -1))
 
         step += 1
-
+    
+    # Save final model when training completes
     save_model(model_engine, pipeline_model, args, lora_config, config, run_dir, 'final')
-
+    
     if is_main_process():
         print('TRAINING COMPLETE!')

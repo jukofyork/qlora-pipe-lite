@@ -100,3 +100,33 @@ def save_checkpoint(model_engine, train_dataloader, run_dir, step):
         save_latest=True,
         exclude_frozen_parameters=True,
     )
+    
+    
+def prune_checkpoints(run_dir, keep_states):
+    if keep_states <= 0:
+        return
+
+    save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
+    
+    # Find all checkpoint directories
+    checkpoint_pattern = os.path.join(save_root, 'global_step*')
+    checkpoints = []
+    
+    for path in glob.glob(checkpoint_pattern):
+        if os.path.isdir(path):
+            # Extract step number for sorting
+            basename = os.path.basename(path)
+            if basename.startswith('global_step'):
+                try:
+                    step_num = int(basename[11:])  # Remove 'global_step' prefix
+                    checkpoints.append((step_num, path))
+                except ValueError:
+                    continue
+    
+    # Sort by step number and keep only the most recent ones
+    checkpoints.sort(key=lambda x: x[0])
+    
+    while len(checkpoints) > keep_states:
+        step_num, path = checkpoints.pop(0)
+        print(f'Deleting checkpoint: global_step{step_num}')
+        safe_rmtree(path)
