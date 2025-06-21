@@ -325,7 +325,7 @@ if __name__ == '__main__':
         return rms_ratio_fn
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lr_lambda=make_rms_ratio_fn(optim_config.get('beta2', 0.99))
+        lr_lambda=make_rms_ratio_fn(config['optimizer'].get('beta2', 0.99))
     )
         
     model_engine.lr_scheduler = lr_scheduler
