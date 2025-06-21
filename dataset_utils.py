@@ -80,13 +80,15 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
 
 
 def load_datasets(config, tokenizer):
-    if 'datasets' not in config:
-        raise ValueError('Need to specify at least one dataset')
-
     if 'sequence_len' not in config:
-        raise ValueError('Need to specify at sequence_len')
+        raise ValueError('Need to specify a sequence_len')
     sequence_len = config['sequence_len']
     assert sequence_len > 0
+    # A100 wants sequence lengths to be multiples of 64, other cards are efficient with smaller, so just do 64
+    assert sequence_len % 64 == 0, f"sequence_len ({sequence_len}) must be a multiple of 64 for optimal GPU performance"
+    
+    if 'datasets' not in config:
+        raise ValueError('Need to specify at least one dataset')
 
     eval_fraction = config.get('eval_fraction', 0.01)
     assert 0 < eval_fraction < 1

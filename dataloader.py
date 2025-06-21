@@ -2,15 +2,11 @@ import math
 import torch
 from torch.utils.data import DataLoader
 import transformers
-from transformers import DataCollatorForSeq2Seq
 import accelerate
 from deepspeed import comm as dist
 from tqdm import tqdm
 
 from utils import *
-
-# A100 wants padding to multiple of 64, other cards are efficient with smaller, so just do 64
-PAD_TO_MULTIPLE = 64
 
 
 def split_batch(batch, pieces):
@@ -30,7 +26,6 @@ def shuffle_list(l, seed):
     return new_l
 
 
-# A distributed batch sampler that supports grouping by length
 class DistributedBatchSamper(torch.utils.data.Sampler):
     def __init__(self, dataset, batch_size, num_replicas, rank, batch_size_multiplier=1, shuffle=True, seed=0):
         self.dataset = dataset
@@ -92,13 +87,12 @@ class DistributedBatchSamper(torch.utils.data.Sampler):
 
 
 class PipelineDataLoader:
-    def __init__(self, dataset, tokenizer, batch_size, gradient_accumulation_steps, data_parallel_world_size, data_parallel_rank, shuffle=True, pad_to_multiple_of=PAD_TO_MULTIPLE):
+    def __init__(self, dataset, tokenizer, batch_size, gradient_accumulation_steps, data_parallel_world_size, data_parallel_rank, shuffle=True):
         assert data_parallel_rank < data_parallel_world_size
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.pad_to_multiple_of = pad_to_multiple_of
         self.data_sampler = DistributedBatchSamper(
             dataset=dataset,
             batch_size=self.batch_size,
@@ -150,26 +144,13 @@ class PipelineDataLoader:
                 yield micro_batch
 
     def _create_dataloader(self):
-        # Use transformers DataCollatorForSeq2Seq
-        data_collator = DataCollatorForSeq2Seq(
-            self.tokenizer, 
-            pad_to_multiple_of=self.pad_to_multiple_of,
-            return_tensors="pt"  # Ensure we get PyTorch tensors
-        )
-        
         def collate_fn(examples):
-            batch = data_collator(examples)
-            # Transformers collator returns dict with keys: 
-            # input_ids, attention_mask, labels (plus optional decoder_input_ids)
-            # We need to return ((input_ids, attention_mask, labels), None)
-            return (
-                (
-                    batch['input_ids'], 
-                    batch['attention_mask'], 
-                    batch.get('labels', None)  # Use get() for safety
-                ), 
-                None
-            )
+            # Simple collation since all sequences are same length
+            input_ids = torch.stack([torch.tensor(ex['input_ids']) for ex in examples])
+            attention_mask = torch.stack([torch.tensor(ex['attention_mask']) for ex in examples])
+            labels = torch.stack([torch.tensor(ex['labels']) for ex in examples])
+            
+            return ((input_ids, attention_mask, labels), None)
         
         self.dataloader = DataLoader(
             self.dataset,
