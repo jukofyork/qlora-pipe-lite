@@ -360,7 +360,7 @@ if __name__ == '__main__':
         if step_in_epoch in eval_steps_in_epoch:
             loss = evaluate(model_engine, eval_dataloader, tb_writer, step)
             if is_main_process():
-                percent_change = (loss - last_eval_loss) / 100
+                percent_change = (loss / last_eval_loss - 1) * 100
                 print(f'- Step {step} evaluation loss: {loss:.4f} (last: {last_eval_loss:.4f}, Δ: {percent_change:.2f}%)')
             last_eval_loss = loss
         
