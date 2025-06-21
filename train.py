@@ -265,8 +265,6 @@ if __name__ == '__main__':
         model_engine.gradient_accumulation_steps(),
         model_engine.grid.get_data_parallel_world_size(),
         model_engine.grid.get_data_parallel_rank(),
-        group_by_length=False,
-        batch_size_tokens=None,
     )
     model_engine.set_dataloader(train_dataloader)
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
@@ -316,8 +314,6 @@ if __name__ == '__main__':
         model_engine.grid.get_data_parallel_world_size(),
         model_engine.grid.get_data_parallel_rank(),
         shuffle=False,
-        group_by_length=False,
-        batch_size_tokens=None,
     )
 
     tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None

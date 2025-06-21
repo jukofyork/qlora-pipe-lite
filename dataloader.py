@@ -30,30 +30,22 @@ def shuffle_list(l, seed):
     return new_l
 
 
-def batch_size_tokens_after_padding(batch):
-    return max(math.ceil(pair[1] / PAD_TO_MULTIPLE) * PAD_TO_MULTIPLE for pair in batch) * len(batch)
-
-
 # A distributed batch sampler that supports grouping by length
 class DistributedBatchSamper(torch.utils.data.Sampler):
-    def __init__(self, dataset, batch_size, num_replicas, rank, batch_size_multiplier=1, shuffle=True, group_by_length=False, seed=0, batch_size_tokens=None):
+    def __init__(self, dataset, batch_size, num_replicas, rank, batch_size_multiplier=1, shuffle=True, seed=0):
         self.dataset = dataset
         self.batch_size = batch_size
-        self.batch_size_tokens = batch_size_tokens
         self.batch_size_multiplier = batch_size_multiplier
         self.num_replicas = num_replicas
         self.rank = rank
         # every global batch must be evenly divisible by this amount
         self.chunk_size = self.num_replicas * self.batch_size_multiplier
         self.shuffle = shuffle
-        self.group_by_length = group_by_length
         self.seed = seed
 
-        # Make list of (index, size). Sort or shuffle as needed.
+        # Make list of (index, size). Shuffle if needed.
         indices = list(enumerate(self.dataset['length']))
-        if self.group_by_length:
-            indices.sort(key=lambda t: t[1])
-        elif self.shuffle:
+        if self.shuffle:
             indices = shuffle_list(indices, self.seed)
 
         # Group indices together into global batches.
@@ -82,31 +74,14 @@ class DistributedBatchSamper(torch.utils.data.Sampler):
         if self.shuffle:
             global_batches = shuffle_list(global_batches, self.seed+2)
 
-        # make sure the largest batch comes first to OOM sooner rather than later
-        largest_global_batch = 0
-        max_tokens = 0
-        for global_batch_idx, batch in enumerate(global_batches):
-            total_batch_tokens = batch_size_tokens_after_padding(batch)
-            if total_batch_tokens > max_tokens:
-                max_tokens = total_batch_tokens
-                largest_global_batch = global_batch_idx
-        global_batches[0], global_batches[largest_global_batch] = global_batches[largest_global_batch], global_batches[0]
-
         batches_for_this_rank = [global_batch[self.rank:len(global_batch):self.num_replicas] for global_batch in global_batches]
         self.indices = [[i for i, _ in batch] for batch in batches_for_this_rank]
 
     def should_emit_current_batch(self, current_batch, slice):
-        if not self.batch_size_tokens:
-            batch_size_after_appending = len(current_batch) // self.chunk_size + 1
-            if batch_size_after_appending > self.batch_size:
-                return True
-            else:
-                return False
+        batch_size_after_appending = len(current_batch) // self.chunk_size + 1
+        if batch_size_after_appending > self.batch_size:
+            return True
         else:
-            global_batch_size_tokens = self.batch_size_tokens * self.chunk_size
-            current_batch_tokens_after_appending = batch_size_tokens_after_padding(current_batch + slice)
-            if len(current_batch) > 0 and current_batch_tokens_after_appending > global_batch_size_tokens:
-                return True
             return False
 
     def __iter__(self):
@@ -117,23 +92,20 @@ class DistributedBatchSamper(torch.utils.data.Sampler):
 
 
 class PipelineDataLoader:
-    def __init__(self, dataset, tokenizer, batch_size, gradient_accumulation_steps, data_parallel_world_size, data_parallel_rank, shuffle=True, group_by_length=False, pad_to_multiple_of=PAD_TO_MULTIPLE, batch_size_tokens=None):
+    def __init__(self, dataset, tokenizer, batch_size, gradient_accumulation_steps, data_parallel_world_size, data_parallel_rank, shuffle=True, pad_to_multiple_of=PAD_TO_MULTIPLE):
         assert data_parallel_rank < data_parallel_world_size
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.batch_size = batch_size
-        self.batch_size_tokens = batch_size_tokens
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.pad_to_multiple_of = pad_to_multiple_of
         self.data_sampler = DistributedBatchSamper(
             dataset=dataset,
             batch_size=self.batch_size,
-            batch_size_tokens=self.batch_size_tokens,
             batch_size_multiplier=self.gradient_accumulation_steps,
             num_replicas=data_parallel_world_size,
             rank=data_parallel_rank,
             shuffle=shuffle,
-            group_by_length=group_by_length,
         )
 
         self.epoch = 1
