@@ -79,10 +79,16 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     return dataset
 
 
-def load_datasets(config, tokenizer, sequence_len, eval_fraction):
+def load_datasets(config, tokenizer):
     if 'datasets' not in config:
         raise ValueError('Need to specify at least one dataset')
+
+    if 'sequence_len' not in config:
+        raise ValueError('Need to specify at sequence_len')
+    sequence_len = config['sequence_len']
     assert sequence_len > 0
+
+    eval_fraction = config.get('eval_fraction', 0.01)
     assert 0 < eval_fraction < 1
 
     with zero_first(is_main_process()):

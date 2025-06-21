@@ -378,7 +378,7 @@ if __name__ == '__main__':
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    train_data, eval_data_map = load_datasets(config, tokenizer)
+    train_data, eval_data = load_datasets(config, tokenizer)
 
     if args.debug_dataset:
         if is_main_process():
@@ -492,8 +492,8 @@ if __name__ == '__main__':
         model_engine.gradient_accumulation_steps(),
         model_engine.grid.get_data_parallel_world_size(),
         model_engine.grid.get_data_parallel_rank(),
-        group_by_length=False if 'group_by_length' not in config else config['group_by_length'],
-        batch_size_tokens=None if 'batch_size_tokens' not in config else config['batch_size_tokens'],
+        group_by_length=False,
+        batch_size_tokens=None,
     )
     model_engine.set_dataloader(train_dataloader)
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
@@ -501,7 +501,7 @@ if __name__ == '__main__':
 
     if is_main_process():
         # Warn if eval dataset is unusually large compared to the eval steps
-        eval_data_length = sum([len(eval_data) for eval_data in eval_data_map.values()])
+        eval_data_length = len(eval_data)
         train_data_length = len(train_data)
         evals_per_epoch = steps_per_epoch / config['eval_steps']
         relative_eval_time = evals_per_epoch * eval_data_length
@@ -574,23 +574,18 @@ if __name__ == '__main__':
         for pg in optimizer.param_groups:
             pg['lr'] = config['force_constant_lr']
 
-    # this is a separate option, because if it's too high we might drop a significant fraction of the eval dataset
-    eval_gradient_accumulation_steps = config['eval_gradient_accumulation_steps'] if 'eval_gradient_accumulation_steps' in config else 1
     # Eval dataset doesn't need to repeat; we just use this to track "epoch" so we know when we're done iterating over it.
-    eval_dataloaders = {
-        name: dataloader.PipelineDataLoader(
-            eval_data,
-            tokenizer,
-            model_engine.train_micro_batch_size_per_gpu(),
-            eval_gradient_accumulation_steps,
-            model_engine.grid.get_data_parallel_world_size(),
-            model_engine.grid.get_data_parallel_rank(),
-            shuffle=False,
-            group_by_length=False if 'group_by_length' not in config else config['group_by_length'],
-            batch_size_tokens=None if 'batch_size_tokens' not in config else config['batch_size_tokens'],
-        )
-        for name, eval_data in eval_data_map.items()
-    }
+    eval_dataloader = dataloader.PipelineDataLoader(
+        eval_data,
+        tokenizer,
+        model_engine.train_micro_batch_size_per_gpu(),
+        model_engine.gradient_accumulation_steps(),
+        model_engine.grid.get_data_parallel_world_size(),
+        model_engine.grid.get_data_parallel_rank(),
+        shuffle=False,
+        group_by_length=False,
+        batch_size_tokens=None,
+    )
 
     tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
 
