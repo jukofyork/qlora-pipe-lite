@@ -282,7 +282,7 @@ class ColumnMajorParallelTopology(ProcessTopology):
 
 
 class CustomPipelineModule(PipelineModule):
-    def __init__(self, layers, **kwargs):
+    def __init__(self, layers, use_column_major_topology, **kwargs):
         # Hybrid LoRA data+pipeline parallelism may want to use "column-major" layout
         if use_column_major_topology:
             world_size = dist.get_world_size()

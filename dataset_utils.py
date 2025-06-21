@@ -49,7 +49,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
 
     dataset.set_format(type='torch')
     
-    NUM_PROC = max(os.cpu_count() // 2, 1)
+    num_proc = min(os.cpu_count(), len(dataset))
 
     dataset = dataset.map(
         lambda x: tokenizer(x['text']),
@@ -57,7 +57,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
         batch_size=10,
         remove_columns=dataset.column_names,
         desc='tokenizing',
-        num_proc=NUM_PROC,
+        num_proc=num_proc,
     )
     dataset = dataset.map(
         lambda x: {'input_ids': list(yield_sequences_from_token_batch(tokenizer, x['input_ids'], sequence_len))},
@@ -65,7 +65,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
         batch_size=100,
         remove_columns=dataset.column_names,
         desc='splitting',
-        num_proc=NUM_PROC,
+        num_proc=num_proc,
     )
     dataset = dataset.map(
         lambda x: {'attention_mask': torch.ones_like(x['input_ids']), 'labels': x['input_ids']},
