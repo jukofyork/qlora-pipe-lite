@@ -32,7 +32,7 @@ class EmbeddingPipe(nn.Module):
             position_ids = cache_position.unsqueeze(0)
         if self.model[0].config.model_type == 'mistral':
             attention_mask = self.model[0]._update_causal_mask(
-                attention_mask, inputs_embeds, cache_position, past_key_values, False, False
+                attention_mask, inputs_embeds, cache_position, past_key_values, False
             )
         else:
             attention_mask = self.model[0]._update_causal_mask(
@@ -48,6 +48,9 @@ class EmbeddingPipe(nn.Module):
             normalizer = torch.tensor(self.model[0].config.hidden_size**0.5, dtype=hidden_states.dtype)
             hidden_states = hidden_states * normalizer
 
+        # Compute rotary embeddings
+        cos, sin = self.model[0].rotary_emb(hidden_states, position_ids)
+
         # We have to do this so activation checkpointing with reentrant checkpoint function (the default) works.
         # We could just use non-reentrant instead, but that has some weird bug with flash attn where the memory usage is very high.
         hidden_states.requires_grad_(True)
@@ -55,7 +58,11 @@ class EmbeddingPipe(nn.Module):
         # This is a workaround, theoretically there's no reason to require this.
         if torch.is_floating_point(attention_mask):
             attention_mask.requires_grad_(True)
-        return hidden_states, attention_mask, position_ids, labels
+        if torch.is_floating_point(cos):
+            cos.requires_grad_(True)
+        if torch.is_floating_point(sin):
+            sin.requires_grad_(True)
+        return hidden_states, attention_mask, cos, sin, labels
 
 
 class LlamaRMSNormPipe(nn.Module):
@@ -65,7 +72,7 @@ class LlamaRMSNormPipe(nn.Module):
         loader_util.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, _, _, labels = inputs
+        hidden_states, _, _, _, labels = inputs
         return self.orig(hidden_states), labels
 
 
@@ -126,14 +133,14 @@ class LlamaDecoderLayerPipe(nn.Module):
             set_cpu_data()
             return None
 
-        hidden_states, attention_mask, position_ids, labels = inputs
+        hidden_states, attention_mask, cos, sin, labels = inputs
         if self.mlp_offloaded_to_cpu:
             if hidden_states.requires_grad:
                 hidden_states.register_hook(set_cpu_data_hook)
             cpu_up_proj = move_data_to_device(self.orig.mlp.up_proj, hidden_states.device)
             cpu_down_proj = move_data_to_device(self.orig.mlp.down_proj, hidden_states.device)
             cpu_gate_proj = move_data_to_device(self.orig.mlp.gate_proj, hidden_states.device)
-        result = (self.orig(hidden_states, attention_mask=attention_mask, position_ids=position_ids)[0], attention_mask, position_ids, labels)
+        result = (self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0], attention_mask, cos, sin, labels)
         if self.mlp_offloaded_to_cpu and not torch.is_grad_enabled():
             set_cpu_data()
         return result
@@ -160,13 +167,13 @@ class Phi3DecoderLayerPipe(nn.Module):
             set_cpu_data()
             return None
 
-        hidden_states, attention_mask, position_ids, labels = inputs
+        hidden_states, attention_mask, cos, sin, labels = inputs
         if self.mlp_offloaded_to_cpu:
             if hidden_states.requires_grad:
                 hidden_states.register_hook(set_cpu_data_hook)
             cpu_up_proj = move_data_to_device(self.orig.mlp.gate_up_proj, hidden_states.device)
             cpu_down_proj = move_data_to_device(self.orig.mlp.down_proj, hidden_states.device)
-        result = (self.orig(hidden_states, attention_mask=attention_mask, position_ids=position_ids)[0], attention_mask, position_ids, labels)
+        result = (self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0], attention_mask, cos, sin, labels)
         if self.mlp_offloaded_to_cpu and not torch.is_grad_enabled():
             set_cpu_data()
         return result
