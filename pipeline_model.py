@@ -93,8 +93,7 @@ class ComputeMetrics(nn.Module):
         shift_labels = shift_labels.to(shift_logits.device)
         valid_loss = (shift_labels >= 0)
 
-        loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels)
-        loss_unreduced = cross_entropy_loss_unreduced[valid_loss]
+        loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels)[valid_loss]
        
         with torch.no_grad():
             entropy = entropy_fn(shift_logits)[valid_loss]   
