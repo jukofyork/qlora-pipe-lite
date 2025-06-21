@@ -53,35 +53,12 @@ def write_metrics(tb_writer, prefix, metrics, step):
         tb_writer.add_histogram(f'{prefix}/log_loss_hist',  torch.log(losses[positive_losses]), step)
 
     if len(metrics) > 2:
-        entropy = metrics[2].view(-1)
-        tb_writer.add_scalar(f'{prefix}/entropy', entropy.mean().item(), step)
+        tb_writer.add_scalar(f'{prefix}/entropy', metrics[2].view(-1).mean().item(), step)
 
     if len(metrics) > 3:
-        normalised_entropy = metrics[3].view(-1)
-        tb_writer.add_scalar(f'{prefix}/normalised_entropy', normalised_entropy.mean().item(), step)
-
-    if len(metrics) > 4:
-        log_likelihood = metrics[4].mean()
-        tb_writer.add_scalar(f'{prefix}/log_likelihood', log_likelihood.item(), step)
-        likelihood = torch.exp(-log_likelihood).item()
-        tb_writer.add_scalar(f'{prefix}/likelihood', likelihood, step)
-        perplexity = torch.exp(log_likelihood).item()
-        tb_writer.add_scalar(f'{prefix}/perplexity', perplexity, step)
-
-    if len(metrics) > 5:
-        mcfaddens_pseudo_r2 = metrics[5].mean()
-        tb_writer.add_scalar(f'{prefix}/mcfaddens_pseudo_r2', mcfaddens_pseudo_r2.item(), step)
-
-    if len(metrics) > 6:
-        tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[6].mean().item(), step)
-        tb_writer.add_scalar(f'{prefix}/top5_accuracy', metrics[7].mean().item(), step)
-        tb_writer.add_scalar(f'{prefix}/top20_accuracy', metrics[8].mean().item(), step)
-
-    if len(metrics) > 9:
-        tb_writer.add_scalar(f'{prefix}/load_balancing_loss', metrics[9].mean().item(), step)
-
-    if len(metrics) > 10:
-        tb_writer.add_scalar(f'{prefix}/alternate_load_balancing_loss', metrics[10].mean().item(), step)
+        tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[3].mean().item(), step)
+        tb_writer.add_scalar(f'{prefix}/top5_accuracy', metrics[4].mean().item(), step)
+        tb_writer.add_scalar(f'{prefix}/top20_accuracy', metrics[5].mean().item(), step)
 
     return loss
 
@@ -362,42 +339,38 @@ if __name__ == '__main__':
     )
 
     tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
-
-    epoch = train_dataloader.epoch
-
-    saver = Saver(model_engine, pipeline_model, train_dataloader, lora_config, run_dir, args, config)
-
-    epoch = train_dataloader.epoch
-
-    loss = evaluate(model_engine, eval_dataloader, tb_writer, 0)
-    saver.append_eval_results(loss, save_best=False)
-
-    while True:
+   
+    last_eval_loss = evaluate(model_engine, eval_dataloader, tb_writer, 0)
+    if is_main_process():
+        print(f'Initial evaluation loss: {last_eval_loss:.4f}')
+    
+    while train_dataloader.epoch <= config['epochs']:
         gc.collect()
         torch.cuda.empty_cache()
+        
         metrics = model_engine.train_batch()
         train_dataloader.sync_epoch()
-
-        new_epoch = saver.process_epoch(epoch, step)
-        finished_epoch = True if new_epoch != epoch else False
-
+        
         if is_main_process():
             write_metrics(tb_writer, 'train', metrics, step)
             tb_writer.add_scalar('train/lr', optimizer.param_groups[0]['lr'], step)
             tb_writer.add_scalar('train/epoch', step/steps_per_epoch, step)
-
+    
         if step % config['eval_steps'] == 0:
+            saver.save_checkpoint(model_engine, train_dataloader, run_dir, step)
             loss = evaluate(model_engine, eval_dataloader, tb_writer, step)
-            saver.append_eval_results(loss)
-
-        saver.process_step(step)
-
-        if finished_epoch:
-            epoch = new_epoch
-            if epoch is None:
-                break
-
+            if is_main_process():
+                delta = last_eval_loss - loss if last_eval_loss is not None else 0
+                percent_change = 100 * (1 - loss / last_eval_loss) if last_eval_loss and last_eval_loss != 0 else 0
+                print(f'Evaluation loss: {loss:.4f} (last: {last_eval_loss:.4f}, Δ: {delta:.5f} [{percent_change:.2f}%])')
+            last_eval_loss = loss
+    
         step += 1
+
+    if lora_config is None:
+        saver.save_full_model(model_engine, pipeline_model, run_dir, args, config, 'final_model')
+    else:
+        saver.save_lora(model_engine, pipeline_model, lora_config, run_dir, args, config, 'final_lora')
 
     if is_main_process():
         print('TRAINING COMPLETE!')

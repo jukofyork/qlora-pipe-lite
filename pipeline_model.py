@@ -77,19 +77,8 @@ class LayerSpec(ds_pipe_module.LayerSpec):
 
 
 class ComputeMetrics(nn.Module):
-    def __init__(
-            self,
-            loss_type='cross_entropy_loss',
-            focal_loss_gamma=0
-        ):
+    def __init__(self):
         super().__init__()
-        self.loss_type = loss_type.lower()
-        self.focal_loss_gamma = focal_loss_gamma
-
-        if self.loss_type == 'cross_entropy_loss' and self.focal_loss_gamma != 0:
-            raise ValueError("focal_loss_gamma can't be used with 'cross_entropy_loss' function")
-        elif self.loss_type != 'cross_entropy_loss' and self.focal_loss_gamma <= 0:
-            raise ValueError("focal_loss_gamma must be greater than 0 for the specified loss function")
 
     def forward(self, inputs):
         logits, labels = inputs
@@ -104,46 +93,15 @@ class ComputeMetrics(nn.Module):
         shift_labels = shift_labels.to(shift_logits.device)
         valid_loss = (shift_labels >= 0)
 
-        cross_entropy_loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels)
-        cross_entropy_loss_unreduced = cross_entropy_loss_unreduced[valid_loss]
-
-        if self.loss_type == 'cross_entropy_loss':
-            loss_unreduced = cross_entropy_loss_unreduced
-        elif self.loss_type == 'focal_loss':
-            # See https://arxiv.org/abs/1708.02002 (Section 3)
-            p = torch.exp(-cross_entropy_loss_unreduced)
-            loss_unreduced = (1-p)**self.focal_loss_gamma * cross_entropy_loss_unreduced
-        elif self.loss_type == 'focal_loss_star':
-            # See https://arxiv.org/abs/1708.02002 (Appendix A/B)
-            # NOTE: The use of Beta makes no sense for the multinomial case as it's invariant to translation
-            loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels, self.focal_loss_gamma)
-            loss_unreduced = loss_unreduced[valid_loss]
-            loss_unreduced = loss_unreduced / self.focal_loss_gamma
-        elif self.loss_type == 'inverse_focal_loss':
-            # See "Rethinking Calibration of Deep Neural Networks: Do Not Be Afraid of Overconfidence" (Section 5.2)
-            # NOTE: The alternative of p^gamma (instead of (1+p)^gamma) might be useful for gradient ascent...
-            p = torch.exp(-cross_entropy_loss_unreduced)
-            loss_unreduced = (1+p)**self.focal_loss_gamma * cross_entropy_loss_unreduced
-        elif self.loss_type == 'exponentiated_cross_entropy_loss':
-            # See "Gradient as a Foundation for Building a Loss Function" (Section III.B)
-            # NOTE: This is a generalisation of their "Quadratic Cross-Entropy" loss (QCE: gamma=2, CE: gamma=1, etc).
-            loss_unreduced = cross_entropy_loss_unreduced**self.focal_loss_gamma / self.focal_loss_gamma
-        else:
-            raise NotImplementedError(self.loss_type)
-        
+        loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels)
+        loss_unreduced = cross_entropy_loss_unreduced[valid_loss]
+       
         with torch.no_grad():
-            log_vocab_size = math.log(logits.size(-1))
-            entropy = entropy_fn(shift_logits)[valid_loss]
-            # Compute normalised entropy so we can compare between models with different vocab sizes
-            normalised_entropy = entropy / log_vocab_size         
-            # Compute the (negative) log-likelihood using the original *UNADJUSTED* Cross-Entropy loss.
-            log_likelihood = cross_entropy_loss_unreduced.mean()
-            # Compute McFadden's Pseudo-R² metric using log(vocab_size) as the null log-likelihood.
-            mcfaddens_pseudo_r2 = 1 - (log_likelihood / log_vocab_size)
+            entropy = entropy_fn(shift_logits)[valid_loss]   
             accuracies = top_k_accuracy(shift_logits, shift_labels, k_list=[1, 5, 20])
         loss = loss_unreduced.mean()
         loss_unreduced = loss_unreduced.detach()
-        return loss, loss_unreduced, entropy, normalised_entropy, log_likelihood, mcfaddens_pseudo_r2, *accuracies
+        return loss, loss_unreduced, entropy, *accuracies
 
 
 class PipelineModel(nn.Module):
@@ -154,11 +112,6 @@ class PipelineModel(nn.Module):
         self.full_fine_tune = config.get('full_fine_tune', False)
         self.modules_to_not_quantize = get_keys_to_not_convert(self)
         self.loader_util = LoaderUtil(config['model'], quantization_config, self.modules_to_not_quantize)
-        self.loss_type = config.get('loss_type', 'cross_entropy_loss').lower()
-        self.focal_loss_gamma = config.get('focal_loss_gamma', 0)
-        if self.focal_loss_gamma > 0 and is_main_process():
-            print(f'Optimizing using \'{self.loss_type}\' with gamma={self.focal_loss_gamma}')
-
         for name, p in self.named_parameters():
             p.original_name = name
 
