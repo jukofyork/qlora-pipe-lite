@@ -53,6 +53,7 @@ def write_metrics(tb_writer, prefix, metrics, step):
     if len(metrics) > 2:
         tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[2].mean().item(), step)
         tb_writer.add_scalar(f'{prefix}/top3_accuracy', metrics[3].mean().item(), step)
+        tb_writer.add_scalar(f'{prefix}/top10_accuracy', metrics[4].mean().item(), step)
 
     return loss
 

@@ -101,7 +101,7 @@ class ComputeMetrics(nn.Module):
        
         with torch.no_grad():
             entropy = entropy_fn(shift_logits)[valid_loss]   
-            accuracies = top_k_accuracy(shift_logits, shift_labels, k_list=[1, 3])
+            accuracies = top_k_accuracy(shift_logits, shift_labels, k_list=[1, 3, 10])
         loss = loss_unreduced.mean()
         return loss, entropy, *accuracies
 
