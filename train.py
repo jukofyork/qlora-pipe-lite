@@ -83,12 +83,11 @@ def parse_layers_to_transform(config):
 
 def create_model(config, model_type):
     """Create the base transformer model with appropriate quantization."""
-    if config.get('full_fine_tune', False):
+    if config.get('full_fine_tune', False) or not config.get('load_in_4bit', False):
         quantization_config = None
     else:
         no_quant_modules = ['lm_head']
         if model_type == 'mixtral':
-            # the expert routing weights are tiny and probably important, don't quantize
             no_quant_modules.append('gate')
         quantization_config = transformers.BitsAndBytesConfig(
             load_in_4bit=True,
