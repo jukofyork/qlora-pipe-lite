@@ -95,16 +95,16 @@ def create_model(config, model_type):
 
     if model_type == 'llama':
         model = llama_pipe.LlamaForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'qwen2':
-        model = llama_pipe.Qwen2ForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'cohere':
-        model = llama_pipe.CohereForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'phi3':
-        model = llama_pipe.Phi3ForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'gemma2':
-        model = llama_pipe.Gemma2ForCausalLMPipe(config, quantization_config=quantization_config)
     elif model_type == 'mistral':
         model = llama_pipe.MistralForCausalLMPipe(config, quantization_config=quantization_config)
+    elif model_type == 'qwen2':
+        model = llama_pipe.Qwen2ForCausalLMPipe(config, quantization_config=quantization_config)
+    elif model_type == 'phi3':
+        model = llama_pipe.Phi3ForCausalLMPipe(config, quantization_config=quantization_config)
+    elif model_type == 'cohere':
+        model = llama_pipe.CohereForCausalLMPipe(config, quantization_config=quantization_config)
+    elif model_type == 'gemma2':
+        model = llama_pipe.Gemma2ForCausalLMPipe(config, quantization_config=quantization_config)
     else:
         raise NotImplementedError()
     

@@ -13,86 +13,9 @@ import accelerate
 from accelerate.utils import set_module_tensor_to_device
 
 from utils import is_main_process
-from kernels.cross_entropy_loss import Fast_CrossEntropyLoss
 
 
 LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX = r'^language_model\.'
-
-
-def move_data_to_device(module, device):
-    # handle lora
-    if hasattr(module, 'base_layer'):
-        module = module.base_layer
-    # handle HQQ
-    if hasattr(module, 'W_q'):
-        orig_data = module.W_q.data
-        module.W_q.data = orig_data.to(device, non_blocking=True)
-    else:
-        orig_data = module.weight.data
-        module.weight.data = orig_data.to(device, non_blocking=True)
-    return orig_data
-
-
-def set_data(module, data):
-    # handle lora
-    if hasattr(module, 'base_layer'):
-        module = module.base_layer
-    # handle HQQ
-    if hasattr(module, 'W_q'):
-        module.W_q.data = data
-    else:
-        module.weight.data = data
-
-
-class LayerSpec(ds_pipe_module.LayerSpec):
-    def __init__(self, typename, *module_args, **module_kwargs):
-        super().__init__(typename, *module_args, **module_kwargs)
-
-    def build(self):
-        self.module_kwargs.pop('_estimated_size', None)
-        return self.typename(*self.module_args, **self.module_kwargs)
-
-    @property
-    def estimated_size(self):
-        return self.module_kwargs.get('_estimated_size', 1)
-
-
-class ComputeMetrics(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, inputs):
-        logits, labels = inputs
-        shift_logits = logits
-        extra_ignored_labels = torch.full((labels.shape[0], 1), -100, device=logits.device)
-        shift_labels = torch.hstack((labels[..., 1:], extra_ignored_labels))
-        # Flatten the tokens
-        vocab_size = shift_logits.size(-1)
-        shift_logits = shift_logits.view(-1, vocab_size)
-        shift_labels = shift_labels.view(-1)
-        # Enable model parallelism
-        shift_labels = shift_labels.to(shift_logits.device)
-        valid_loss = (shift_labels >= 0)
-
-        loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels)[valid_loss]
-       
-        return loss_unreduced.mean()
-
-
-class PipelineModel(nn.Module):
-
-    def __init__(self, config, quantization_config, model_config):
-        if config.get('full_fine_tune', False) and model_config.tie_word_embeddings:
-            raise NotImplementedError('FFT is not supported for models with tied embeddings')
-        self.full_fine_tune = config.get('full_fine_tune', False)
-        self.modules_to_not_quantize = get_keys_to_not_convert(self)
-        self.loader_util = LoaderUtil(config['model'], quantization_config, self.modules_to_not_quantize)
-        for name, p in self.named_parameters():
-            p.original_name = name
-
-    # need to override this method
-    def to_layer_specs(self):
-        raise NotImplementedError()
 
 
 def _partial_module_name_match(full_name, list_to_match):
@@ -182,6 +105,19 @@ def _recursively_replace_with_quantized_linear(
         current_key_name.pop(-1)
 
 
+class LayerSpec(ds_pipe_module.LayerSpec):
+    def __init__(self, typename, *module_args, **module_kwargs):
+        super().__init__(typename, *module_args, **module_kwargs)
+
+    def build(self):
+        self.module_kwargs.pop('_estimated_size', None)
+        return self.typename(*self.module_args, **self.module_kwargs)
+
+    @property
+    def estimated_size(self):
+        return self.module_kwargs.get('_estimated_size', 1)
+
+
 class LoaderUtil:
 
     def __init__(self, model_path, quantization_config, modules_to_not_quantize):
@@ -255,3 +191,19 @@ class LoaderUtil:
         module.to(self.device)
         if not isinstance(self.quantization_config, transformers.BitsAndBytesConfig):
             self.maybe_quantize(module)
+
+
+class PipelineModel(nn.Module):
+
+    def __init__(self, config, quantization_config, model_config):
+        if config.get('full_fine_tune', False) and model_config.tie_word_embeddings:
+            raise NotImplementedError('FFT is not supported for models with tied embeddings')
+        self.full_fine_tune = config.get('full_fine_tune', False)
+        self.modules_to_not_quantize = get_keys_to_not_convert(self)
+        self.loader_util = LoaderUtil(config['model'], quantization_config, self.modules_to_not_quantize)
+        for name, p in self.named_parameters():
+            p.original_name = name
+
+    # need to override this method
+    def to_layer_specs(self):
+        raise NotImplementedError()
