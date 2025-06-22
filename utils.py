@@ -1,9 +1,11 @@
+import os
+import glob
 from datetime import datetime
 from deepspeed import comm as dist
 from contextlib import contextmanager
 import shutil
 import time
-    
+
 def is_main_process():
     return dist.get_rank() == 0
 
@@ -27,6 +29,9 @@ def eta_str(eta):
     if eta > 3600:
         return f'{eta // 3600}h{(eta % 3600) // 60}m'
     return f'{eta // 60}m{eta % 60}s' if eta > 60 else f'{eta}s'
+
+def get_most_recent_run_dir(output_dir):
+    return list(sorted(glob.glob(os.path.join(output_dir, '*'))))[-1]
 
 # Attempt to remove a directory tree using exponential backoff for retries (default max wait = 31s)
 def safe_rmtree(dir_path, max_retries=5, initial_wait_seconds=1):

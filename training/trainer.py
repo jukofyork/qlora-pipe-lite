@@ -3,7 +3,6 @@ import gc
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from training.utils import write_metrics
 from saver import save_checkpoint, prune_checkpoints, save_model
 from utils import is_main_process
 
@@ -49,7 +48,7 @@ class Trainer:
         eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
         loss = None
         if is_main_process():
-            loss = write_metrics(self.tb_writer, f'eval', eval_metrics, step)
+            loss = _write_metrics(f'eval', eval_metrics, step)
         return loss
 
     def _should_checkpoint(self):
@@ -77,6 +76,12 @@ class Trainer:
             if is_main_process():
                 prune_checkpoints(self.run_dir, self.config.get('max_checkpoints', -1))
 
+
+    def _write_metrics(self, prefix, metrics, step):
+        loss = metrics[0].mean().item()
+        self.tb_writer.add_scalar(f'{prefix}/loss', loss, step)
+        return loss
+
     def train(self, start_step=1):
         """Main training loop."""
         step = start_step
@@ -97,7 +102,7 @@ class Trainer:
             
             # Log training metrics to tensorboard
             if is_main_process():
-                write_metrics(self.tb_writer, 'train', metrics, step)
+                _write_metrics('train', metrics, step)
             
             # Periodic evaluation based on global step
             if step in self.eval_step_indices:

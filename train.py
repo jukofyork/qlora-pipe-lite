@@ -9,10 +9,11 @@ import transformers
 import deepspeed
 import toml
 import bitsandbytes
+import optimi
 
 from dataset_utils import load_datasets
 import dataloader
-from utils import is_main_process
+from utils import is_main_process, get_most_recent_run_dir
 import engine
 from training.model_factory import (
     create_model, 
@@ -22,8 +23,25 @@ from training.model_factory import (
     configure_full_fine_tuning, 
     parse_layers_to_transform
 )
-from training.utils import get_most_recent_run_dir, get_optimizer, make_rms_ratio_fn
 from training.trainer import Trainer
+
+
+def get_optimizer(model_parameters, config):
+    optimizer_kwargs = {
+        "params": model_parameters,
+        "lr": config['lr'],
+        "betas": (config.get('beta1', 0.9), config.get('beta2', 0.99)),
+        "weight_decay": config.get('weight_decay', 0.0),
+        "eps": config.get('eps', 1e-6),
+        "kahan_sum": True
+    }
+    return optimi.AdamW(**optimizer_kwargs)
+
+def make_rms_ratio_fn(beta):
+    def rms_ratio_fn(step):
+        return torch.sqrt(torch.tensor((1 - beta**step)/(1 + beta**step))).item()
+    return rms_ratio_fn
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config',
