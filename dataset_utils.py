@@ -8,8 +8,6 @@ from utils import is_main_process, zero_first, log
 
 TOKENIZE_BATCH_SIZE = 10
 
-SLICE_MEMORY_MONITOR_INTERVAL = 1000
-
 def tokenize_with_eos(batch, tokenizer):
     result = tokenizer(batch['text'])
     # Add EOS token to each text field if missing
