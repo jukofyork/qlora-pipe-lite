@@ -37,7 +37,7 @@ class Trainer:
         self.epochs = config.get('epochs', 1)
         self.eval_gradient_accumulation_steps = config.get('eval_gradient_accumulation_steps', 1)
         self.checkpoint_interval = config.get('checkpoint_interval', 60)
-        self.max_checkpoints = config.get('max_checkpoints', -1)
+        self.max_checkpoints = config.get('max_checkpoints', 3)
 
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
