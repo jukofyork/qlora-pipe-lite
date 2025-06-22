@@ -1,7 +1,6 @@
 from contextlib import contextmanager
 from datetime import datetime
 from deepspeed import comm as dist
-import glob
 import os
 import shutil
 import time
