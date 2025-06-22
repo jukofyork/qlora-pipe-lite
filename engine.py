@@ -38,7 +38,7 @@ def initialize(config=None,
         }
 
     mpu = model.mpu()
-    config_class = DeepSpeedConfig(config, mpu)
+    config_class = DeepSpeedConfig(ds_config, mpu)
     engine = CustomPipelineEngine(
         args=args,
         model=model,
