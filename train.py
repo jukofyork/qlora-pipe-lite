@@ -152,30 +152,20 @@ if __name__ == '__main__':
 
     # Create trainer
     trainer = Trainer(
-        config=config,
         model_engine=model_engine,
         train_dataloader=train_dataloader,
         eval_dataloader=eval_dataloader,
         run_dir=run_dir,
         pipeline_model=pipeline_model,
         args=args,
-        lora_config=lora_config
+        lora_config=lora_config,
+        model_dir=config['model'],
+        epochs=config.get('epochs', 1),
+        evals_per_run=config.get('evals_per_run', 10),
+        checkpoint_interval=config.get('checkpoint_interval', 60),
+        max_checkpoints=config.get('max_checkpoints', -1),
+        resume_from_checkpoint=args.resume_from_checkpoint
     )
     
-    step = 1
-    if args.resume_from_checkpoint:
-        load_path, client_state = model_engine.load_checkpoint(
-            run_dir,
-            load_module_strict=False,
-            load_optimizer_states=True
-        )
-        deepspeed.comm.barrier()  # just so the print below doesn't get swamped
-        assert load_path is not None
-        train_dataloader.load_state_dict(client_state['custom_loader'])
-        step = client_state['step'] + 1
-        del client_state
-        if is_main_process():
-            print(f'Resuming training from checkpoint. Resuming at epoch: {train_dataloader.epoch}, step: {step}')
-
     # Start training
-    trainer.train(start_step=step)
+    trainer.train() 

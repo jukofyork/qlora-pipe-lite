@@ -6,10 +6,10 @@ import deepspeed
 import torch
 from huggingface_hub import save_torch_state_dict
 
-from utils import is_main_process, safe_rmtree
+from utils import safe_rmtree
 
 
-def save_lora(model_engine, pipeline_model, args, lora_config, run_dir, name):
+def save_lora(model_engine, pipeline_model, lora_config, run_dir, name):
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
     dp_id = model_engine.grid.get_data_parallel_rank()
     stage_id = model_engine.grid.get_pipe_parallel_rank()
@@ -38,13 +38,10 @@ def save_lora(model_engine, pipeline_model, args, lora_config, run_dir, name):
             state_dict.update(torch.load(path, map_location='cpu', weights_only=True))
         torch.save(state_dict, os.path.join(save_dir, 'adapter_model.bin'))
         lora_config.save_pretrained(save_dir)
-        shutil.copy(args.config, save_dir)
-        if hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None:
-            shutil.copy(args.deepspeed_config, save_dir)
         safe_rmtree(tmp_dir)
 
 
-def save_full_model(model_engine, pipeline_model, args, config, run_dir, name):
+def save_full_model(model_engine, pipeline_model, model_dir, run_dir, name):
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
     dp_id = model_engine.grid.get_data_parallel_rank()
     stage_id = model_engine.grid.get_pipe_parallel_rank()
@@ -62,9 +59,6 @@ def save_full_model(model_engine, pipeline_model, args, config, run_dir, name):
         for path in glob.glob(os.path.join(tmp_dir, '*.bin')):
             state_dict.update(torch.load(path, map_location='cpu', weights_only=True))
         save_torch_state_dict(state_dict, save_dir, max_shard_size='5GB')
-        shutil.copy(args.config, save_dir)
-        if hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None:
-            shutil.copy(args.deepspeed_config, save_dir)
         additional_files_to_copy = [
             'added_tokens.json',
             'config.json',
@@ -74,57 +68,7 @@ def save_full_model(model_engine, pipeline_model, args, config, run_dir, name):
             'tokenizer_config.json',
             'tokenizer.model',
         ]
-        for path in glob.glob(os.path.join(config['model'], '*')):
+        for path in glob.glob(os.path.join(model_dir, '*')):
             if os.path.basename(path) in additional_files_to_copy:
                 shutil.copy(path, save_dir)
         safe_rmtree(tmp_dir)
-
-
-def save_model(model_engine, pipeline_model, args, lora_config, config, run_dir, name):
-    if lora_config is None:
-        save_full_model(model_engine, pipeline_model, args, config, run_dir, name)
-    else:
-        save_lora(model_engine, pipeline_model, args, lora_config, run_dir, name)
-
-
-def save_checkpoint(model_engine, train_dataloader, run_dir, step):
-    save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
-    model_engine.save_checkpoint(
-        save_root,
-        client_state={
-            'step': step,
-            'custom_loader': train_dataloader.state_dict(),
-        },
-        save_latest=True,
-        exclude_frozen_parameters=True,
-    )
-    
-    
-def prune_checkpoints(run_dir, max_checkpoints):
-    if max_checkpoints <= 0:
-        return
-
-    save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
-    
-    # Find all checkpoint directories
-    checkpoint_pattern = os.path.join(save_root, 'global_step*')
-    checkpoints = []
-    
-    for path in glob.glob(checkpoint_pattern):
-        if os.path.isdir(path):
-            # Extract step number for sorting
-            basename = os.path.basename(path)
-            if basename.startswith('global_step'):
-                try:
-                    step_num = int(basename[11:])  # Remove 'global_step' prefix
-                    checkpoints.append((step_num, path))
-                except ValueError:
-                    continue
-    
-    # Sort by step number and keep only the most recent ones
-    checkpoints.sort(key=lambda x: x[0])
-    
-    while len(checkpoints) > max_checkpoints:
-        step_num, path = checkpoints.pop(0)
-        print(f"- Deleting checkpoint: 'global_step{step_num}'")
-        safe_rmtree(path)
