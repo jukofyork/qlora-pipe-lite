@@ -10,6 +10,8 @@ from utils import is_main_process, zero_first, log
 
 TOKENIZE_BATCH_SIZE = 10
 
+SLICE_MEMORY_MONITOR_INTERVAL = 1000
+
 def tokenize_with_eos(batch, tokenizer):
     result = tokenizer(batch['text'])
     # Add EOS token to each text field if missing
@@ -26,7 +28,8 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
     process = psutil.Process(os.getpid())
 
     # Process dataset item by item (streaming)
-    for item in tqdm(dataset, desc="Creating sequences"):
+    pbar = tqdm(dataset, desc="Creating sequences")
+    for item in pbar:
         tokens = item['input_ids'].tolist()
         assert len(tokens) > 0, 'Empty tokens list'
         # EOS already added in tokenize_with_eos, so skip that check
@@ -45,13 +48,10 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
                 all_sequences.append(torch.as_tensor(sequence_tokens, dtype=torch.long))
                 # Reset sequence_tokens with BOS token if it exists
                 sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
-
-                # Print memory usage every 100 sequences
-                if len(all_sequences) % 100 == 0:
-                    seq_tokens_size = sys.getsizeof(sequence_tokens) / (1024 ** 2)  # MB
-                    all_seqs_size = sys.getsizeof(all_sequences) / (1024 ** 3)  # GB
+                # Update tqdm bar every N sequences
+                if len(all_sequences) % MEMORY_MONITOR_INTERVAL == 0:
                     process_memory = process.memory_info().rss / (1024 ** 3)  # GB
-                    log(f"Sequences {len(all_sequences)}: sequence_tokens={seq_tokens_size:.1f}MB, all_sequences={all_seqs_size:.1f}GB, process_memory={process_memory:.1f}GB")
+                    pbar.set_postfix(sequences=len(all_sequences), memory=f"{process_memory:.1f}GB")
 
     # Discard the final partial sequence to ensure all are exactly sequence_len in length...
     result_dataset = datasets.Dataset.from_dict({'input_ids': all_sequences})
