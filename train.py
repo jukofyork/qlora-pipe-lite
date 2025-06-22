@@ -27,6 +27,10 @@ def setup_distributed_training(config):
     """Initialize distributed training and return run directory."""
     deepspeed.init_distributed(timeout=timedelta(hours=2))
 
+    # Ensure output directory exists
+    if is_main_process():
+        os.makedirs(config['output_dir'], exist_ok=True)
+
     # Create new run directory for fresh training runs
     if not args.resume_from_checkpoint and is_main_process():
         run_dir = os.path.join(config['output_dir'], datetime.now(timezone.utc).strftime('%Y%m%d_%H-%M-%S'))
