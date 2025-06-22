@@ -42,7 +42,7 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
             sequence_tokens.extend(taken)
             if len(sequence_tokens) >= sequence_len:
                 assert len(sequence_tokens) == sequence_len
-                all_sequences.append(torch.as_tensor(sequence_tokens))
+                all_sequences.append(torch.as_tensor(sequence_tokens, dtype=torch.long))
                 # Reset sequence_tokens with BOS token if it exists
                 sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
 
@@ -54,7 +54,9 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
                     log(f"Sequences {len(all_sequences)}: sequence_tokens={seq_tokens_size:.1f}MB, all_sequences={all_seqs_size:.1f}GB, process_memory={process_memory:.1f}GB")
 
     # Discard the final partial sequence to ensure all are exactly sequence_len in length...
-    return datasets.Dataset.from_dict({'input_ids': all_sequences})
+    result_dataset = datasets.Dataset.from_dict({'input_ids': all_sequences})
+    result_dataset.set_format(type='torch')
+    return result_dataset
 
 def load_single_dataset(dataset_path, tokenizer, sequence_len):
     base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
