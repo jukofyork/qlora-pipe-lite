@@ -49,7 +49,7 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
                 # Reset sequence_tokens with BOS token if it exists
                 sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
                 # Update tqdm bar every N sequences
-                if len(all_sequences) % MEMORY_MONITOR_INTERVAL == 0:
+                if len(all_sequences) % SLICE_MEMORY_MONITOR_INTERVAL == 0:
                     process_memory = process.memory_info().rss / (1024 ** 3)  # GB
                     pbar.set_postfix(sequences=len(all_sequences), memory=f"{process_memory:.1f}GB")
 
