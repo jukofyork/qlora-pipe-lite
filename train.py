@@ -10,7 +10,7 @@ import transformers
 from dataset_utils import load_datasets
 from training.model_factory import setup_model_and_engine, get_model_type
 from training.trainer import Trainer
-from utils import is_main_process, get_most_recent_run_dir
+from utils import is_main_process
 import dataloader
 
 parser = argparse.ArgumentParser()
@@ -40,7 +40,16 @@ def setup_distributed_training(config):
 
     # Synchronize all processes before determining run directory
     deepspeed.comm.barrier()
-    return get_most_recent_run_dir(config['output_dir'])
+
+    # Get most recent run directory
+    existing_runs = list(sorted(glob.glob(os.path.join(config['output_dir'], '*'))))
+    if not existing_runs:
+        if args.resume_from_checkpoint:
+            raise RuntimeError(f"Cannot resume: no existing run directories found in {config['output_dir']}")
+        else:
+            raise RuntimeError(f"No run directories found in {config['output_dir']} (this shouldn't happen)")
+
+    return existing_runs[-1]
 
 def setup_tokenizer(config):
     """Load and configure tokenizer."""

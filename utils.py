@@ -30,13 +30,6 @@ def eta_str(eta):
         return f'{eta // 3600}h{(eta % 3600) // 60}m'
     return f'{eta // 60}m{eta % 60}s' if eta > 60 else f'{eta}s'
 
-def get_most_recent_run_dir(output_dir):
-    """Get the most recent run directory."""
-    dirs = list(sorted(glob.glob(os.path.join(output_dir, '*'))))
-    if not dirs:
-        raise RuntimeError(f"No run directories found in {output_dir}")
-    return dirs[-1]
-
 def safe_rmtree(dir_path, max_retries=5, initial_wait_seconds=1):
     """Remove directory tree with exponential backoff retries on failure."""
     for attempt in range(max_retries + 1):
