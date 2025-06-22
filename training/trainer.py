@@ -48,7 +48,7 @@ class Trainer:
         eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
         loss = None
         if is_main_process():
-            loss = _write_metrics(f'eval', eval_metrics, step)
+            loss = self._write_metrics(f'eval', eval_metrics, step)
         return loss
 
     def _should_checkpoint(self):
@@ -102,7 +102,7 @@ class Trainer:
             
             # Log training metrics to tensorboard
             if is_main_process():
-                _write_metrics('train', metrics, step)
+                self._write_metrics('train', metrics, step)
             
             # Periodic evaluation based on global step
             if step in self.eval_step_indices:
