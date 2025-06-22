@@ -10,7 +10,7 @@ import torch
 from transformers.integrations import get_keys_to_not_convert
 import transformers
 
-from utils import is_main_process
+from utils import is_main_process, log
 import bitsandbytes as bnb
 
 LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX = r'^language_model\.'

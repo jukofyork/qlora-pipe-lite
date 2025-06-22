@@ -4,7 +4,7 @@ import os
 import os.path
 import torch
 
-from utils import *
+from utils import is_main_process, zero_first, log
 
 # Dataset preprocessing batch sizes
 TOKENIZE_BATCH_SIZE = 10

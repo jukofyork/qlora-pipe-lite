@@ -4,7 +4,7 @@ import accelerate
 import math
 import torch
 
-from utils import *
+from utils import log
 
 def split_batch(batch, pieces):
     example_tuple, labels = batch

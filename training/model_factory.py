@@ -9,6 +9,7 @@ import torch
 import transformers
 
 from models import causal_lm_models
+from utils import log
 import engine
 import unsloth_utils
 
