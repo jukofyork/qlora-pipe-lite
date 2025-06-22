@@ -42,7 +42,7 @@ class Trainer:
         self.last_checkpoint_time = time.time() if is_main_process() else None
 
         # Calculate evaluation step indices to use across the entire run
-        self.eval_step_indices = self._calculate_eval_steps(model_engine.total_steps, evals_per_run)
+        self.eval_step_indices = _calculate_eval_steps(self, model_engine.total_steps, evals_per_run)
 
     def train(self):
         """Main training loop."""
