@@ -2,8 +2,6 @@ from tqdm import tqdm
 import datasets
 import os
 import os.path
-import psutil
-import sys
 import torch
 
 from utils import is_main_process, zero_first, log
@@ -25,11 +23,8 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
     # Initialize sequence_tokens with BOS token if it exists
     sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
 
-    process = psutil.Process(os.getpid())
-
     # Process dataset item by item (streaming)
-    pbar = tqdm(dataset, desc="Creating sequences")
-    for item in pbar:
+    for item in tqdm(dataset, desc="Creating sequences"):
         tokens = item['input_ids'].tolist()
         assert len(tokens) > 0, 'Empty tokens list'
         # EOS already added in tokenize_with_eos, so skip that check
@@ -48,10 +43,6 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
                 all_sequences.append(torch.as_tensor(sequence_tokens, dtype=torch.long))
                 # Reset sequence_tokens with BOS token if it exists
                 sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
-                # Update tqdm bar every N sequences
-                if len(all_sequences) % SLICE_MEMORY_MONITOR_INTERVAL == 0:
-                    process_memory = process.memory_info().rss / (1024 ** 3)  # GB
-                    pbar.set_postfix(sequences=len(all_sequences), memory=f"{process_memory:.1f}GB")
 
     # Discard the final partial sequence to ensure all are exactly sequence_len in length...
     result_dataset = datasets.Dataset.from_dict({'input_ids': all_sequences})
