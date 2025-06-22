@@ -1,23 +1,20 @@
 from collections import deque
-
-import torch
-from torch import nn
-
-import deepspeed
-from deepspeed.accelerator import get_accelerator
 from deepspeed import comm as dist
-from deepspeed.runtime.config import DeepSpeedConfig
-from deepspeed.runtime.pipe.engine import PipelineEngine, TRAIN_BATCH_TIMER, PIPE_SEND_OUTPUT_TIMER, PIPE_SEND_GRAD_TIMER, PIPE_RECV_INPUT_TIMER, PIPE_RECV_GRAD_TIMER
-from deepspeed.runtime.pipe import schedule
-from deepspeed.runtime.utils import PartitionedTensor
-from deepspeed.runtime.activation_checkpointing import checkpointing as ds_checkpointing
-from deepspeed.runtime.pipe.module import PipelineModule
+from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime import utils as ds_utils
+from deepspeed.runtime.activation_checkpointing import checkpointing as ds_checkpointing
+from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.pipe import schedule
+from deepspeed.runtime.pipe.engine import PipelineEngine, TRAIN_BATCH_TIMER, PIPE_SEND_OUTPUT_TIMER, PIPE_SEND_GRAD_TIMER, PIPE_RECV_INPUT_TIMER, PIPE_RECV_GRAD_TIMER
 from deepspeed.runtime.pipe.module import LayerSpec
+from deepspeed.runtime.pipe.module import PipelineModule
 from deepspeed.runtime.pipe.topology import ProcessTopology
+from deepspeed.runtime.utils import PartitionedTensor
+from torch import nn
+import deepspeed
+import torch
 
 from utils import eta_str, log
-
 
 def initialize(args=None,
                model=None,
@@ -45,13 +42,12 @@ def initialize(args=None,
 
     return engine, engine.optimizer
 
-
 class CustomPipelineEngine(PipelineEngine):
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.total_steps = None
         self.etas = deque()
-
 
     def train_batch(self):
         if not torch._C.is_grad_enabled():
@@ -109,7 +105,6 @@ class CustomPipelineEngine(PipelineEngine):
 
         return agg_losses
 
-
     def eval_batch(self, data_iter):
         # sequence length may change between macro batches (but not between gradient accumulation steps)
         self.reset_activation_shape()
@@ -143,7 +138,6 @@ class CustomPipelineEngine(PipelineEngine):
         self.set_dataiterator(train_iterator)
 
         return agg_eval_losses
-
 
     def _aggregate_total_losses(self):
         all_agg_outputs = []
@@ -194,7 +188,6 @@ class CustomPipelineEngine(PipelineEngine):
 
         return all_agg_outputs
 
-
     # We override this to handle the model returning a list of "losses", but only doing backprop on the first.
     def _exec_forward_pass(self, buffer_id):
         self.tput_timer.start()
@@ -214,7 +207,7 @@ class CustomPipelineEngine(PipelineEngine):
             inputs = (part_input.full(), *inputs[2:])
             inputs[0].requires_grad = True
             # skip mask
-            #inputs[1].requires_grad = True
+            # inputs[1].requires_grad = True
             part_input = None
             inputs = inputs[0] if len(inputs) == 1 else inputs
             self.pipe_buffers['inputs'][buffer_id] = inputs
@@ -269,19 +262,19 @@ class CustomPipelineEngine(PipelineEngine):
     # make our forward pass method apply
     PipelineEngine._INSTRUCTION_MAP[schedule.ForwardPass] = _exec_forward_pass
 
-
 class ColumnMajorParallelTopology(ProcessTopology):
     """
     A topology specialisation for hybrid data+pipeline parallelism optimized for LoRA training:
     - Sends high-volume "per token" hidden states over PCIe/NVLink.
     - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand.
     """
+
     def __init__(self, num_pp, num_dp):
         # Swap the axes and dims to change the rank mapping
         super().__init__(axes=['data', 'pipe'], dims=[num_dp, num_pp])
 
-
 class CustomPipelineModule(PipelineModule):
+
     def __init__(self, layers, use_column_major_topology, **kwargs):
         # Hybrid LoRA data+pipeline parallelism may want to use "column-major" layout
         if use_column_major_topology:
@@ -343,7 +336,7 @@ class CustomPipelineModule(PipelineModule):
                             pass
                     logstr = f'    {idx+start:2d}: {name}'
                     if estimated_sizes:
-                        es = estimated_sizes[idx+start]
+                        es = estimated_sizes[idx + start]
                         logstr += f', estimated size: {es}'
                     print(logstr)
             if self.loss_fn:

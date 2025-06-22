@@ -1,11 +1,10 @@
-import math
-import torch
+from deepspeed import comm as dist
 from torch.utils.data import DataLoader
 import accelerate
-from deepspeed import comm as dist
+import math
+import torch
 
 from utils import *
-
 
 def split_batch(batch, pieces):
     example_tuple, labels = batch
@@ -15,7 +14,6 @@ def split_batch(batch, pieces):
     split_examples = zip(*(torch.split(tensor, split_size) for tensor in example_tuple))
     return [(ex, None) for ex in split_examples]
 
-
 def shuffle_list(l, seed):
     g = torch.Generator()
     g.manual_seed(seed)
@@ -23,8 +21,8 @@ def shuffle_list(l, seed):
     new_l = [l[i] for i in shuffle_idx]
     return new_l
 
-
 class DistributedBatchSampler(torch.utils.data.Sampler):
+
     def __init__(self, dataset, batch_size, num_replicas, rank, batch_size_multiplier=1, shuffle=True, seed=0):
         self.dataset = dataset
         self.batch_size = batch_size
@@ -33,33 +31,33 @@ class DistributedBatchSampler(torch.utils.data.Sampler):
         self.rank = rank
         self.shuffle = shuffle
         self.seed = seed
-        
+
         dataset_size = len(dataset)
-        
+
         # Create indices and shuffle if needed
         indices = list(range(dataset_size))
         if self.shuffle:
             indices = shuffle_list(indices, self.seed)
-        
+
         # Calculate global batch size
         global_batch_size = self.batch_size * self.batch_size_multiplier * self.num_replicas
-        
+
         # Pad dataset to make it evenly divisible by global_batch_size
         if dataset_size % global_batch_size != 0:
             padding_needed = global_batch_size - (dataset_size % global_batch_size)
             # Repeat indices to pad
             padding_indices = (indices * ((padding_needed // dataset_size) + 1))[:padding_needed]
             indices.extend(padding_indices)
-        
+
         # Split into global batches
         global_batches = []
         for i in range(0, len(indices), global_batch_size):
             global_batches.append(indices[i:i + global_batch_size])
-        
+
         # Shuffle global batches if needed
         if self.shuffle:
             global_batches = shuffle_list(global_batches, self.seed + 1)
-        
+
         # Extract batches for this rank
         samples_per_rank = self.batch_size * self.batch_size_multiplier
         self.indices = []
@@ -75,8 +73,8 @@ class DistributedBatchSampler(torch.utils.data.Sampler):
     def __len__(self):
         return len(self.indices)
 
-
 class PipelineDataLoader:
+
     def __init__(self, dataset, batch_size, gradient_accumulation_steps, data_parallel_world_size, data_parallel_rank, shuffle=True):
         assert data_parallel_rank < data_parallel_world_size
         self.dataset = dataset
@@ -133,18 +131,19 @@ class PipelineDataLoader:
                 yield micro_batch
 
     def _create_dataloader(self):
+
         def collate_fn(examples):
             input_ids = torch.stack([ex['input_ids'] for ex in examples])
             batch_size, seq_len = input_ids.shape
-            
+
             # Create attention mask once (all ones for fixed-length sequences)
             attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long)
-            
+
             # Labels are identical to input_ids for causal LM
             labels = input_ids
-            
+
             return ((input_ids, attention_mask, labels), None)
-        
+
         self.dataloader = DataLoader(
             self.dataset,
             pin_memory=True,

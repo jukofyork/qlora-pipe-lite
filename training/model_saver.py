@@ -1,13 +1,11 @@
+from huggingface_hub import save_torch_state_dict
+import deepspeed
 import glob
 import os
 import shutil
-
-import deepspeed
 import torch
-from huggingface_hub import save_torch_state_dict
 
 from utils import safe_rmtree
-
 
 def save_lora(model_engine, pipeline_model, lora_config, run_dir, name):
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
@@ -39,7 +37,6 @@ def save_lora(model_engine, pipeline_model, lora_config, run_dir, name):
         torch.save(state_dict, os.path.join(save_dir, 'adapter_model.bin'))
         lora_config.save_pretrained(save_dir)
         safe_rmtree(tmp_dir)
-
 
 def save_full_model(model_engine, pipeline_model, model_dir, run_dir, name):
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir

@@ -1,8 +1,8 @@
-import os
-import glob
+from contextlib import contextmanager
 from datetime import datetime
 from deepspeed import comm as dist
-from contextlib import contextmanager
+import glob
+import os
 import shutil
 import time
 
@@ -42,4 +42,4 @@ def safe_rmtree(dir_path, max_retries=5, initial_wait_seconds=1):
         except OSError as e:
             if attempt == max_retries:
                 raise e
-            time.sleep(initial_wait_seconds * 2**attempt)
+            time.sleep(initial_wait_seconds * 2 ** attempt)

@@ -1,11 +1,11 @@
-import torch
-from torch import nn
 from deepspeed.runtime.pipe import module as pipe_module
+from torch import nn
+import torch
 
 from kernels.cross_entropy_loss import Fast_CrossEntropyLoss
 
-
 class LayerSpec(pipe_module.LayerSpec):
+
     def __init__(self, typename, *module_args, **module_kwargs):
         super().__init__(typename, *module_args, **module_kwargs)
 
@@ -16,9 +16,9 @@ class LayerSpec(pipe_module.LayerSpec):
     @property
     def estimated_size(self):
         return self.module_kwargs.get('_estimated_size', 1)
-    
-    
+
 class EmbeddingPipe(nn.Module):
+
     def __init__(self, loader_util, orig, model, embedding_on_cpu=False):
         super().__init__()
         self.orig = orig
@@ -58,7 +58,7 @@ class EmbeddingPipe(nn.Module):
 
         hidden_states = inputs_embeds
         if self.model[0].config.model_type == 'gemma2':
-            normalizer = torch.tensor(self.model[0].config.hidden_size**0.5, dtype=hidden_states.dtype)
+            normalizer = torch.tensor(self.model[0].config.hidden_size ** 0.5, dtype=hidden_states.dtype)
             hidden_states = hidden_states * normalizer
 
         # Compute rotary embeddings
@@ -77,8 +77,8 @@ class EmbeddingPipe(nn.Module):
             sin.requires_grad_(True)
         return hidden_states, attention_mask, cos, sin, labels
 
-
 class LlamaDecoderLayerPipe(nn.Module):
+
     def __init__(self, loader_util, orig):
         super().__init__()
         self.orig = orig
@@ -88,9 +88,9 @@ class LlamaDecoderLayerPipe(nn.Module):
         hidden_states, attention_mask, cos, sin, labels = inputs
         result = (self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0], attention_mask, cos, sin, labels)
         return result
-    
-    
+
 class LlamaRMSNormPipe(nn.Module):
+
     def __init__(self, loader_util, orig):
         super().__init__()
         self.orig = orig
@@ -100,8 +100,8 @@ class LlamaRMSNormPipe(nn.Module):
         hidden_states, _, _, _, labels = inputs
         return self.orig(hidden_states), labels
 
-
 class LmHeadPipe(nn.Module):
+
     def __init__(self, loader_util, lm_head, logit_scale=None, final_logit_softcapping=None, tie_weights=None):
         super().__init__()
         # Unlike the other wrapper classes, this is called lm_head and not orig. Because this is directly a
@@ -124,8 +124,8 @@ class LmHeadPipe(nn.Module):
             logits = logits * self.final_logit_softcapping
         return logits, labels
 
-
 class ComputeMetrics(nn.Module):
+
     def __init__(self):
         super().__init__()
 
@@ -143,5 +143,5 @@ class ComputeMetrics(nn.Module):
         valid_loss = (shift_labels >= 0)
 
         loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels)[valid_loss]
-       
+
         return loss_unreduced.mean()

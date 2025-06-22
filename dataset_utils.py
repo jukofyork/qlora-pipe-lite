@@ -1,16 +1,14 @@
+from tqdm import tqdm
+import datasets
 import os
 import os.path
-
 import torch
-import datasets
-from tqdm import tqdm
 
 from utils import *
 
 # Dataset preprocessing batch sizes
 TOKENIZE_BATCH_SIZE = 10
 SPLIT_BATCH_SIZE = 100
-
 
 def yield_sequences_from_token_batch(tokenizer, token_batch, sequence_len):
     # Initialize sequence_tokens with BOS token if it exists
@@ -27,7 +25,7 @@ def yield_sequences_from_token_batch(tokenizer, token_batch, sequence_len):
         while idx < len(tokens):
             # Calculate how many tokens are needed to fill the sequence
             need = sequence_len - len(sequence_tokens)
-            taken = tokens[idx : idx + need]
+            taken = tokens[idx: idx + need]
             idx += len(taken)
             sequence_tokens.extend(taken)
             if len(sequence_tokens) >= sequence_len:
@@ -37,10 +35,9 @@ def yield_sequences_from_token_batch(tokenizer, token_batch, sequence_len):
                 sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
     # Discard anything remaining to ensure all are exactly sequence_len in length...
 
-
 def load_single_dataset(dataset_path, tokenizer, sequence_len):
-    base_dir   = os.path.dirname(dataset_path.split("*", 1)[0])
-    cache_dir  = os.path.join(base_dir, "hf_cache")
+    base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
+    cache_dir = os.path.join(base_dir, "hf_cache")
 
     dataset = datasets.load_dataset(
         "text",
@@ -50,7 +47,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     )["train"]
 
     dataset.set_format(type='torch')
-    
+
     num_proc = min(os.cpu_count(), len(dataset))
 
     dataset = dataset.map(
@@ -72,7 +69,6 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
 
     return dataset
 
-
 def load_datasets(config, tokenizer):
     if 'sequence_len' not in config:
         raise ValueError('Need to specify a sequence_len')
@@ -80,7 +76,7 @@ def load_datasets(config, tokenizer):
     assert sequence_len > 0
     # A100 wants sequence lengths to be multiples of 64, other cards are efficient with smaller, so just do 64
     assert sequence_len % 64 == 0, f"sequence_len ({sequence_len}) must be a multiple of 64 for optimal GPU performance"
-    
+
     if 'datasets' not in config:
         raise ValueError('Need to specify at least one dataset')
 

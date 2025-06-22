@@ -1,30 +1,29 @@
-import argparse
-import os
 from datetime import datetime, timedelta, timezone
-import shutil
-import json
-
-import torch
-import transformers
-import deepspeed
-import toml
+import argparse
 import bitsandbytes
+import deepspeed
+import json
 import optimi
+import os
+import shutil
+import toml
+import torch
+
+import transformers
 
 from dataset_utils import load_datasets
-import dataloader
-from utils import is_main_process, get_most_recent_run_dir
-import engine
 from training.model_factory import (
-    create_model, 
-    create_pipeline_model, 
-    create_lora_config, 
-    apply_lora_adapters, 
-    configure_full_fine_tuning, 
+    create_model,
+    create_pipeline_model,
+    create_lora_config,
+    apply_lora_adapters,
+    configure_full_fine_tuning,
     parse_layers_to_transform
 )
 from training.trainer import Trainer
-
+from utils import is_main_process, get_most_recent_run_dir
+import dataloader
+import engine
 
 def get_optimizer(model_parameters, config):
     optimizer_kwargs = {
@@ -38,10 +37,11 @@ def get_optimizer(model_parameters, config):
     return optimi.AdamW(**optimizer_kwargs)
 
 def make_rms_ratio_fn(beta):
-    def rms_ratio_fn(step):
-        return torch.sqrt(torch.tensor((1 - beta**step)/(1 + beta**step))).item()
-    return rms_ratio_fn
 
+    def rms_ratio_fn(step):
+        return torch.sqrt(torch.tensor((1 - beta ** step) / (1 + beta ** step))).item()
+
+    return rms_ratio_fn
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config',
@@ -52,7 +52,6 @@ parser.add_argument('--resume_from_checkpoint', action='store_true', default=Non
                     help='resume training from the most recent checkpoint')
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
-
 
 if __name__ == '__main__':
     with open(args.config) as f:
@@ -86,6 +85,7 @@ if __name__ == '__main__':
 
     # Ugly hack to move quantized models from GPU to CPU, and back to GPU again without triggering re-quantization
     bnb_cuda_old = bitsandbytes.nn.modules.Params4bit.cuda
+
     def bnb_cuda_hijack(self, device):
         if getattr(self, 'already_quantized', False):
             self.data = self.data.to(device)
@@ -93,15 +93,16 @@ if __name__ == '__main__':
             return self
         self.already_quantized = True
         return bnb_cuda_old(self, device)
+
     bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
 
     # Create model and pipeline
     model = create_model(config, model_type)
     pipeline_model = create_pipeline_model(model, config)
-    
+
     target_modules = config['target_modules'] if 'target_modules' in config else []
     layers_to_transform = parse_layers_to_transform(config)
-    
+
     if config.get('full_fine_tune', False):
         lora_config = None
         configure_full_fine_tuning(model, config, target_modules, layers_to_transform)
@@ -130,16 +131,16 @@ if __name__ == '__main__':
     model_engine.set_dataloader(train_dataloader)
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
     model_engine.total_steps = steps_per_epoch * config.get('epochs', 1)
-    
+
     # handle Deepspeed optimizer wrapper (e.g. BF16_Optimizer)
     optimizer = getattr(optimizer, 'optimizer', optimizer)
-   
+
     # see: https://github.com/tdrussell/qlora-pipe/pull/35#issuecomment-2495460307
     model_engine.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lr_lambda=make_rms_ratio_fn(config.get('beta2', 0.99))
     )
-        
+
     # Eval dataset doesn't need to repeat; we just use this to track "epoch" so we know when we're done iterating over it.
     eval_dataloader = dataloader.PipelineDataLoader(
         eval_data,
@@ -166,6 +167,6 @@ if __name__ == '__main__':
         max_checkpoints=config.get('max_checkpoints', -1),
         resume_from_checkpoint=args.resume_from_checkpoint
     )
-    
+
     # Start training
-    trainer.train() 
+    trainer.train()

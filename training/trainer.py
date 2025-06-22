@@ -1,14 +1,14 @@
-import time
-import gc
-import torch
 from torch.utils.tensorboard import SummaryWriter
+import gc
+import time
+import torch
 
 from training.checkpoint_manager import load_checkpoint, save_checkpoint, prune_checkpoints
 from training.model_saver import save_lora, save_full_model
 from utils import is_main_process
 
-
 class Trainer:
+
     def __init__(
         self,
         model_engine,
@@ -37,15 +37,55 @@ class Trainer:
         self.checkpoint_interval = checkpoint_interval
         self.max_checkpoints = max_checkpoints
         self.resume_from_checkpoint = resume_from_checkpoint
-        
+
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
-        
+
         # Calculate evaluation step indices to use across the entire run
-        self.eval_step_indices = set()
-        for i in range(1, evals_per_run):
-            step_in_run = round(i * model_engine.total_steps / (evals_per_run - 1))
-            self.eval_step_indices.add(step_in_run)
+        self.eval_step_indices = self._calculate_eval_steps(model_engine.total_steps, evals_per_run)
+
+    def train(self):
+        """Main training loop."""
+        step = 1
+
+        if self.resume_from_checkpoint:
+            resumed_step = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
+            if resumed_step is not None:
+                step = resumed_step
+
+        # Initial evaluation
+        last_eval_loss = self.evaluate(step - 1)
+        if is_main_process():
+            self._print_eval_progress(step - 1, last_eval_loss)
+
+        while self.train_dataloader.epoch <= self.epochs:
+            # Memory cleanup before each training step
+            self._cleanup_memory()
+
+            # Forward/backward pass and optimizer step
+            metrics = self.model_engine.train_batch()
+            self.train_dataloader.sync_epoch()
+
+            # Log training metrics to tensorboard
+            if is_main_process():
+                self._write_metrics('train', metrics, step)
+
+            # Periodic evaluation based on global step
+            if step in self.eval_step_indices:
+                loss = self.evaluate(step)
+                if is_main_process():
+                    self._print_eval_progress(step, loss, last_eval_loss)
+                last_eval_loss = loss
+
+            # Time-based checkpointing
+            self._save_checkpoint(step)
+
+            step += 1
+
+        self._save_model('final')
+
+        if is_main_process():
+            print('TRAINING COMPLETE!')
 
     def evaluate(self, step):
         orig_micro_batches = self.model_engine.micro_batches
@@ -65,70 +105,49 @@ class Trainer:
         self.eval_dataloader.reset()
         self.model_engine.micro_batches = orig_micro_batches
         eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
-        loss = None
-        if is_main_process():
-            loss = self._write_metrics(f'eval', eval_metrics, step)
-        return loss
 
-    def train(self):
-        """Main training loop."""
-        step = 1
-        
-        if self.resume_from_checkpoint:
-            resumed_step = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
-            if resumed_step is not None:
-                step = resumed_step
-        
-        # Initial evaluation
-        last_eval_loss = self.evaluate(step - 1)
+        # Log evaluation metrics to tensorboard
         if is_main_process():
-            print(f'- Initial evaluation loss: {last_eval_loss:.4f}')
-        
-        while self.train_dataloader.epoch <= self.epochs:
-            # Memory cleanup before each training step
-            gc.collect()
-            torch.cuda.empty_cache()
-            
-            # Forward/backward pass and optimizer step
-            metrics = self.model_engine.train_batch()
-            self.train_dataloader.sync_epoch()
-            
-            # Log training metrics to tensorboard
-            if is_main_process():
-                self._write_metrics('train', metrics, step)
-            
-            # Periodic evaluation based on global step
-            if step in self.eval_step_indices:
-                loss = self.evaluate(step)
-                if is_main_process():
-                    self._print_eval_progress(step, loss, last_eval_loss)
-                last_eval_loss = loss
-            
-            # Time-based checkpointing
-            self._save_checkpoint(step)
-            
-            step += 1
-        
-        self._save_model('final')
-        
-        if is_main_process():
-            print('TRAINING COMPLETE!')
+            self._write_metrics('eval', eval_metrics, step)
+
+        return self._extract_loss(eval_metrics)
+
+    def _calculate_eval_steps(total_steps, evals_per_run):
+        """Calculate which steps to run evaluation on."""
+        eval_steps = set()
+        for i in range(1, evals_per_run):
+            step_in_run = round(i * total_steps / (evals_per_run - 1))
+            eval_steps.add(step_in_run)
+        return eval_steps
+
+    def _cleanup_memory(self):
+        """Clean up GPU memory before training step."""
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def _extract_loss(self, metrics):
+        """Extract loss (first metric) as a scalar value."""
+        return metrics[0].mean().item()
 
     def _write_metrics(self, prefix, metrics, step):
-        loss = metrics[0].mean().item()
-        self.tb_writer.add_scalar(f'{prefix}/loss', loss, step)
-        return loss
+        """Write all metrics to tensorboard."""
+        self.tb_writer.add_scalar(f'{prefix}/loss', metrics[0].mean().item(), step)
 
-    def _print_eval_progress(self, step, current_loss, last_loss):
-        """Print evaluation progress with percentage change."""
-        percent_change = (current_loss / last_loss - 1) * 100
-        print(f'- Step {step} evaluation loss: {current_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
+    def _print_eval_progress(self, step, current_loss, last_loss=None):
+        """Print evaluation progress with optional percentage change."""
+        if step == 0:  # Initial evaluation (step - 1 in train())
+            print(f'- Initial evaluation loss: {current_loss:.4f}')
+        elif last_loss is None:
+            print(f'- Step {step} evaluation loss: {current_loss:.4f}')
+        else:
+            percent_change = (current_loss / last_loss - 1) * 100
+            print(f'- Step {step} evaluation loss: {current_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
 
     def _should_checkpoint(self):
         """Check if it's time to checkpoint based on time interval."""
         if not is_main_process():
             return False
-        
+
         current_time = time.time()
         if (current_time - self.last_checkpoint_time) / 60 >= self.checkpoint_interval:
             self.last_checkpoint_time = current_time
@@ -138,17 +157,16 @@ class Trainer:
     def _save_checkpoint(self, step):
         """Save checkpoint and broadcast decision to all processes."""
         do_checkpoint = self._should_checkpoint()
-        
+
         # Broadcast decision to ensure all processes checkpoint together
         result = [do_checkpoint]
         torch.distributed.broadcast_object_list(result, src=0)
         do_checkpoint = result[0]
-        
+
         if do_checkpoint:
             save_checkpoint(self.model_engine, self.train_dataloader, self.run_dir, step)
             if is_main_process():
                 prune_checkpoints(self.run_dir, self.max_checkpoints)
-
 
     def _save_model(self, name):
         """Save the trained model (LoRA adapters or full model)."""

@@ -1,21 +1,19 @@
+from accelerate.utils import set_module_tensor_to_device
+from deepspeed.accelerator import get_accelerator
+from inspect import signature
+from torch import nn
+import accelerate
 import os
 import re
-from inspect import signature
-
 import torch
-from torch import nn
-import transformers
-from deepspeed.accelerator import get_accelerator
+
 from transformers.integrations import get_keys_to_not_convert
-import bitsandbytes as bnb
-import accelerate
-from accelerate.utils import set_module_tensor_to_device
+import transformers
 
 from utils import is_main_process
-
+import bitsandbytes as bnb
 
 LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX = r'^language_model\.'
-
 
 class PipelineModel(nn.Module):
 
@@ -32,10 +30,8 @@ class PipelineModel(nn.Module):
     def to_layer_specs(self):
         raise NotImplementedError()
 
-
 def _partial_module_name_match(full_name, list_to_match):
     return any(key in full_name for key in list_to_match)
-
 
 def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_config):
     """Replace a Linear layer with a BNB quantized version."""
@@ -74,15 +70,14 @@ def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_c
                 quant_type=quantization_config.bnb_4bit_quant_type,
                 **extra_kwargs,
             )
-        
+
         if is_main_process():
             print(f'quantized layer {full_name} to {type(parent_modules_map[name]).__name__}')
-        
+
         # Store the module class in case we need to transpose the weight later
         parent_modules_map[name].source_cls = type(module)
         # Force requires grad to False to avoid unexpected errors
         parent_modules_map[name].requires_grad_(False)
-
 
 def _recursively_replace_with_quantized_linear(
     model,
@@ -123,8 +118,8 @@ def _recursively_replace_with_quantized_linear(
         # Remove the last key for recursion
         current_key_name.pop(-1)
 
-
 class LoaderUtil:
+
     def __init__(self, model_path, quantization_config, modules_to_not_quantize):
         self.model_path = model_path
         self.quantization_config = quantization_config

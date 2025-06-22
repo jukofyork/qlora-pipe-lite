@@ -16,9 +16,8 @@
 
 # I (tdrussell) made a few modifications.
 
-import torch
 from deepspeed.runtime.activation_checkpointing.checkpointing import detach_variable
-
+import torch
 
 class Unsloth_Offloaded_Gradient_Checkpointer(torch.autograd.Function):
     """
@@ -62,9 +61,7 @@ class Unsloth_Offloaded_Gradient_Checkpointer(torch.autograd.Function):
 
     pass
 
-
 pass
-
 
 @torch._disable_dynamo
 def unsloth_checkpoint(function, *args):

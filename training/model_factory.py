@@ -1,12 +1,12 @@
-import torch
-import transformers
-from peft import LoraConfig, get_peft_model
 from deepspeed.runtime.pipe.module import LayerSpec
+from peft import LoraConfig, get_peft_model
+import torch
+
+import transformers
 
 from models import causal_lm_models
 import engine
 import unsloth_utils
-
 
 def parse_layers_to_transform(config):
     """Parse layers_to_transform config into list of layer numbers."""
@@ -15,9 +15,8 @@ def parse_layers_to_transform(config):
         parts = layers_spec.split(',')
         for part in parts:
             start, stop = part.split(':')
-            layers_to_transform.extend(range(int(start), int(stop)+1))
+            layers_to_transform.extend(range(int(start), int(stop) + 1))
     return layers_to_transform
-
 
 def create_model(config, model_type):
     """Create the base transformer model with appropriate quantization."""
@@ -32,7 +31,7 @@ def create_model(config, model_type):
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_quant_type="nf4",
             llm_int8_skip_modules=no_quant_modules,
-        )       
+        )
 
     if model_type == 'llama':
         model = causal_lm_models.LlamaForCausalLMPipe(config, quantization_config=quantization_config)
@@ -52,9 +51,8 @@ def create_model(config, model_type):
         model = causal_lm_models.Gemma2ForCausalLMPipe(config, quantization_config=quantization_config)
     else:
         raise NotImplementedError()
-    
-    return model
 
+    return model
 
 def create_pipeline_model(model, config):
     """Create pipeline model from base model for distributed training."""
@@ -79,7 +77,6 @@ def create_pipeline_model(model, config):
 
     return pipeline_model
 
-
 def create_lora_config(config, target_modules, layers_to_transform):
     """Create LoRA configuration."""
     return LoraConfig(
@@ -90,7 +87,6 @@ def create_lora_config(config, target_modules, layers_to_transform):
         layers_to_transform=layers_to_transform if layers_to_transform else None,
         task_type='CAUSAL_LM'
     )
-
 
 def apply_lora_adapters(model, config, lora_config):
     """Apply LoRA configuration to model."""
@@ -104,13 +100,12 @@ def apply_lora_adapters(model, config, lora_config):
     lora_model.model.config.use_cache = False
     for name, p in lora_model.named_parameters():
         p.original_name = name
-        
 
 def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
     """Setup full fine-tuning by setting requires_grad on parameters."""
     for name, p in model.named_parameters():
         p.original_name = name
-    
+
     for name, p in model.named_parameters():
         should_train = True
         if target_modules and not any(target in name for target in target_modules):
