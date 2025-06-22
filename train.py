@@ -2,28 +2,28 @@ import argparse
 import os
 from datetime import datetime, timedelta, timezone
 import shutil
-import glob
-import time
 import json
-import gc
 
 import torch
-from torch.utils.tensorboard import SummaryWriter
 import transformers
-from peft import LoraConfig, get_peft_model
 import deepspeed
-from deepspeed.runtime.pipe.module import LayerSpec
 import toml
 import bitsandbytes
-import optimi
 
 from dataset_utils import load_datasets
 import dataloader
-from saver import *
 from utils import is_main_process
 import engine
-from models import causal_lm_models
-import unsloth_utils
+from training.model_factory import (
+    create_model, 
+    create_pipeline_model, 
+    create_lora_config, 
+    apply_lora_adapters, 
+    configure_full_fine_tuning, 
+    parse_layers_to_transform
+)
+from training.utils import get_most_recent_run_dir, get_optimizer, make_rms_ratio_fn
+from training.trainer import Trainer
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config',
@@ -34,156 +34,6 @@ parser.add_argument('--resume_from_checkpoint', action='store_true', default=Non
                     help='resume training from the most recent checkpoint')
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
-
-
-def get_most_recent_run_dir(output_dir):
-    return list(sorted(glob.glob(os.path.join(output_dir, '*'))))[-1]
-
-
-def write_metrics(tb_writer, prefix, metrics, step):
-    loss = metrics[0].mean().item()
-    tb_writer.add_scalar(f'{prefix}/loss', loss, step)
-    return loss
-
-
-def evaluate(model_engine, eval_dataloader, tb_writer, step):
-    orig_micro_batches = model_engine.micro_batches
-    model_engine.micro_batches = 1
-    iterator = iter(eval_dataloader)
-    all_metrics = None
-    while True:
-        metrics = model_engine.eval_batch(iterator)
-        eval_dataloader.sync_epoch()
-        if all_metrics is None:
-            all_metrics = [[] for _ in range(len(metrics))]
-        if eval_dataloader.epoch == 2:
-            break
-        for i, metric in enumerate(metrics):
-            all_metrics[i].append(metric)
-
-    eval_dataloader.reset()
-    model_engine.micro_batches = orig_micro_batches
-    eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
-    loss = None
-    if is_main_process():
-        loss = write_metrics(tb_writer, f'eval', eval_metrics, step)
-    return loss
-
-
-def parse_layers_to_transform(config):
-    """Parse layers_to_transform config into list of layer numbers."""
-    layers_to_transform = []
-    if layers_spec := config.get('layers_to_transform', None):
-        parts = layers_spec.split(',')
-        for part in parts:
-            start, stop = part.split(':')
-            layers_to_transform.extend(range(int(start), int(stop)+1))
-    return layers_to_transform
-
-
-def create_model(config, model_type):
-    """Create the base transformer model with appropriate quantization."""
-    if config.get('full_fine_tune', False) or not config.get('load_in_4bit', False):
-        quantization_config = None
-    else:
-        no_quant_modules = ['lm_head']
-        if model_type == 'mixtral':
-            no_quant_modules.append('gate')
-        quantization_config = transformers.BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4",
-            llm_int8_skip_modules=no_quant_modules,
-        )       
-
-    if model_type == 'llama':
-        model = causal_lm_models.LlamaForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'mistral' or model_type == 'mistral3':
-        model = causal_lm_models.MistralForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'mixtral':
-        model = causal_lm_models.MixtralForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'qwen2':
-        model = causal_lm_models.Qwen2ForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'phi3':
-        model = causal_lm_models.Phi3ForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'cohere':
-        model = causal_lm_models.CohereForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'cohere2':
-        model = causal_lm_models.Cohere2ForCausalLMPipe(config, quantization_config=quantization_config)
-    elif model_type == 'gemma2':
-        model = causal_lm_models.Gemma2ForCausalLMPipe(config, quantization_config=quantization_config)
-    else:
-        raise NotImplementedError()
-    
-    return model
-
-
-def create_pipeline_model(model, config):
-    """Create pipeline model from base model for distributed training."""
-    # CAREFUL! The "primary" layers of the model have to have 'decoderlayer' in them for
-    # activation checkpointing to automatically work correctly.
-    layers = model.to_layer_specs()
-    checkpointable_layers = set()
-    for layer in layers:
-        if isinstance(layer, LayerSpec) and 'decoderlayer' in layer.typename.__name__.lower():
-            checkpointable_layers.add(layer.typename.__name__)
-    checkpointable_layers = list(checkpointable_layers)
-
-    pipeline_model = engine.CustomPipelineModule(
-        layers=layers,
-        num_stages=config.get('pipeline_stages', 1),
-        activation_checkpoint_interval=1,
-        checkpointable_layers=checkpointable_layers,
-        activation_checkpoint_func=unsloth_utils.unsloth_checkpoint,
-        partition_method='estimated_size',
-        use_column_major_topology=config.get('use_column_major_topology', False)
-    )
-
-    return pipeline_model
-
-
-def create_lora_config(config, target_modules, layers_to_transform):
-    """Create LoRA configuration."""
-    return LoraConfig(
-        r=config['lora_rank'],
-        lora_alpha=config.get('lora_alpha', round(config['lora_rank'] ** 0.5)),  # rslora: s = 1/sqrt(rank)
-        lora_dropout=config['lora_dropout'] if 'lora_dropout' in config else 0.0,
-        target_modules=target_modules if target_modules else 'all-linear',
-        layers_to_transform=layers_to_transform if layers_to_transform else None,
-        task_type='CAUSAL_LM'
-    )
-
-
-def apply_lora_adapters(model, config, lora_config):
-    """Apply LoRA configuration to model."""
-    lora_model = get_peft_model(model, lora_config)
-    # If the underlying weights are floats, the lora weights have already been
-    # cast to the same dtype, so we need to change the dtype here.
-    for p in lora_model.parameters():
-        if p.requires_grad:
-            p.data = p.data.to(torch.bfloat16)
-
-    lora_model.model.config.use_cache = False
-    for name, p in lora_model.named_parameters():
-        p.original_name = name
-        
-
-def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
-    """Setup full fine-tuning by setting requires_grad on parameters."""
-    for name, p in model.named_parameters():
-        p.original_name = name
-    
-    for name, p in model.named_parameters():
-        should_train = True
-        if target_modules and not any(target in name for target in target_modules):
-            should_train = False
-            print(f'not training {name} because it is not present in target_modules')
-        elif layers_to_transform and 'model.layers.' in name:
-            layer_num = int(name.split('model.layers.')[1].split('.')[0])
-            if layer_num not in layers_to_transform:
-                should_train = False
-                print(f'not training {name} because layer {layer_num} is not in layers_to_transform')
-        p.requires_grad = should_train
 
 
 if __name__ == '__main__':
@@ -227,6 +77,7 @@ if __name__ == '__main__':
         return bnb_cuda_old(self, device)
     bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
 
+    # Create model and pipeline
     model = create_model(config, model_type)
     pipeline_model = create_pipeline_model(model, config)
     
@@ -242,22 +93,11 @@ if __name__ == '__main__':
 
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
-    def get_optimizer(model_parameters):
-        optimizer_kwargs = {
-            "params": model_parameters,
-            "lr": config['lr'],
-            "betas": (config.get('beta1', 0.9), config.get('beta2', 0.99)),
-            "weight_decay": config.get('weight_decay', 0.0),
-            "eps": config.get('eps', 1e-6),
-            "kahan_sum": True
-        }
-        return optimi.AdamW(**optimizer_kwargs) 
-
     model_engine, optimizer = engine.initialize(
         args=args,
         model=pipeline_model,
         model_parameters=parameters_to_train,
-        optimizer=get_optimizer,
+        optimizer=lambda params: get_optimizer(params, config),
     )
 
     model_engine.communication_data_type = torch.bfloat16
@@ -273,26 +113,37 @@ if __name__ == '__main__':
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
     model_engine.total_steps = steps_per_epoch * config.get('epochs', 1)
     
-    # Calculate evaluation step indices to use across the entire run
-    evals_per_run = config.get('evals_per_run', 10)
-    eval_step_indices = set()
-    for i in range(1, evals_per_run):
-        step_in_run = round(i * model_engine.total_steps / (evals_per_run - 1))
-        eval_step_indices.add(step_in_run)
-    
     # handle Deepspeed optimizer wrapper (e.g. BF16_Optimizer)
     optimizer = getattr(optimizer, 'optimizer', optimizer)
    
     # see: https://github.com/tdrussell/qlora-pipe/pull/35#issuecomment-2495460307
-    def make_rms_ratio_fn(beta):
-        def rms_ratio_fn(step):
-            return torch.sqrt(torch.tensor((1 - beta**step)/(1 + beta**step))).item()
-        return rms_ratio_fn
-    model_engine.lr_scheduler  = torch.optim.lr_scheduler.LambdaLR(
+    model_engine.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lr_lambda=make_rms_ratio_fn(config.get('beta2', 0.99))
     )
         
+    # Eval dataset doesn't need to repeat; we just use this to track "epoch" so we know when we're done iterating over it.
+    eval_dataloader = dataloader.PipelineDataLoader(
+        eval_data,
+        model_engine.train_micro_batch_size_per_gpu(),
+        model_engine.gradient_accumulation_steps(),
+        model_engine.grid.get_data_parallel_world_size(),
+        model_engine.grid.get_data_parallel_rank(),
+        shuffle=False,
+    )
+
+    # Create trainer
+    trainer = Trainer(
+        config=config,
+        model_engine=model_engine,
+        train_dataloader=train_dataloader,
+        eval_dataloader=eval_dataloader,
+        run_dir=run_dir,
+        pipeline_model=pipeline_model,
+        args=args,
+        lora_config=lora_config
+    )
+    
     step = 1
     if args.resume_from_checkpoint:
         load_path, client_state = model_engine.load_checkpoint(
@@ -308,66 +159,5 @@ if __name__ == '__main__':
         if is_main_process():
             print(f'Resuming training from checkpoint. Resuming at epoch: {train_dataloader.epoch}, step: {step}')
 
-    # Eval dataset doesn't need to repeat; we just use this to track "epoch" so we know when we're done iterating over it.
-    eval_dataloader = dataloader.PipelineDataLoader(
-        eval_data,
-        model_engine.train_micro_batch_size_per_gpu(),
-        model_engine.gradient_accumulation_steps(),
-        model_engine.grid.get_data_parallel_world_size(),
-        model_engine.grid.get_data_parallel_rank(),
-        shuffle=False,
-    )
-
-    tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
-   
-    last_eval_loss = evaluate(model_engine, eval_dataloader, tb_writer, step - 1)
-    if is_main_process():
-        print(f'- Initial evaluation loss: {last_eval_loss:.4f}')
-    
-    # Initialize checkpoint timing on main process only
-    last_checkpoint_time = time.time() if is_main_process() else None
-    
-    while train_dataloader.epoch <= config.get('epochs', 1):
-        # Memory cleanup before each training step
-        gc.collect()
-        torch.cuda.empty_cache()
-        
-        # Forward/backward pass and optimizer step
-        metrics = model_engine.train_batch()
-        train_dataloader.sync_epoch()
-        
-        # Log training metrics to tensorboard
-        if is_main_process():
-            write_metrics(tb_writer, 'train', metrics, step)
-        
-        # Periodic evaluation based on global step
-        if step in eval_step_indices:
-            loss = evaluate(model_engine, eval_dataloader, tb_writer, step)
-            if is_main_process():
-                percent_change = (loss / last_eval_loss - 1) * 100
-                print(f'- Step {step} evaluation loss: {loss:.4f} (last: {last_eval_loss:.4f}, Δ: {percent_change:.2f}%)')
-            last_eval_loss = loss
-        
-        # Time-based checkpointing: main process decides, broadcasts to all
-        do_checkpoint = False
-        if is_main_process():
-            current_time = time.time()
-            if (current_time - last_checkpoint_time) / 60 >= config.get('checkpoint_interval', 60):
-                do_checkpoint = True
-                last_checkpoint_time = current_time
-        # Broadcast decision to ensure all processes checkpoint together
-        result = [do_checkpoint]
-        torch.distributed.broadcast_object_list(result, src=0)
-        do_checkpoint = result[0]
-        if do_checkpoint:
-            save_checkpoint(model_engine, train_dataloader, run_dir, step)
-            if is_main_process():
-                prune_checkpoints(run_dir, config.get('max_checkpoints', -1))
-
-        step += 1
-    
-    # Save final model when training completes
-    save_model(model_engine, pipeline_model, args, lora_config, config, run_dir, 'final')
-    
-    if is_main_process():
-        print('TRAINING COMPLETE!')
+    # Start training
+    trainer.train(start_step=step)
