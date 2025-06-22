@@ -23,6 +23,8 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
     # Initialize sequence_tokens with BOS token if it exists
     sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
 
+    process = psutil.Process(os.getpid())
+
     # Process dataset item by item (streaming)
     for item in tqdm(dataset, desc="Creating sequences"):
         tokens = item['input_ids'].tolist()
