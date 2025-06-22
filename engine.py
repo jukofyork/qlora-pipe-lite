@@ -16,7 +16,8 @@ import torch
 
 from utils import eta_str, log
 
-def initialize(args=None,
+def initialize(config=None,
+               args=None,
                model=None,
                model_parameters=None,
                optimizer=None):

@@ -196,6 +196,7 @@ def setup_model_and_engine(config, model_type, args):
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
     model_engine, optimizer = engine.initialize(
+        config=config,
         args=args,
         model=pipeline_model,
         model_parameters=parameters_to_train,
