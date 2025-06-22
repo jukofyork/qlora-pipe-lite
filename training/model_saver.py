@@ -78,7 +78,7 @@ def _save_partial_state_dict(pipeline_model, tmp_dir, stage_id, dp_id, trainable
         if trainable_only:
             # For LoRA: check for original_name and clean parameter names
             if not hasattr(p, 'original_name'):
-                print(f'WARNING: parameter {name} requires_grad but does not have original_name. Not saving it.')
+                log(f'WARNING: parameter {name} requires_grad but does not have original_name. Not saving it.')
                 continue
             param_name = p.original_name.replace('.default', '').replace('.modules_to_save', '')
         else:

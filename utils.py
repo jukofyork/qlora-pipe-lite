@@ -20,7 +20,8 @@ def zero_first(is_main):
 
 def log(msg):
     """Print timestamped log message with qlora-pipe prefix."""
-    print(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}] [INFO] [qlora-pipe] {msg}')
+    if is_main_process():
+        print(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}] [INFO] [qlora-pipe] {msg}')
 
 def eta_str(eta):
     """Convert ETA seconds to human-readable string (e.g., '2h30m', '45s')."""

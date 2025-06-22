@@ -158,12 +158,12 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
         should_train = True
         if target_modules and not any(target in name for target in target_modules):
             should_train = False
-            print(f'not training {name} because it is not present in target_modules')
+            log(f'not training {name} because it is not present in target_modules')
         elif layers_to_transform and 'model.layers.' in name:
             layer_num = int(name.split('model.layers.')[1].split('.')[0])
             if layer_num not in layers_to_transform:
                 should_train = False
-                print(f'not training {name} because layer {layer_num} is not in layers_to_transform')
+                log(f'not training {name} because layer {layer_num} is not in layers_to_transform')
         p.requires_grad = should_train
 
 def setup_training_adapters(model, config):

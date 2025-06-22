@@ -71,8 +71,7 @@ def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_c
                 **extra_kwargs,
             )
 
-        if is_main_process():
-            print(f'quantized layer {full_name} to {type(parent_modules_map[name]).__name__}')
+        log(f'quantized layer {full_name} to {type(parent_modules_map[name]).__name__}')
 
         # Store the module class in case we need to transpose the weight later
         parent_modules_map[name].source_cls = type(module)
@@ -142,8 +141,7 @@ class LoaderUtil:
 
     def get_partial_state_dict(self, leaf_file):
         if self.loaded_state_dict is None or leaf_file != self.loaded_state_dict[0]:
-            if is_main_process():
-                print(f'loading checkpoint file {leaf_file}')
+            log(f'loading checkpoint file {leaf_file}')
             state_dict = transformers.modeling_utils.load_state_dict(os.path.join(self.model_path, leaf_file))
             state_dict = {re.sub(LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX, '', k): v for k, v in state_dict.items()}
             self.loaded_state_dict = (leaf_file, state_dict)
@@ -163,8 +161,7 @@ class LoaderUtil:
         self.is_loaded_in_4bit = True
 
     def load_state_dict_into_module(self, module):
-        if is_main_process():
-            print(f'load params into module {type(module)}')
+        log(f'load params into module {type(module)}')
         # bnb needs to replace with quantized linear before weights are loaded
         self.maybe_quantize(module)
         param_renaming_map = {p.original_name: new_name for new_name, p in module.named_parameters()}

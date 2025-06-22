@@ -97,8 +97,7 @@ def load_datasets(config, tokenizer):
         train_dataset = split_datasets['train']
         eval_dataset = split_datasets['test']
 
-    if is_main_process():
-        print(f'train_data size: {len(train_dataset)}')
-        print(f'eval_data size: {len(eval_dataset)}')
+    log(f'train data size: {len(train_dataset)} sequences ({len(train_dataset) * sequence_len} tokens)')
+    log(f'eval data size: {len(eval_dataset)} sequences ({len(eval_dataset) * sequence_len} tokens)')
 
     return train_dataset, eval_dataset

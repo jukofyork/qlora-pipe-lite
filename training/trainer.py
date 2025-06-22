@@ -86,8 +86,7 @@ class Trainer:
         # Save final model
         self._save_model('final')
 
-        if is_main_process():
-            print('TRAINING COMPLETE!')
+        log('TRAINING COMPLETE!')
 
     def evaluate(self, step):
         """Run evaluation on the eval dataset and return average loss."""
@@ -143,12 +142,12 @@ class Trainer:
     def _print_eval_progress(self, step, current_loss, last_loss=None):
         """Print evaluation progress with optional percentage change."""
         if step == 0:  # Initial evaluation
-            print(f'- Initial evaluation loss: {current_loss:.4f}')
+            log(f'- Initial evaluation loss: {current_loss:.4f}')
         elif last_loss is None:
-            print(f'- Step {step} evaluation loss: {current_loss:.4f}')
+            log(f'- Step {step} evaluation loss: {current_loss:.4f}')
         else:
             percent_change = (current_loss / last_loss - 1) * 100
-            print(f'- Step {step} evaluation loss: {current_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
+            log(f'- Step {step} evaluation loss: {current_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
 
     def _should_checkpoint(self):
         """Check if it's time to checkpoint based on time interval."""
@@ -173,7 +172,7 @@ class Trainer:
         if do_checkpoint:
             save_checkpoint(self.model_engine, self.train_dataloader, self.run_dir, step)
             if is_main_process():
-                prune_checkpoints(self.run_dir, self.max_checkpoints)
+                log(f"- Deleting checkpoint: 'global_step{step_num}'")(self.run_dir, self.max_checkpoints)
 
     def _save_model(self, name):
         """Save the trained model (LoRA adapters or full model)."""

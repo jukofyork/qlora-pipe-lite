@@ -290,8 +290,7 @@ class CustomPipelineModule(PipelineModule):
         num_stages = self._topo.get_dim('pipe')
         stage_id = self._topo.get_coord(self.global_rank).pipe
 
-        if self.global_rank == 0:
-            print(f'Partitioning pipeline stages with method {method}')
+        log(f'Partitioning pipeline stages with method {method}')
 
         method = method.lower()
 
@@ -322,7 +321,7 @@ class CustomPipelineModule(PipelineModule):
             for stage in range(num_stages):
                 start = self.parts[stage]
                 stop = self.parts[stage + 1]
-                print(f'stage={stage} layers={stop - start}')
+                log(f'stage={stage} layers={stop - start}')
                 for idx, layer in enumerate(self._layer_specs[start:stop]):
                     name = str(layer)
                     if isinstance(layer, LayerSpec):
@@ -338,12 +337,12 @@ class CustomPipelineModule(PipelineModule):
                     if estimated_sizes:
                         es = estimated_sizes[idx + start]
                         logstr += f', estimated size: {es}'
-                    print(logstr)
+                    log(logstr)
             if self.loss_fn:
                 try:
-                    print(f'  loss: {self.loss_fn.__name__}')
+                    log(f'  loss: {self.loss_fn.__name__}')
                 except AttributeError:
-                    print(f'  loss: {self.loss_fn.__class__.__name__}')
+                    log(f'  loss: {self.loss_fn.__class__.__name__}')
         deepspeed.comm.barrier()
 
         self._set_bounds(start=self.parts[stage_id], stop=self.parts[stage_id + 1])

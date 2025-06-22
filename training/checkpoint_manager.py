@@ -19,8 +19,7 @@ def load_checkpoint(model_engine, train_dataloader, run_dir):
     train_dataloader.load_state_dict(client_state['custom_loader'])
     step = client_state['step'] + 1
 
-    if is_main_process():
-        print(f'Resuming training from checkpoint. Resuming at epoch: {train_dataloader.epoch}, step: {step}')
+    log(f'Resuming training from checkpoint. Resuming at epoch: {train_dataloader.epoch}, step: {step}')
 
     return step
 
@@ -65,5 +64,5 @@ def prune_checkpoints(run_dir, max_checkpoints):
     # Remove oldest checkpoints
     while len(checkpoints) > max_checkpoints:
         step_num, path = checkpoints.pop(0)
-        print(f"- Deleting checkpoint: 'global_step{step_num}'")
+        log(f"- Deleting checkpoint: 'global_step{step_num}'")
         safe_rmtree(path)
