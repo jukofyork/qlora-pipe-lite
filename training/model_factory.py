@@ -182,11 +182,12 @@ def setup_training_adapters(model, config):
     return lora_config
 
 # Main setup function
-def setup_model_and_engine(config, model_type, args):
+def setup_model_and_engine(config, args):
     """Complete model setup including LoRA/full fine-tuning and engine initialization."""
     patch_bitsandbytes_cuda()
 
     # Create model and pipeline
+    model_type = get_model_type(config)
     model = create_model(config, model_type)
     pipeline_model = create_pipeline_model(model, config)
 
