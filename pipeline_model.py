@@ -59,6 +59,10 @@ def _replace_with_bnb_linear(parent_modules_map, name, full_name, quantization_c
                 quant_type=quantization_config.bnb_4bit_quant_type,
                 **extra_kwargs,
             )
+        
+        if is_main_process():
+            print(f'quantized layer {full_name} to {type(parent_modules_map[name]).__name__}')
+        
         # Store the module class in case we need to transpose the weight later
         parent_modules_map[name].source_cls = type(module)
         # Force requires grad to False to avoid unexpected errors
@@ -165,9 +169,8 @@ class LoaderUtil:
     def load_state_dict_into_module(self, module):
         if is_main_process():
             print(f'load params into module {type(module)}')
-        if isinstance(self.quantization_config, transformers.BitsAndBytesConfig):
-            # bnb needs to replace with quantized linear before weights are loaded
-            self.maybe_quantize(module)
+        # bnb needs to replace with quantized linear before weights are loaded
+        self.maybe_quantize(module)
         param_renaming_map = {p.original_name: new_name for new_name, p in module.named_parameters()}
         expected_keys = [p.original_name for p in module.parameters()]
         # If we have any extra attributes on the parameter, loading with BNB 4bit params breaks, so delete them.
@@ -189,8 +192,6 @@ class LoaderUtil:
                     set_module_tensor_to_device(module, name, device='cpu', value=renamed_state_dict[name])
 
         module.to(self.device)
-        if not isinstance(self.quantization_config, transformers.BitsAndBytesConfig):
-            self.maybe_quantize(module)
 
 
 class PipelineModel(nn.Module):
