@@ -1,47 +1,17 @@
 from datetime import datetime, timedelta, timezone
 import argparse
-import bitsandbytes
 import deepspeed
-import json
-import optimi
 import os
 import shutil
 import toml
-import torch
 
 import transformers
 
 from dataset_utils import load_datasets
-from training.model_factory import (
-    create_model,
-    create_pipeline_model,
-    create_lora_config,
-    apply_lora_adapters,
-    configure_full_fine_tuning,
-    parse_layers_to_transform
-)
+from training.model_factory import setup_model_and_engine, get_model_type
 from training.trainer import Trainer
 from utils import is_main_process, get_most_recent_run_dir
 import dataloader
-import engine
-
-def get_optimizer(model_parameters, config):
-    optimizer_kwargs = {
-        "params": model_parameters,
-        "lr": config['lr'],
-        "betas": (config.get('beta1', 0.9), config.get('beta2', 0.99)),
-        "weight_decay": config.get('weight_decay', 0.0),
-        "eps": config.get('eps', 1e-6),
-        "kahan_sum": True
-    }
-    return optimi.AdamW(**optimizer_kwargs)
-
-def make_rms_ratio_fn(beta):
-
-    def rms_ratio_fn(step):
-        return torch.sqrt(torch.tensor((1 - beta ** step) / (1 + beta ** step))).item()
-
-    return rms_ratio_fn
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config',
@@ -53,74 +23,32 @@ parser.add_argument('--resume_from_checkpoint', action='store_true', default=Non
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
 
-if __name__ == '__main__':
-    with open(args.config) as f:
-        config = toml.load(f)
-
+def setup_distributed_training(config):
+    """Initialize distributed training and return run directory."""
     deepspeed.init_distributed(timeout=timedelta(hours=2))
 
-    with open(os.path.join(config['model'], 'config.json')) as f:
-        model_config = json.load(f)
-        model_type = model_config.get('model_type', 'llama')
-
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        config['model'], local_files_only=True, model_max_length=int(1e30),
-    )
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    train_data, eval_data = load_datasets(config, tokenizer)
-
-    # if this is a new run, create a new dir for it
+    # Create new run directory for fresh training runs
     if not args.resume_from_checkpoint and is_main_process():
         run_dir = os.path.join(config['output_dir'], datetime.now(timezone.utc).strftime('%Y%m%d_%H-%M-%S'))
         os.makedirs(run_dir, exist_ok=True)
         shutil.copy(args.config, run_dir)
         shutil.copy(args.deepspeed_config, run_dir)
 
-    # wait for all processes then get the most recent dir (may have just been created)
+    # Synchronize all processes before determining run directory
     deepspeed.comm.barrier()
-    run_dir = get_most_recent_run_dir(config['output_dir'])
+    return get_most_recent_run_dir(config['output_dir'])
 
-    # Ugly hack to move quantized models from GPU to CPU, and back to GPU again without triggering re-quantization
-    bnb_cuda_old = bitsandbytes.nn.modules.Params4bit.cuda
-
-    def bnb_cuda_hijack(self, device):
-        if getattr(self, 'already_quantized', False):
-            self.data = self.data.to(device)
-            self.quant_state.to(device)
-            return self
-        self.already_quantized = True
-        return bnb_cuda_old(self, device)
-
-    bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
-
-    # Create model and pipeline
-    model = create_model(config, model_type)
-    pipeline_model = create_pipeline_model(model, config)
-
-    target_modules = config['target_modules'] if 'target_modules' in config else []
-    layers_to_transform = parse_layers_to_transform(config)
-
-    if config.get('full_fine_tune', False):
-        lora_config = None
-        configure_full_fine_tuning(model, config, target_modules, layers_to_transform)
-    else:
-        lora_config = create_lora_config(config, target_modules, layers_to_transform)
-        apply_lora_adapters(model, config, lora_config)
-
-    parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
-
-    model_engine, optimizer = engine.initialize(
-        args=args,
-        model=pipeline_model,
-        model_parameters=parameters_to_train,
-        optimizer=lambda params: get_optimizer(params, config),
+def setup_tokenizer(config):
+    """Load and configure tokenizer."""
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        config['model'], local_files_only=True, model_max_length=int(1e30),
     )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
-    model_engine.communication_data_type = torch.bfloat16
-
+def setup_dataloaders(train_data, eval_data, model_engine):
+    """Create train and eval dataloaders for pipeline parallelism."""
     train_dataloader = dataloader.PipelineDataLoader(
         train_data,
         model_engine.train_micro_batch_size_per_gpu(),
@@ -128,20 +56,7 @@ if __name__ == '__main__':
         model_engine.grid.get_data_parallel_world_size(),
         model_engine.grid.get_data_parallel_rank(),
     )
-    model_engine.set_dataloader(train_dataloader)
-    steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
-    model_engine.total_steps = steps_per_epoch * config.get('epochs', 1)
 
-    # handle Deepspeed optimizer wrapper (e.g. BF16_Optimizer)
-    optimizer = getattr(optimizer, 'optimizer', optimizer)
-
-    # see: https://github.com/tdrussell/qlora-pipe/pull/35#issuecomment-2495460307
-    model_engine.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lr_lambda=make_rms_ratio_fn(config.get('beta2', 0.99))
-    )
-
-    # Eval dataset doesn't need to repeat; we just use this to track "epoch" so we know when we're done iterating over it.
     eval_dataloader = dataloader.PipelineDataLoader(
         eval_data,
         model_engine.train_micro_batch_size_per_gpu(),
@@ -151,7 +66,31 @@ if __name__ == '__main__':
         shuffle=False,
     )
 
-    # Create trainer
+    return train_dataloader, eval_dataloader
+
+if __name__ == '__main__':
+    # Load configuration
+    with open(args.config) as f:
+        config = toml.load(f)
+
+    # Setup distributed training and data
+    run_dir = setup_distributed_training(config)
+    model_type = get_model_type(config)
+    tokenizer = setup_tokenizer(config)
+    train_data, eval_data = load_datasets(config, tokenizer)
+
+    # Setup model and training engine
+    model_engine, pipeline_model, lora_config, optimizer = setup_model_and_engine(config, model_type, args)
+
+    # Setup data loading
+    train_dataloader, eval_dataloader = setup_dataloaders(train_data, eval_data, model_engine)
+
+    # Configure training schedule
+    model_engine.set_dataloader(train_dataloader)
+    steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
+    model_engine.total_steps = steps_per_epoch * config.get('epochs', 1)
+
+    # Initialize and start training
     trainer = Trainer(
         model_engine=model_engine,
         train_dataloader=train_dataloader,
@@ -168,5 +107,4 @@ if __name__ == '__main__':
         resume_from_checkpoint=args.resume_from_checkpoint
     )
 
-    # Start training
     trainer.train()

@@ -1,5 +1,9 @@
 from deepspeed.runtime.pipe.module import LayerSpec
 from peft import LoraConfig, get_peft_model
+import bitsandbytes
+import json
+import optimi
+import os
 import torch
 
 import transformers
@@ -7,6 +11,27 @@ import transformers
 from models import causal_lm_models
 import engine
 import unsloth_utils
+
+# Utility functions
+def patch_bitsandbytes_cuda():
+    """Ugly hack to move quantized models from GPU to CPU, and back to GPU again without triggering re-quantization"""
+    bnb_cuda_old = bitsandbytes.nn.modules.Params4bit.cuda
+
+    def bnb_cuda_hijack(self, device):
+        if getattr(self, 'already_quantized', False):
+            self.data = self.data.to(device)
+            self.quant_state.to(device)
+            return self
+        self.already_quantized = True
+        return bnb_cuda_old(self, device)
+
+    bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
+
+def get_model_type(config):
+    """Extract model type from model config."""
+    with open(os.path.join(config['model'], 'config.json')) as f:
+        model_config = json.load(f)
+        return model_config.get('model_type', 'llama')
 
 def parse_layers_to_transform(config):
     """Parse layers_to_transform config into list of layer numbers."""
@@ -18,6 +43,30 @@ def parse_layers_to_transform(config):
             layers_to_transform.extend(range(int(start), int(stop) + 1))
     return layers_to_transform
 
+# Optimizer and scheduler functions
+def get_optimizer(model_parameters, config):
+    """Create AdamW optimizer with configuration from config."""
+    optimizer_kwargs = {
+        "params": model_parameters,
+        "lr": config['lr'],
+        "betas": (config.get('beta1', 0.9), config.get('beta2', 0.99)),
+        "weight_decay": config.get('weight_decay', 0.0),
+        "eps": config.get('eps', 1e-6),
+        "kahan_sum": True
+    }
+    return optimi.AdamW(**optimizer_kwargs)
+
+def get_lr_scheduler(optimizer, config):
+    """Create learning rate scheduler with RMS ratio scaling."""
+    beta = config.get('beta2', 0.99)
+
+    # see: https://github.com/tdrussell/qlora-pipe/pull/35#issuecomment-2495460307
+    def rms_ratio_fn(step):
+        return torch.sqrt(torch.tensor((1 - beta ** step) / (1 + beta ** step))).item()
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=rms_ratio_fn)
+
+# Model creation functions
 def create_model(config, model_type):
     """Create the base transformer model with appropriate quantization."""
     if config.get('full_fine_tune', False) or not config.get('load_in_4bit', False):
@@ -56,8 +105,7 @@ def create_model(config, model_type):
 
 def create_pipeline_model(model, config):
     """Create pipeline model from base model for distributed training."""
-    # CAREFUL! The "primary" layers of the model have to have 'decoderlayer' in them for
-    # activation checkpointing to automatically work correctly.
+    # The "primary" layers of the model must have 'decoderlayer' in their name for activation checkpointing to work
     layers = model.to_layer_specs()
     checkpointable_layers = set()
     for layer in layers:
@@ -77,6 +125,7 @@ def create_pipeline_model(model, config):
 
     return pipeline_model
 
+# Training configuration functions
 def create_lora_config(config, target_modules, layers_to_transform):
     """Create LoRA configuration."""
     return LoraConfig(
@@ -91,8 +140,7 @@ def create_lora_config(config, target_modules, layers_to_transform):
 def apply_lora_adapters(model, config, lora_config):
     """Apply LoRA configuration to model."""
     lora_model = get_peft_model(model, lora_config)
-    # If the underlying weights are floats, the lora weights have already been
-    # cast to the same dtype, so we need to change the dtype here.
+    # Cast LoRA weights to bfloat16 to match underlying model weights
     for p in lora_model.parameters():
         if p.requires_grad:
             p.data = p.data.to(torch.bfloat16)
@@ -117,3 +165,46 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
                 should_train = False
                 print(f'not training {name} because layer {layer_num} is not in layers_to_transform')
         p.requires_grad = should_train
+
+def setup_training_adapters(model, config):
+    """Setup LoRA or full fine-tuning adapters."""
+    target_modules = config.get('target_modules', [])
+    layers_to_transform = parse_layers_to_transform(config)
+
+    if config.get('full_fine_tune', False):
+        lora_config = None
+        configure_full_fine_tuning(model, config, target_modules, layers_to_transform)
+    else:
+        lora_config = create_lora_config(config, target_modules, layers_to_transform)
+        apply_lora_adapters(model, config, lora_config)
+
+    return lora_config
+
+# Main setup function
+def setup_model_and_engine(config, model_type, args):
+    """Complete model setup including LoRA/full fine-tuning and engine initialization."""
+    patch_bitsandbytes_cuda()
+
+    # Create model and pipeline
+    model = create_model(config, model_type)
+    pipeline_model = create_pipeline_model(model, config)
+
+    # Setup training adapters (LoRA or full fine-tuning)
+    lora_config = setup_training_adapters(model, config)
+
+    parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
+
+    model_engine, optimizer = engine.initialize(
+        args=args,
+        model=pipeline_model,
+        model_parameters=parameters_to_train,
+        optimizer=lambda params: get_optimizer(params, config),
+    )
+
+    model_engine.communication_data_type = torch.bfloat16
+
+    # Handle Deepspeed optimizer wrapper (e.g. BF16_Optimizer)
+    optimizer = getattr(optimizer, 'optimizer', optimizer)
+    model_engine.lr_scheduler = get_lr_scheduler(optimizer, config)
+
+    return model_engine, pipeline_model, lora_config, optimizer

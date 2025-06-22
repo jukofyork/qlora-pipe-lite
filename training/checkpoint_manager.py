@@ -25,6 +25,7 @@ def load_checkpoint(model_engine, train_dataloader, run_dir):
     return step
 
 def save_checkpoint(model_engine, train_dataloader, run_dir, step):
+    """Save training checkpoint with current state."""
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
     model_engine.save_checkpoint(
         save_root,
@@ -37,6 +38,7 @@ def save_checkpoint(model_engine, train_dataloader, run_dir, step):
     )
 
 def prune_checkpoints(run_dir, max_checkpoints):
+    """Remove old checkpoints, keeping only the most recent max_checkpoints."""
     if max_checkpoints <= 0:
         return
 
@@ -60,6 +62,7 @@ def prune_checkpoints(run_dir, max_checkpoints):
     # Sort by step number and keep only the most recent ones
     checkpoints.sort(key=lambda x: x[0])
 
+    # Remove oldest checkpoints
     while len(checkpoints) > max_checkpoints:
         step_num, path = checkpoints.pop(0)
         print(f"- Deleting checkpoint: 'global_step{step_num}'")

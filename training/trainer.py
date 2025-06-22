@@ -8,6 +8,7 @@ from training.model_saver import save_lora, save_full_model
 from utils import is_main_process
 
 class Trainer:
+    """Handles the main training loop, evaluation, checkpointing, and model saving."""
 
     def __init__(
         self,
@@ -48,6 +49,7 @@ class Trainer:
         """Main training loop."""
         step = 1
 
+        # Resume from checkpoint if requested
         if self.resume_from_checkpoint:
             resumed_step = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
             if resumed_step is not None:
@@ -58,19 +60,19 @@ class Trainer:
         if is_main_process():
             self._print_eval_progress(step - 1, last_eval_loss)
 
+        # Main training loop
         while self.train_dataloader.epoch <= self.epochs:
-            # Memory cleanup before each training step
             self._cleanup_memory()
 
             # Forward/backward pass and optimizer step
             metrics = self.model_engine.train_batch()
             self.train_dataloader.sync_epoch()
 
-            # Log training metrics to tensorboard
+            # Log training metrics
             if is_main_process():
                 self._write_metrics('train', metrics, step)
 
-            # Periodic evaluation based on global step
+            # Periodic evaluation
             if step in self.eval_step_indices:
                 loss = self.evaluate(step)
                 if is_main_process():
@@ -79,19 +81,22 @@ class Trainer:
 
             # Time-based checkpointing
             self._save_checkpoint(step)
-
             step += 1
 
+        # Save final model
         self._save_model('final')
 
         if is_main_process():
             print('TRAINING COMPLETE!')
 
     def evaluate(self, step):
+        """Run evaluation on the eval dataset and return average loss."""
         orig_micro_batches = self.model_engine.micro_batches
         self.model_engine.micro_batches = 1
         iterator = iter(self.eval_dataloader)
         all_metrics = None
+
+        # Collect metrics from all eval batches
         while True:
             metrics = self.model_engine.eval_batch(iterator)
             self.eval_dataloader.sync_epoch()
@@ -102,16 +107,18 @@ class Trainer:
             for i, metric in enumerate(metrics):
                 all_metrics[i].append(metric)
 
+        # Reset dataloader and restore original batch size
         self.eval_dataloader.reset()
         self.model_engine.micro_batches = orig_micro_batches
         eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
 
-        # Log evaluation metrics to tensorboard
+        # Log evaluation metrics
         if is_main_process():
             self._write_metrics('eval', eval_metrics, step)
 
         return self._extract_loss(eval_metrics)
 
+    # Private helper methods
     def _calculate_eval_steps(self, total_steps, evals_per_run):
         """Calculate which steps to run evaluation on."""
         eval_steps = set()
@@ -135,7 +142,7 @@ class Trainer:
 
     def _print_eval_progress(self, step, current_loss, last_loss=None):
         """Print evaluation progress with optional percentage change."""
-        if step == 0:  # Initial evaluation (step - 1 in train())
+        if step == 0:  # Initial evaluation
             print(f'- Initial evaluation loss: {current_loss:.4f}')
         elif last_loss is None:
             print(f'- Step {step} evaluation loss: {current_loss:.4f}')
