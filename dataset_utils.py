@@ -2,22 +2,32 @@ from tqdm import tqdm
 import datasets
 import os
 import os.path
+import psutil
+import sys
 import torch
 
 from utils import is_main_process, zero_first, log
 
-# Dataset preprocessing batch sizes
 TOKENIZE_BATCH_SIZE = 10
-SPLIT_BATCH_SIZE = 100
 
-def yield_sequences_from_token_batch(tokenizer, token_batch, sequence_len):
+def tokenize_with_eos(batch, tokenizer):
+    result = tokenizer(batch['text'])
+    # Add EOS token to each text field if missing
+    for i, tokens in enumerate(result['input_ids']):
+        if tokens[-1] != tokenizer.eos_token_id:
+            result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
+    return result
+
+def slice_into_sequences(dataset, tokenizer, sequence_len):
+    all_sequences = []
     # Initialize sequence_tokens with BOS token if it exists
     sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
-    for tokens in tqdm(token_batch):
-        tokens = tokens.tolist()
+
+    # Process dataset item by item (streaming)
+    for item in tqdm(dataset, desc="Creating sequences"):
+        tokens = item['input_ids'].tolist()
         assert len(tokens) > 0, 'Empty tokens list'
-        if tokens[-1] != tokenizer.eos_token_id:
-            tokens.append(tokenizer.eos_token_id)
+        # EOS already added in tokenize_with_eos, so skip that check
         idx = 0
         # Skip the auto-generated BOS token if present
         if tokenizer.bos_token_id is not None and tokens[0] == tokenizer.bos_token_id:
@@ -30,44 +40,63 @@ def yield_sequences_from_token_batch(tokenizer, token_batch, sequence_len):
             sequence_tokens.extend(taken)
             if len(sequence_tokens) >= sequence_len:
                 assert len(sequence_tokens) == sequence_len
-                yield sequence_tokens
+                all_sequences.append(torch.as_tensor(sequence_tokens))
                 # Reset sequence_tokens with BOS token if it exists
                 sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
-    # Discard anything remaining to ensure all are exactly sequence_len in length...
+
+                # Print memory usage every 100 sequences
+                if len(all_sequences) % 100 == 0:
+                    seq_tokens_size = sys.getsizeof(sequence_tokens) / (1024 ** 2)  # MB
+                    all_seqs_size = sys.getsizeof(all_sequences) / (1024 ** 3)  # GB
+                    process_memory = process.memory_info().rss / (1024 ** 3)  # GB
+                    log(f"Sequences {len(all_sequences)}: sequence_tokens={seq_tokens_size:.1f}MB, all_sequences={all_seqs_size:.1f}GB, process_memory={process_memory:.1f}GB")
+
+    # Discard the final partial sequence to ensure all are exactly sequence_len in length...
+    return datasets.Dataset.from_dict({'input_ids': all_sequences})
 
 def load_single_dataset(dataset_path, tokenizer, sequence_len):
     base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
     cache_dir = os.path.join(base_dir, "hf_cache")
 
-    dataset = datasets.load_dataset(
-        "text",
-        data_files=dataset_path,
-        sample_by="document",
-        cache_dir=cache_dir,
-    )["train"]
+    if dataset_path.endswith('.txt'):
+        dataset = datasets.load_dataset(
+            "text",
+            data_files=dataset_path,
+            sample_by="document",
+            split="train",
+            cache_dir=cache_dir,
+        )
+    elif dataset_path.endswith('.json') or dataset_path.endswith('.jsonl'):
+        dataset = datasets.load_dataset(
+            "json",
+            data_files=dataset_path,
+            split="train",
+            cache_dir=cache_dir,
+        )
+    elif dataset_path.endswith('.parquet'):
+        dataset = datasets.load_dataset(
+            "parquet",
+            data_files=dataset_path,
+            split="train",
+            cache_dir=cache_dir,
+        )
+    else:
+        raise NotImplementedError()
 
     dataset.set_format(type='torch')
 
     num_proc = min(os.cpu_count(), len(dataset))
 
     dataset = dataset.map(
-        lambda x: tokenizer(x['text']),
+        lambda x: tokenize_with_eos(x, tokenizer),
         batched=True,
         batch_size=TOKENIZE_BATCH_SIZE,
         remove_columns=dataset.column_names,
         desc='tokenizing',
         num_proc=num_proc,
     )
-    dataset = dataset.map(
-        lambda x: {'input_ids': [torch.as_tensor(seq) for seq in yield_sequences_from_token_batch(tokenizer, x['input_ids'], sequence_len)]},
-        batched=True,
-        batch_size=SPLIT_BATCH_SIZE,
-        remove_columns=dataset.column_names,
-        desc='splitting and converting to tensors',
-        num_proc=num_proc,
-    )
 
-    return dataset
+    return slice_into_sequences(dataset, tokenizer, sequence_len)
 
 def load_datasets(config, tokenizer):
     if 'sequence_len' not in config:
