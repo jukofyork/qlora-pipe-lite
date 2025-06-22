@@ -12,6 +12,7 @@ class Trainer:
 
     def __init__(
         self,
+        config,
         model_engine,
         train_dataloader,
         eval_dataloader,
@@ -19,13 +20,9 @@ class Trainer:
         pipeline_model,
         args,
         lora_config,
-        model_dir,
-        epochs=1,
-        evals_per_run=10,
-        checkpoint_interval=60,
-        max_checkpoints=-1,
         resume_from_checkpoint=False
     ):
+        self.config = config
         self.model_engine = model_engine
         self.train_dataloader = train_dataloader
         self.eval_dataloader = eval_dataloader
@@ -33,16 +30,20 @@ class Trainer:
         self.pipeline_model = pipeline_model
         self.args = args
         self.lora_config = lora_config
-        self.model_dir = model_dir
-        self.epochs = epochs
-        self.checkpoint_interval = checkpoint_interval
-        self.max_checkpoints = max_checkpoints
         self.resume_from_checkpoint = resume_from_checkpoint
+
+        # Extract config values with defaults
+        self.model_dir = config['model']
+        self.epochs = config.get('epochs', 1)
+        self.eval_gradient_accumulation_steps = config.get('eval_gradient_accumulation_steps', 1)
+        self.checkpoint_interval = config.get('checkpoint_interval', 60)
+        self.max_checkpoints = config.get('max_checkpoints', -1)
 
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
 
         # Calculate evaluation step indices to use across the entire run
+        evals_per_run = config.get('evals_per_run', 10)
         self.eval_step_indices = self._calculate_eval_steps(model_engine.total_steps, evals_per_run)
 
     def train(self):
@@ -91,7 +92,7 @@ class Trainer:
     def evaluate(self, step):
         """Run evaluation on the eval dataset and return average loss."""
         orig_micro_batches = self.model_engine.micro_batches
-        self.model_engine.micro_batches = 1
+        self.model_engine.micro_batches = self.eval_gradient_accumulation_steps
         iterator = iter(self.eval_dataloader)
         all_metrics = None
 
@@ -172,7 +173,7 @@ class Trainer:
         if do_checkpoint:
             save_checkpoint(self.model_engine, self.train_dataloader, self.run_dir, step)
             if is_main_process():
-                log(f"- Deleting checkpoint: 'global_step{step_num}'")(self.run_dir, self.max_checkpoints)
+                prune_checkpoints(self.run_dir, self.max_checkpoints)
 
     def _save_model(self, name):
         """Save the trained model (LoRA adapters or full model)."""

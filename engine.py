@@ -25,8 +25,16 @@ def initialize(args=None,
     dist_backend = get_accelerator().communication_backend_name()
     dist.init_distributed(dist_backend=dist_backend)
 
-    config = args.deepspeed_config
-    assert config is not None, "DeepSpeed requires --deepspeed_config to specify configuration file"
+    if hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None:
+        ds_config = args.deepspeed_config
+    else:
+        # The necessary ds_config fields are taken from the TOML config file.
+        ds_config = {
+            'train_micro_batch_size_per_gpu': config.get('micro_batch_size_per_gpu', 1),
+            'gradient_accumulation_steps': config.get('gradient_accumulation_steps', 1),
+            'gradient_clipping': config.get('gradient_clipping', 1.0),
+            'steps_per_print': config.get('steps_per_print', 1),
+        }
 
     mpu = model.mpu()
     config_class = DeepSpeedConfig(config, mpu)
@@ -36,7 +44,7 @@ def initialize(args=None,
         optimizer=optimizer,
         model_parameters=model_parameters,
         mpu=mpu,
-        config=config,
+        config=ds_config,
         config_class=config_class
     )
 

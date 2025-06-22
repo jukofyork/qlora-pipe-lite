@@ -37,7 +37,8 @@ def setup_distributed_training(config):
         run_dir = os.path.join(config['output_dir'], datetime.now(timezone.utc).strftime('%Y%m%d_%H-%M-%S'))
         os.makedirs(run_dir, exist_ok=True)
         shutil.copy(args.config, run_dir)
-        shutil.copy(args.deepspeed_config, run_dir)
+        if hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None:
+            shutil.copy(args.deepspeed_config, run_dir)
 
     # Synchronize all processes before determining run directory
     deepspeed.comm.barrier()
@@ -106,6 +107,7 @@ if __name__ == '__main__':
 
     # Initialize and start training
     trainer = Trainer(
+        config=config,
         model_engine=model_engine,
         train_dataloader=train_dataloader,
         eval_dataloader=eval_dataloader,
@@ -113,11 +115,6 @@ if __name__ == '__main__':
         pipeline_model=pipeline_model,
         args=args,
         lora_config=lora_config,
-        model_dir=config['model'],
-        epochs=config.get('epochs', 1),
-        evals_per_run=config.get('evals_per_run', 10),
-        checkpoint_interval=config.get('checkpoint_interval', 60),
-        max_checkpoints=config.get('max_checkpoints', -1),
         resume_from_checkpoint=args.resume_from_checkpoint
     )
 
