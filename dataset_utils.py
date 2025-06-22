@@ -76,8 +76,6 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     else:
         raise NotImplementedError()
 
-    dataset.set_format(type='torch')
-
     num_proc = min(os.cpu_count(), len(dataset))
 
     dataset = dataset.map(
@@ -88,6 +86,9 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
         desc='tokenizing',
         num_proc=num_proc,
     )
+
+    # Set torch format after tokenization when only token data remains
+    dataset.set_format(type='torch')
 
     return slice_into_sequences(dataset, tokenizer, sequence_len)
 
