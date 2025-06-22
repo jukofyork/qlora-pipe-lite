@@ -4,7 +4,7 @@ import transformers
 import accelerate
 
 from models.pipeline_model import PipelineModel
-from models.layers import (
+from models.pipeline_layers import (
     LayerSpec,
     EmbeddingPipe,
     LlamaDecoderLayerPipe, 
