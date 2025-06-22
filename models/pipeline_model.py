@@ -7,7 +7,6 @@ from torch import nn
 import transformers
 from deepspeed.accelerator import get_accelerator
 from transformers.integrations import get_keys_to_not_convert
-from deepspeed.runtime.pipe import module as ds_pipe_module
 import bitsandbytes as bnb
 import accelerate
 from accelerate.utils import set_module_tensor_to_device
@@ -16,6 +15,22 @@ from utils import is_main_process
 
 
 LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX = r'^language_model\.'
+
+
+class PipelineModel(nn.Module):
+
+    def __init__(self, config, quantization_config, model_config):
+        if config.get('full_fine_tune', False) and model_config.tie_word_embeddings:
+            raise NotImplementedError('FFT is not supported for models with tied embeddings')
+        self.full_fine_tune = config.get('full_fine_tune', False)
+        self.modules_to_not_quantize = get_keys_to_not_convert(self)
+        self.loader_util = LoaderUtil(config['model'], quantization_config, self.modules_to_not_quantize)
+        for name, p in self.named_parameters():
+            p.original_name = name
+
+    # need to override this method
+    def to_layer_specs(self):
+        raise NotImplementedError()
 
 
 def _partial_module_name_match(full_name, list_to_match):
@@ -109,21 +124,7 @@ def _recursively_replace_with_quantized_linear(
         current_key_name.pop(-1)
 
 
-class LayerSpec(ds_pipe_module.LayerSpec):
-    def __init__(self, typename, *module_args, **module_kwargs):
-        super().__init__(typename, *module_args, **module_kwargs)
-
-    def build(self):
-        self.module_kwargs.pop('_estimated_size', None)
-        return self.typename(*self.module_args, **self.module_kwargs)
-
-    @property
-    def estimated_size(self):
-        return self.module_kwargs.get('_estimated_size', 1)
-
-
 class LoaderUtil:
-
     def __init__(self, model_path, quantization_config, modules_to_not_quantize):
         self.model_path = model_path
         self.quantization_config = quantization_config
@@ -192,19 +193,3 @@ class LoaderUtil:
                     set_module_tensor_to_device(module, name, device='cpu', value=renamed_state_dict[name])
 
         module.to(self.device)
-
-
-class PipelineModel(nn.Module):
-
-    def __init__(self, config, quantization_config, model_config):
-        if config.get('full_fine_tune', False) and model_config.tie_word_embeddings:
-            raise NotImplementedError('FFT is not supported for models with tied embeddings')
-        self.full_fine_tune = config.get('full_fine_tune', False)
-        self.modules_to_not_quantize = get_keys_to_not_convert(self)
-        self.loader_util = LoaderUtil(config['model'], quantization_config, self.modules_to_not_quantize)
-        for name, p in self.named_parameters():
-            p.original_name = name
-
-    # need to override this method
-    def to_layer_specs(self):
-        raise NotImplementedError()
