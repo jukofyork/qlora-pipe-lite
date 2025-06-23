@@ -61,7 +61,6 @@ sequence_len = 32768
 pipeline_stages = 1                   # (default: 1)
 
 # Controls the effective batch size: gradient_accumulation_steps x (world_size / pipeline_stages)
-# Effective batch size = gradient_accumulation_steps x num_gpus (when pipeline_stages=1)
 gradient_accumulation_steps = 32      # (default: 1)
 
 # Setting this lower can help to drop fewer examples when trying to make equal-sized batches 
