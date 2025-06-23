@@ -12,7 +12,7 @@ output_dir = '/data/training_runs/llama3_8b_example'
 # Set to perform full fine-tuning instead of training a LoRA adapter
 #full_fine_tune = true
 
-# Set to train a QLoRA against a 4-bit quantised model instead of a LoRA against an unquantised model
+# Set to train a QLoRA (against a 4-bit quantised model) instead of a LoRA (against an unquantised model)
 load_in_4bit = true
 
 # ==================
@@ -26,7 +26,7 @@ lora_dropout = 0.05  # (default: 0.0)
 # Train only specific modules (defaults to: 'all linear' modules for LoRA, or all modules for full fine-tuning)
 #target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
 
-# Train only specific layers (can use alongside target_modules option, for both LoRA and full fine-tuning)
+# Train only specific layers (can be combined with target_modules and used with LoRA or full fine-tuning)
 #layers_to_transform = '16:31'
 
 # =======================
@@ -53,13 +53,13 @@ evals_per_run = 10   # (default: 10)
 
 sequence_len = 32768
 
-# The number of pipeline parallel stages, must evenly divide world_size, eg:
+# The number of pipeline parallel stages (NOTE: must evenly divide world_size)
 pipeline_stages = 1                   # (default: 1)
 
 # Controls the effective batch size: gradient_accumulation_steps x (world_size / pipeline_stages)
 gradient_accumulation_steps = 32      # (default: 1)
 
-# Setting this lower than can help to drop fewer examples when trying to make equal-sized batches 
+# Setting this lower can help to drop fewer examples when trying to make equal-sized batches 
 eval_gradient_accumulation_steps = 1  # (default: 1)
 
 # Set for optimised LoRA training with hybrid data+pipeline parallelism:
@@ -82,7 +82,7 @@ max_checkpoints = 3            # (default: 3)
 [[datasets]]
 dataset_path = 'test_data/*.txt'
 
-# Structured data stored in json, jsonl or parquet will use their "text" field contents as training data:
+# Structured data stored in json, jsonl or parquet will use their "text" fields' contents as training data:
 [[datasets]]
 dataset_path = 'json_data/*.json'
 
@@ -92,4 +92,4 @@ dataset_path = 'jsonl_data/*.jsonl'
 [[datasets]]
 dataset_path = 'parquet_data/*.parquet'
 
-# Note: The HuggingFace dataset cache will be added below the dataset paths and is shared between nodes
+# NOTE: The HuggingFace dataset cache will be added below the dataset paths and is shared between nodes
