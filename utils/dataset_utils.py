@@ -9,7 +9,7 @@ from utils.utils import is_main_process, zero_first, log
 
 def tokenize_with_eos(batch, tokenizer):
     result = tokenizer(batch['text'])
-    # Add EOS token to each text field if missing
+    # Add EOS token to the end of each text field if missing
     for i, tokens in enumerate(result['input_ids']):
         if tokens[-1] != tokenizer.eos_token_id:
             result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
@@ -24,7 +24,6 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
     for item in tqdm(dataset, desc="Creating sequences"):
         tokens = item['input_ids'].tolist()
         assert len(tokens) > 0, 'Empty tokens list'
-        # EOS already added in tokenize_with_eos, so skip that check
         idx = 0
         # Skip the auto-generated BOS token if present
         if tokenizer.bos_token_id is not None and tokens[0] == tokenizer.bos_token_id:
