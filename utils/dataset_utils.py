@@ -5,7 +5,6 @@ import json
 import os
 import os.path
 import torch
-import xxhash
 
 from constants import DATASET_TOKENIZE_BATCH_SIZE, DEFAULT_EVAL_FRACTION
 from utils.utils import is_main_process, zero_first, log
@@ -19,15 +18,8 @@ def tokenize_and_add_eos(batch, tokenizer):
     return result
 
 def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir):
-    # Efficiently hash the tokenized data by XORing individual item hashes
-    combined_hash = 0
-    for item in tqdm(dataset, desc="Hashing sequences"):
-        # Hash the raw tensor bytes directly
-        item_hash = xxhash.xxh64(item['input_ids'].numpy().tobytes()).intdigest()
-        combined_hash ^= item_hash
-
-    # Use combined_hash directly in cache filename
-    cache_key = f"{combined_hash:016x}_{sequence_len}_{tokenizer.bos_token_id}"
+    # Use the dataset's built-in fingerprint - it's already computed and deterministic
+    cache_key = f"{dataset._fingerprint}_{sequence_len}_{tokenizer.bos_token_id}"
     cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
 
     # Try to load from cache first
