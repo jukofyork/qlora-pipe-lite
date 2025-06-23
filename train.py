@@ -8,11 +8,11 @@ import toml
 
 import transformers
 
-from dataset_utils import load_datasets
+from pipeline import dataloader
 from training.model_factory import setup_model_and_engine
 from training.trainer import Trainer
-from utils import is_main_process
-import dataloader
+from utils.dataset_utils import load_datasets
+from utils.utils import is_main_process
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config',

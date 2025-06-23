@@ -9,9 +9,9 @@ import torch
 import transformers
 
 from models import causal_lm_models
-from utils import log
-import engine
-import unsloth_utils
+from pipeline import engine
+from utils.unsloth_utils import unsloth_checkpoint
+from utils.utils import log
 
 # Utility functions
 def patch_bitsandbytes_cuda():
@@ -119,7 +119,7 @@ def create_pipeline_model(model, config):
         num_stages=config.get('pipeline_stages', 1),
         activation_checkpoint_interval=1,
         checkpointable_layers=checkpointable_layers,
-        activation_checkpoint_func=unsloth_utils.unsloth_checkpoint,
+        activation_checkpoint_func=unsloth_checkpoint,
         use_column_major_topology=config.get('use_column_major_topology', False)
     )
 

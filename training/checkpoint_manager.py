@@ -3,7 +3,7 @@ import glob
 import os
 import torch
 
-from utils import is_main_process, log, safe_rmtree
+from utils.utils import is_main_process, log, safe_rmtree
 
 def load_checkpoint(model_engine, train_dataloader, run_dir):
     """Load checkpoint and return the step to resume from."""

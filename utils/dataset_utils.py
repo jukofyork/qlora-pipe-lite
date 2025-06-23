@@ -4,7 +4,7 @@ import os
 import os.path
 import torch
 
-from utils import is_main_process, zero_first, log
+from utils.utils import is_main_process, zero_first, log
 
 TOKENIZE_BATCH_SIZE = 10
 

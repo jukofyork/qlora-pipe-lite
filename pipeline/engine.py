@@ -20,7 +20,7 @@ from torch import nn
 import time
 import torch
 
-from utils import log, seconds_to_time_str
+from utils.utils import log, seconds_to_time_str
 
 def initialize(config=None,
                args=None,

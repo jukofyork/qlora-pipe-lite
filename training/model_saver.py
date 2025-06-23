@@ -5,7 +5,7 @@ import os
 import shutil
 import torch
 
-from utils import log, safe_rmtree
+from utils.utils import log, safe_rmtree
 
 def save_lora(model_engine, pipeline_model, lora_config, run_dir, name):
     """Save LoRA adapters in distributed fashion across pipeline stages."""

@@ -5,7 +5,7 @@ import torch
 
 from training.checkpoint_manager import load_checkpoint, save_checkpoint, prune_checkpoints
 from training.model_saver import save_lora, save_full_model
-from utils import is_main_process, log
+from utils.utils import is_main_process, log
 
 class Trainer:
     """Handles the main training loop, evaluation, checkpointing, and model saving."""
