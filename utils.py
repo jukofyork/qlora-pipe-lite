@@ -17,6 +17,7 @@ def zero_first(is_main):
     yield
     if is_main:  # then rank 0 waits after it has run the context
         dist.barrier()
+    dist.barrier()  # All ranks wait here until everyone finishes
 
 def log(msg):
     """Print timestamped log message with qlora-pipe prefix."""
