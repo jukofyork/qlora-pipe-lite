@@ -39,8 +39,6 @@ def setup_distributed_training(config):
         run_dir = os.path.join(config['output_dir'], datetime.now(timezone.utc).strftime('%Y%m%d_%H-%M-%S'))
         os.makedirs(run_dir, exist_ok=True)
         shutil.copy(args.config, run_dir)
-        if hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None:
-            shutil.copy(args.deepspeed_config, run_dir)
 
     # Synchronize all processes before determining run directory
     deepspeed.comm.barrier()
