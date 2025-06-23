@@ -114,14 +114,10 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
         num_proc=num_proc,
     )
 
-    print("Shuffling dataset...", end="")
     dataset = dataset.shuffle(seed=42)
-    print(" Done.")
 
     # Set torch format after tokenization when only token data remains
-    print("Setting torch format...", end="")
     dataset.set_format(type='torch')
-    print(" Done.")
 
     return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir)
 
