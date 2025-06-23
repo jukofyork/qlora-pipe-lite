@@ -24,12 +24,17 @@ def log(msg):
     if is_main_process():
         print(f'[{datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]}] [INFO] [qlora-pipe] {msg}')
 
-def eta_str(eta):
-    """Convert ETA seconds to human-readable string (e.g., '2h30m', '45s')."""
-    eta = int(eta)
-    if eta > 3600:
-        return f'{eta // 3600}h{(eta % 3600) // 60}m'
-    return f'{eta // 60}m{eta % 60}s' if eta > 60 else f'{eta}s'
+def seconds_to_time_str(seconds):
+    """Convert seconds to human-readable string (e.g., '2d5h30m', '2h30m', '45s')."""
+    seconds = int(seconds)
+    if seconds >= 86400:
+        return f'{seconds // 86400}d{(seconds % 86400) // 3600}h{(seconds % 3600) // 60}m'
+    elif seconds >= 3600:
+        return f'{seconds // 3600}h{(seconds % 3600) // 60}m'
+    elif seconds >= 60:
+        return f'{seconds // 60}m{seconds % 60}s'
+    else:
+        return f'{seconds}s'
 
 def safe_rmtree(dir_path, max_retries=5, initial_wait_seconds=1):
     """Remove directory tree with exponential backoff retries on failure."""

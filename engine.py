@@ -1,4 +1,3 @@
-from collections import deque
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime import utils as ds_utils
@@ -12,6 +11,7 @@ from deepspeed.runtime.pipe.topology import ProcessTopology
 from deepspeed.runtime.utils import PartitionedTensor
 from torch import nn
 import deepspeed
+import time
 import torch
 
 from utils import eta_str, log
@@ -56,11 +56,15 @@ class CustomPipelineEngine(PipelineEngine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.total_steps = None
-        self.etas = deque()
+        self.start_time = None
 
     def train_batch(self):
         if not torch._C.is_grad_enabled():
             raise RuntimeError(f'train_batch() requires gradients enabled. Use eval_batch() instead.')
+
+         # Start timing from first training step to avoid startup overhead bias
+        if self.start_time is None:
+            self.start_time = time.time()
 
         # sequence length may change between macro batches (but not between gradient accumulation steps)
         self.reset_activation_shape()
@@ -82,27 +86,20 @@ class CustomPipelineEngine(PipelineEngine):
 
         if self.global_steps % self.steps_per_print() == 0:
             if self.global_rank == 0:
-                elapsed = self.timers(TRAIN_BATCH_TIMER).elapsed(reset=True) / 1000.0
-                iter_time = elapsed / self.steps_per_print()
-                eta = iter_time * (self.total_steps - self.global_steps)
-                self.etas.append(eta)
-                while len(self.etas) > 10:
-                    self.etas.popleft()
-                rolling_eta = sum(self.etas) / len(self.etas)
-                tput = self.train_batch_size() / iter_time
-                log(f'step: {self.global_steps:>5} / {self.total_steps:>5} '
-                    f'loss: {self.agg_train_loss:0.4f} '
-                    f'iter time (s): {iter_time:0.3f} '
-                    f'samples/sec: {tput:0.3f} '
-                    f'eta: {eta_str(rolling_eta)} ')
+                iter_elapsed = self.timers(TRAIN_BATCH_TIMER).elapsed(reset=True) / 1000.0
+                iter_time = iter_elapsed / self.steps_per_print()
+                iter_throughput = self.train_batch_size() / iter_time
+
+                total_elapsed = time.time() - self.start_time
+                eta = (total_elapsed / self.global_steps) * (self.total_steps - self.global_steps)
+
+                log(f'step: {self.global_steps} / {self.total_steps}, '
+                    f'loss: {self.agg_train_loss:0.4f}, '
+                    f'throughput: {iter_throughput:0.3f} samples/s, '
+                    f'elapsed: {seconds_to_time_str(total_elapsed)}, '
+                    f'eta: {seconds_to_time_str(eta)}')
             else:
                 self.timers(TRAIN_BATCH_TIMER).elapsed(reset=True)
-
-        # Monitoring
-        if self.global_rank == 0 and self.monitor.enabled:
-            self.summary_events = [(f'Train/Samples/train_loss', self.agg_train_loss.mean().item(),
-                                    self.global_samples)]
-            self.monitor.write_events(self.summary_events)
 
         if self.wall_clock_breakdown() and self.global_steps % self.steps_per_print() == 0:
             self.timers.log([
@@ -138,10 +135,6 @@ class CustomPipelineEngine(PipelineEngine):
 
         # list of losses
         agg_eval_losses = self._aggregate_total_losses()
-
-        if self.global_rank == 0 and self.monitor.enabled:
-            self.summary_events = [(f'Train/Samples/eval_loss', agg_eval_losses[0].mean().item(), self.global_samples)]
-            self.monitor.write_events(self.summary_events)
 
         # Restore the training iterator
         self.set_dataiterator(train_iterator)
