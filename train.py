@@ -63,7 +63,7 @@ if __name__ == '__main__':
 
     # Load and configure tokenizer
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-        config['model'], local_files_only=True, model_max_length=sys.maxsize,
+        config['model_dir'], local_files_only=True, model_max_length=sys.maxsize,
     )
 
     # Load, convert and split the datasets

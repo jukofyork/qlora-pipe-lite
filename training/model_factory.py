@@ -37,7 +37,7 @@ def patch_bitsandbytes_cuda():
 
 def get_model_type(config):
     """Extract model type from model config."""
-    with open(os.path.join(config['model'], 'config.json')) as f:
+    with open(os.path.join(config['model_dir'], 'config.json')) as f:
         model_config = json.load(f)
         return model_config.get('model_type', 'llama')
 

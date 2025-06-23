@@ -22,7 +22,7 @@ class PipelineModel(nn.Module):
             raise NotImplementedError('FFT is not supported for models with tied embeddings')
         self.full_fine_tune = config.get('full_fine_tune', False)
         self.modules_to_not_quantize = get_keys_to_not_convert(self)
-        self.loader_util = LoaderUtil(config['model'], quantization_config, self.modules_to_not_quantize)
+        self.loader_util = LoaderUtil(config['model_dir'], quantization_config, self.modules_to_not_quantize)
         for name, p in self.named_parameters():
             p.original_name = name
 

@@ -24,7 +24,7 @@ class BaseCausalLMPipe(PipelineModel):
         if self.CONFIG_CLASS is None or self.TRANSFORMERS_CLASS is None:
             raise NotImplementedError("Subclasses must define CONFIG_CLASS and TRANSFORMERS_CLASS")
 
-        model_config = self.CONFIG_CLASS.from_pretrained(config['model'])
+        model_config = self.CONFIG_CLASS.from_pretrained(config['model_dir'])
         model_config._attn_implementation = self._get_attention_implementation()
 
         torch.set_default_dtype(torch.bfloat16)

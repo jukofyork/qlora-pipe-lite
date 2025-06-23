@@ -34,7 +34,7 @@ class Trainer:
         self.resume_from_checkpoint = resume_from_checkpoint
 
         # Extract config values with defaults
-        self.model_dir = config['model']
+        self.model_dir = config['model_dir']
         self.epochs = config.get('epochs', 1)
         self.eval_gradient_accumulation_steps = config.get('eval_gradient_accumulation_steps', 1)
         self.checkpoint_interval_hours = config.get('checkpoint_interval_hours', DEFAULT_CHECKPOINT_INTERVAL_HOURS)
