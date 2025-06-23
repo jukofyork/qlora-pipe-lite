@@ -1,5 +1,7 @@
 from tqdm import tqdm
 import datasets
+import hashlib
+import json
 import os
 import os.path
 import torch
@@ -7,7 +9,7 @@ import torch
 from constants import DATASET_TOKENIZE_BATCH_SIZE, DEFAULT_EVAL_FRACTION
 from utils.utils import is_main_process, zero_first, log
 
-def tokenize_with_eos(batch, tokenizer):
+def tokenize_and_add_eos(batch, tokenizer):
     result = tokenizer(batch['text'])
     # Add EOS token to the end of each text field if missing
     for i, tokens in enumerate(result['input_ids']):
@@ -15,7 +17,26 @@ def tokenize_with_eos(batch, tokenizer):
             result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
     return result
 
-def slice_into_sequences(dataset, tokenizer, sequence_len):
+def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir=None):
+    # Try to load from cache first
+    if cache_dir is not None:
+        # Efficiently hash the tokenized data by XORing individual item hashes
+        combined_hash = 0
+        for item in tqdm(dataset, desc="Hashing sequences"):
+            item_str = str(item['input_ids'].tolist())
+            item_hash = int(hashlib.md5(item_str.encode()).hexdigest()[:16], 16)
+            combined_hash ^= item_hash
+
+        # Use combined_hash directly in cache filename
+        cache_key = f"{combined_hash:016x}_{sequence_len}_{tokenizer.bos_token_id}"
+        cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
+
+        if os.path.exists(cache_path):
+            log(f"Loading sliced sequences from cache: {cache_path}")
+            cached_dataset = datasets.load_from_disk(cache_path)
+            cached_dataset.set_format(type='torch')
+            return cached_dataset
+
     all_sequences = []
     # Initialize sequence_tokens with BOS token if it exists
     sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
@@ -43,6 +64,13 @@ def slice_into_sequences(dataset, tokenizer, sequence_len):
     # Discard the final partial sequence to ensure all are exactly sequence_len in length...
     result_dataset = datasets.Dataset.from_dict({'input_ids': all_sequences})
     result_dataset.set_format(type='torch')
+
+    # Save to cache
+    if cache_dir is not None:
+        os.makedirs(cache_dir, exist_ok=True)
+        log(f"Saving sliced sequences to cache: {cache_path}")
+        result_dataset.save_to_disk(cache_path)
+
     return result_dataset
 
 def load_single_dataset(dataset_path, tokenizer, sequence_len):
@@ -77,7 +105,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     num_proc = min(os.cpu_count(), len(dataset))
 
     dataset = dataset.map(
-        lambda x: tokenize_with_eos(x, tokenizer),
+        lambda x: tokenize_and_add_eos(x, tokenizer),
         batched=True,
         batch_size=DATASET_TOKENIZE_BATCH_SIZE,
         remove_columns=dataset.column_names,
@@ -90,7 +118,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     # Set torch format after tokenization when only token data remains
     dataset.set_format(type='torch')
 
-    return slice_into_sequences(dataset, tokenizer, sequence_len)
+    return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir)
 
 def load_datasets(config, tokenizer):
     if 'sequence_len' not in config:

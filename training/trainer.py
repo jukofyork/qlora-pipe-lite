@@ -149,12 +149,12 @@ class Trainer:
     def _print_eval_progress(self, step, current_loss, last_loss=None):
         """Print evaluation progress with optional percentage change."""
         if step == 0:  # Initial evaluation
-            log(f'- Initial evaluation loss: {current_loss:.4f}')
+            log(f'Initial evaluation loss: {current_loss:.4f}')
         elif last_loss is None:
-            log(f'- Step {step} evaluation loss: {current_loss:.4f}')
+            log(f'Step {step} evaluation loss: {current_loss:.4f}')
         else:
             percent_change = (current_loss / last_loss - 1) * 100
-            log(f'- Step {step} evaluation loss: {current_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
+            log(f'Step {step} evaluation loss: {current_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
 
     def _should_checkpoint(self):
         """Check if it's time to checkpoint based on time interval."""
