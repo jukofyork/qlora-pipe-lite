@@ -59,13 +59,14 @@ class CustomPipelineEngine(PipelineEngine):
         super().__init__(*args, **kwargs)
         self.total_steps = None
         self.start_time = None
+        self.start_step = None
 
     def train_batch(self):
         if not torch._C.is_grad_enabled():
             raise RuntimeError(f'train_batch() requires gradients enabled. Use eval_batch() instead.')
 
-         # Start timing from first training step to avoid startup overhead bias
-        if self.start_time is None:
+        # Start timing from first training step to avoid startup overhead bias
+        if self.global_rank == 0 and self.start_time is None:
             self.start_time = time.time()
 
         # sequence length may change between macro batches (but not between gradient accumulation steps)
@@ -86,14 +87,20 @@ class CustomPipelineEngine(PipelineEngine):
 
         self.timers(TRAIN_BATCH_TIMER).stop()
 
+        # Set start_step to track the step number before timing began
+        if self.global_rank == 0 and self.start_step is None:
+            self.start_step = self.global_steps - 1
+
         if self.global_steps % self.steps_per_print() == 0:
             if self.global_rank == 0:
                 iter_elapsed = self.timers(TRAIN_BATCH_TIMER).elapsed(reset=True) / 1000.0
                 iter_time = iter_elapsed / self.steps_per_print()
                 iter_throughput = self.train_batch_size() / iter_time
 
+                # Calculate ETA based on actual steps completed since timing started
                 total_elapsed = time.time() - self.start_time
-                eta = (total_elapsed / self.global_steps) * (self.total_steps - self.global_steps)
+                steps_completed = self.global_steps - self.start_step
+                eta = (total_elapsed / steps_completed) * (self.total_steps - self.global_steps)
 
                 log(f'step: {self.global_steps} / {self.total_steps}, '
                     f'loss: {self.agg_train_loss:0.4f}, '
