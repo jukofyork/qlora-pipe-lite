@@ -120,7 +120,6 @@ def create_pipeline_model(model, config):
         activation_checkpoint_interval=1,
         checkpointable_layers=checkpointable_layers,
         activation_checkpoint_func=unsloth_utils.unsloth_checkpoint,
-        partition_method='estimated_size',
         use_column_major_topology=config.get('use_column_major_topology', False)
     )
 

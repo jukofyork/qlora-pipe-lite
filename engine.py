@@ -271,59 +271,42 @@ class CustomPipelineEngine(PipelineEngine):
     # make our forward pass method apply
     PipelineEngine._INSTRUCTION_MAP[schedule.ForwardPass] = _exec_forward_pass
 
-class ColumnMajorParallelTopology(ProcessTopology):
-    """
-    A topology specialisation for hybrid data+pipeline parallelism optimized for LoRA training:
-    - Sends high-volume "per token" hidden states over PCIe/NVLink.
-    - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand.
-    """
-
-    def __init__(self, num_pp, num_dp):
-        # Swap the axes and dims to change the rank mapping
-        super().__init__(axes=['data', 'pipe'], dims=[num_dp, num_pp])
-
 class CustomPipelineModule(PipelineModule):
 
     def __init__(self, layers, use_column_major_topology, **kwargs):
-        # Hybrid LoRA data+pipeline parallelism may want to use "column-major" layout
         if use_column_major_topology:
-            world_size = dist.get_world_size()
-            num_stages = kwargs.get('num_stages')
-            if num_stages > 1 and world_size > 1:
-                assert world_size % num_stages == 0, f"world_size ({world_size}) must be divisible by num_stages ({num_stages})"
-                num_dp = world_size // num_stages
-                kwargs['topology'] = ColumnMajorParallelTopology(num_pp=num_stages, num_dp=num_dp)
+            self._set_column_major_topology(kwargs)
         super().__init__(layers, **kwargs)
 
-    def _partition_layers(self, method='uniform'):
+    def _set_column_major_topology(self, kwargs):
+        """
+        Set a topology specialisation for hybrid data+pipeline parallelism optimized for LoRA training:
+        - Sends high-volume "per token" hidden states over PCIe/NVLink.
+        - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand.
+        """
+
+        class ColumnMajorParallelTopology(ProcessTopology):
+
+            def __init__(self, num_pp, num_dp):
+                # Swap the axes and dims to change the rank mapping
+                super().__init__(axes=['data', 'pipe'], dims=[num_dp, num_pp])
+
+        world_size = dist.get_world_size()
+        num_stages = kwargs.get('num_stages')
+        if num_stages > 1 and world_size > 1:
+            assert world_size % num_stages == 0, f"world_size {world_size} not divisible by num_stages {num_stages}"
+            num_dp = world_size // num_stages
+            kwargs['topology'] = ColumnMajorParallelTopology(num_pp=num_stages, num_dp=num_dp)
+
+    def _partition_layers(self):
         num_stages = self._topo.get_dim('pipe')
         stage_id = self._topo.get_coord(self.global_rank).pipe
 
-        log(f'Partitioning pipeline stages with method {method}')
+        log(f'Partitioning pipeline stages with estimated_size method')
 
-        method = method.lower()
-
-        estimated_sizes = None
-        # Each stage gets a simple uniform number of layers.
-        if method == 'uniform':
-            num_layers = len(self._layer_specs)
-            self.parts = ds_utils.partition_uniform(num_items=num_layers, num_parts=num_stages)
-        elif method == 'parameters':
-            param_counts = self._count_layer_params()
-            self.parts = ds_utils.partition_balanced(weights=param_counts, num_parts=num_stages)
-        elif method.startswith('type:'):
-            layertype = method.split(':')[1]
-            binary_weights = [0] * len(self._layer_specs)
-            for idx in self._find_layer_type(layertype):
-                binary_weights[idx] = 1
-            self.parts = ds_utils.partition_balanced(weights=binary_weights, num_parts=num_stages)
-        elif method == 'profile':
-            raise NotImplementedError(f'Partitioning method {method} not implemented.')
-        elif method == 'estimated_size':
-            estimated_sizes = [getattr(l, 'estimated_size', 0) for l in self._layer_specs]
-            self.parts = ds_utils.partition_balanced(weights=estimated_sizes, num_parts=num_stages)
-        else:
-            raise NotImplementedError(f'Partitioning method {method} not implemented.')
+        # Use estimated_size for partitioning
+        estimated_sizes = [getattr(l, 'estimated_size', 0) for l in self._layer_specs]
+        self.parts = ds_utils.partition_balanced(weights=estimated_sizes, num_parts=num_stages)
 
         # Print some information on the partitioning.
         if self.global_rank == 0:
@@ -342,16 +325,12 @@ class CustomPipelineModule(PipelineModule):
                             name = layer.__name__
                         except AttributeError:
                             pass
-                    logstr = f'    {idx+start:2d}: {name}'
-                    if estimated_sizes:
-                        es = estimated_sizes[idx + start]
-                        logstr += f', estimated size: {es}'
-                    log(logstr)
+                    es = estimated_sizes[idx + start]
+                    log(f'    {idx+start:2d}: {name}, estimated size: {es}')
             if self.loss_fn:
                 try:
                     log(f'  loss: {self.loss_fn.__name__}')
                 except AttributeError:
                     log(f'  loss: {self.loss_fn.__class__.__name__}')
-        deepspeed.comm.barrier()
 
         self._set_bounds(start=self.parts[stage_id], stop=self.parts[stage_id + 1])
