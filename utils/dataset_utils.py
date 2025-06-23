@@ -5,6 +5,7 @@ import json
 import os
 import os.path
 import torch
+import xxhash
 
 from constants import DATASET_TOKENIZE_BATCH_SIZE, DEFAULT_EVAL_FRACTION
 from utils.utils import is_main_process, zero_first, log
@@ -17,26 +18,25 @@ def tokenize_and_add_eos(batch, tokenizer):
             result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
     return result
 
-def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir=None):
+def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir):
+    # Efficiently hash the tokenized data by XORing individual item hashes
+    combined_hash = 0
+    for item in tqdm(dataset, desc="Hashing sequences"):
+        # Hash the raw tensor bytes directly
+        item_hash = xxhash.xxh64(item['input_ids'].numpy().tobytes()).intdigest()
+        combined_hash ^= item_hash
+
+    # Use combined_hash directly in cache filename
+    cache_key = f"{combined_hash:016x}_{sequence_len}_{tokenizer.bos_token_id}"
+    cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
+
     # Try to load from cache first
-    if cache_dir is not None:
-        # Efficiently hash the tokenized data by XORing individual item hashes
-        combined_hash = 0
-        for item in tqdm(dataset, desc="Hashing sequences"):
-            item_str = str(item['input_ids'].tolist())
-            item_hash = int(hashlib.md5(item_str.encode()).hexdigest()[:16], 16)
-            combined_hash ^= item_hash
-
-        # Use combined_hash directly in cache filename
-        cache_key = f"{combined_hash:016x}_{sequence_len}_{tokenizer.bos_token_id}"
-        cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
-
-        if os.path.exists(cache_path):
-            print(f"Loading sliced sequences from cache: {cache_path}...", end="")
-            cached_dataset = datasets.load_from_disk(cache_path)
-            cached_dataset.set_format(type='torch')
-            print(" Done.")
-            return cached_dataset
+    if os.path.exists(cache_path):
+        print(f"Loading sliced sequences from cache: {cache_path}...", end="")
+        cached_dataset = datasets.load_from_disk(cache_path)
+        cached_dataset.set_format(type='torch')
+        print(" Done.")
+        return cached_dataset
 
     all_sequences = []
     # Initialize sequence_tokens with BOS token if it exists
@@ -67,11 +67,10 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir=None):
     result_dataset.set_format(type='torch')
 
     # Save to cache
-    if cache_dir is not None:
-        os.makedirs(cache_dir, exist_ok=True)
-        print(f"Saving sliced sequences to cache: {cache_path}...", end="")
-        result_dataset.save_to_disk(cache_path)
-        print(" Done.")
+    os.makedirs(cache_dir, exist_ok=True)
+    print(f"Saving sliced sequences to cache: {cache_path}...", end="")
+    result_dataset.save_to_disk(cache_path)
+    print(" Done.")
 
     return result_dataset
 
