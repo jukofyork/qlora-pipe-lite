@@ -23,6 +23,10 @@ lora_rank = 64
 lora_alpha = 64      # (default: 1/sqrt(rank) [ie: "Rank-Stabilized LoRA" value])
 lora_dropout = 0.05  # (default: 0.0)
 
+# =================================
+# MODULE/LAYER FILTER CONFIGURATION
+# =================================
+
 # Train only specific modules (defaults to: 'all linear' modules for LoRA, or all modules for full fine-tuning)
 #target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
 
@@ -47,9 +51,9 @@ weight_decay = 0.01  # (default: 0.0)
 eval_fraction = 0.01 # (default: 0.01)
 evals_per_run = 10   # (default: 10)
 
-# ===================
-# TRAINING PARAMETERS
-# ===================
+# ======================
+# TRAINING CONFIGURATION
+# ======================
 
 sequence_len = 32768
 
@@ -57,6 +61,7 @@ sequence_len = 32768
 pipeline_stages = 1                   # (default: 1)
 
 # Controls the effective batch size: gradient_accumulation_steps x (world_size / pipeline_stages)
+# Effective batch size = gradient_accumulation_steps x num_gpus (when pipeline_stages=1)
 gradient_accumulation_steps = 32      # (default: 1)
 
 # Setting this lower can help to drop fewer examples when trying to make equal-sized batches 
@@ -82,7 +87,7 @@ max_checkpoints = 3            # (default: 3)
 [[datasets]]
 dataset_path = 'test_data/*.txt'
 
-# Structured data stored in json, jsonl or parquet will use their "text" fields' contents as training data:
+# Structured data stored in json, jsonl or parquet will use their "text" fields as training data:
 [[datasets]]
 dataset_path = 'json_data/*.json'
 
