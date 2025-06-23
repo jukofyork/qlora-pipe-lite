@@ -87,6 +87,8 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
         num_proc=num_proc,
     )
 
+    dataset = dataset.shuffle(seed=42)
+
     # Set torch format after tokenization when only token data remains
     dataset.set_format(type='torch')
 
@@ -96,7 +98,7 @@ def load_datasets(config, tokenizer):
     if 'sequence_len' not in config:
         raise ValueError('Need to specify a sequence_len')
     sequence_len = config['sequence_len']
-    assert sequence_len > 0
+    assert sequence_len > 0, "sequence_len must be positive"
     # A100 wants sequence lengths to be multiples of 64, other cards are efficient with smaller, so just do 64
     assert sequence_len % 64 == 0, f"sequence_len ({sequence_len}) must be a multiple of 64 for optimal GPU performance"
 
@@ -104,7 +106,7 @@ def load_datasets(config, tokenizer):
         raise ValueError('Need to specify at least one dataset')
 
     eval_fraction = config.get('eval_fraction', 0.01)
-    assert 0 < eval_fraction < 1
+    assert 0 < eval_fraction < 1, "eval_fraction must be between 0 and 1"
 
     with zero_first(is_main_process()):
         datasets_list = []
