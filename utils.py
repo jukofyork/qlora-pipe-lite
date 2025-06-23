@@ -11,7 +11,7 @@ def is_main_process():
 
 @contextmanager
 def zero_first(is_main):
-    """Run wrapped context so that rank 0 executes first before other ranks."""
+    """Run wrapped context so that rank 0 executes first before other ranks, then all ranks wait for completion."""
     if not is_main:  # other ranks wait first
         dist.barrier()
     yield
