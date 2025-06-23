@@ -4,10 +4,12 @@ import deepspeed
 import glob
 import os
 import shutil
+import sys
 import toml
 
 import transformers
 
+from constants import DEEPSPEED_TIMEOUT_HOURS
 from pipeline import dataloader
 from training.model_factory import setup_model_and_engine
 from training.trainer import Trainer
@@ -26,7 +28,7 @@ args = parser.parse_args()
 
 def setup_distributed_training(config):
     """Initialize distributed training and return run directory."""
-    deepspeed.init_distributed(timeout=timedelta(hours=2))
+    deepspeed.init_distributed(timeout=timedelta(hours=DEEPSPEED_TIMEOUT_HOURS))
 
     # Ensure output directory exists
     if is_main_process():
@@ -63,7 +65,7 @@ if __name__ == '__main__':
 
     # Load and configure tokenizer
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-        config['model'], local_files_only=True, model_max_length=int(1e30),
+        config['model'], local_files_only=True, model_max_length=sys.maxsize,
     )
 
     # Load, convert and split the datasets

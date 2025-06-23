@@ -4,9 +4,8 @@ import os
 import os.path
 import torch
 
+from constants import DATASET_TOKENIZE_BATCH_SIZE, DEFAULT_EVAL_FRACTION
 from utils.utils import is_main_process, zero_first, log
-
-TOKENIZE_BATCH_SIZE = 10
 
 def tokenize_with_eos(batch, tokenizer):
     result = tokenizer(batch['text'])
@@ -81,7 +80,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
     dataset = dataset.map(
         lambda x: tokenize_with_eos(x, tokenizer),
         batched=True,
-        batch_size=TOKENIZE_BATCH_SIZE,
+        batch_size=DATASET_TOKENIZE_BATCH_SIZE,
         remove_columns=dataset.column_names,
         desc='tokenizing',
         num_proc=num_proc,
@@ -100,12 +99,12 @@ def load_datasets(config, tokenizer):
     sequence_len = config['sequence_len']
     assert sequence_len > 0, "sequence_len must be positive"
     # A100 wants sequence lengths to be multiples of 64, other cards are efficient with smaller, so just do 64
-    assert sequence_len % 64 == 0, f"sequence_len ({sequence_len}) must be a multiple of 64 for optimal GPU performance"
+    assert sequence_len % 64 == 0, f"sequence_len ({sequence_len}) must be multiple of 64"
 
     if 'datasets' not in config:
         raise ValueError('Need to specify at least one dataset')
 
-    eval_fraction = config.get('eval_fraction', 0.01)
+    eval_fraction = config.get('eval_fraction', DEFAULT_EVAL_FRACTION)
     assert 0 < eval_fraction < 1, "eval_fraction must be between 0 and 1"
 
     with zero_first(is_main_process()):

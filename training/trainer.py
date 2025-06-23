@@ -3,6 +3,7 @@ import gc
 import time
 import torch
 
+from constants import DEFAULT_CHECKPOINT_INTERVAL_HOURS, DEFAULT_MAX_CHECKPOINTS, DEFAULT_EVALS_PER_RUN
 from training.checkpoint_manager import load_checkpoint, save_checkpoint, prune_checkpoints
 from training.model_saver import save_lora, save_full_model
 from utils.utils import is_main_process, log
@@ -36,14 +37,14 @@ class Trainer:
         self.model_dir = config['model']
         self.epochs = config.get('epochs', 1)
         self.eval_gradient_accumulation_steps = config.get('eval_gradient_accumulation_steps', 1)
-        self.checkpoint_interval = config.get('checkpoint_interval', 60)
-        self.max_checkpoints = config.get('max_checkpoints', 3)
+        self.checkpoint_interval_hours = config.get('checkpoint_interval_hours', DEFAULT_CHECKPOINT_INTERVAL_HOURS)
+        self.max_checkpoints = config.get('max_checkpoints', DEFAULT_MAX_CHECKPOINTS)
 
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
 
         # Calculate evaluation step indices to use across the entire run
-        evals_per_run = config.get('evals_per_run', 10)
+        evals_per_run = config.get('evals_per_run', DEFAULT_EVALS_PER_RUN)
         self.eval_step_indices = self._calculate_eval_steps(model_engine.total_steps, evals_per_run)
 
     def train(self):
@@ -156,7 +157,7 @@ class Trainer:
             return False
 
         current_time = time.time()
-        if (current_time - self.last_checkpoint_time) / 60 >= self.checkpoint_interval:
+        if (current_time - self.last_checkpoint_time) / 3600 >= self.checkpoint_interval_hours:
             self.last_checkpoint_time = current_time
             return True
         return False

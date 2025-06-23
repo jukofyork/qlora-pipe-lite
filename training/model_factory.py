@@ -8,6 +8,13 @@ import torch
 
 import transformers
 
+from constants import (
+    DEFAULT_BETA1,
+    DEFAULT_BETA2,
+    DEFAULT_OPTIMIZER_EPS,
+    DEFAULT_WEIGHT_DECAY,
+    DEFAULT_LORA_DROPOUT
+)
 from models import causal_lm_models
 from pipeline import engine
 from utils.unsloth_utils import unsloth_checkpoint
@@ -50,16 +57,16 @@ def get_optimizer(model_parameters, config):
     optimizer_kwargs = {
         "params": model_parameters,
         "lr": config['lr'],
-        "betas": (config.get('beta1', 0.9), config.get('beta2', 0.99)),
-        "weight_decay": config.get('weight_decay', 0.0),
-        "eps": config.get('eps', 1e-6),
+        "betas": (config.get('beta1', DEFAULT_BETA1), config.get('beta2', DEFAULT_BETA2)),
+        "weight_decay": config.get('weight_decay', DEFAULT_WEIGHT_DECAY),
+        "eps": config.get('eps', DEFAULT_OPTIMIZER_EPS),
         "kahan_sum": True
     }
     return optimi.AdamW(**optimizer_kwargs)
 
 def get_lr_scheduler(optimizer, config):
     """Create learning rate scheduler with RMS ratio scaling."""
-    beta = config.get('beta2', 0.99)
+    beta = config.get('beta2', DEFAULT_BETA2)
 
     # see: https://github.com/tdrussell/qlora-pipe/pull/35#issuecomment-2495460307
     def rms_ratio_fn(step):
@@ -131,7 +138,7 @@ def create_lora_config(config, target_modules, layers_to_transform):
     return LoraConfig(
         r=config['lora_rank'],
         lora_alpha=config.get('lora_alpha', round(config['lora_rank'] ** 0.5)),  # rslora: s = 1/sqrt(rank)
-        lora_dropout=config['lora_dropout'] if 'lora_dropout' in config else 0.0,
+        lora_dropout=config.get('lora_dropout', DEFAULT_LORA_DROPOUT),
         target_modules=target_modules if target_modules else 'all-linear',
         layers_to_transform=layers_to_transform if layers_to_transform else None,
         task_type='CAUSAL_LM'

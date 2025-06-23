@@ -37,10 +37,10 @@ def initialize(config=None,
     else:
         # The necessary ds_config fields are taken from the TOML config file.
         ds_config = {
-            'train_micro_batch_size_per_gpu': config.get('micro_batch_size_per_gpu', 1),
+            'train_micro_batch_size_per_gpu': 1,
             'gradient_accumulation_steps': config.get('gradient_accumulation_steps', 1),
-            'gradient_clipping': config.get('gradient_clipping', 1.0),
-            'steps_per_print': config.get('steps_per_print', 1),
+            'gradient_clipping': 1.0,
+            'steps_per_print': 1,
         }
 
     mpu = model.mpu()
