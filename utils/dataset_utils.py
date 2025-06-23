@@ -32,9 +32,10 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir=None):
         cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
 
         if os.path.exists(cache_path):
-            log(f"Loading sliced sequences from cache: {cache_path}")
+            print(f"Loading sliced sequences from cache: {cache_path}...", end="")
             cached_dataset = datasets.load_from_disk(cache_path)
             cached_dataset.set_format(type='torch')
+            print(" Done.")
             return cached_dataset
 
     all_sequences = []
@@ -68,8 +69,9 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir=None):
     # Save to cache
     if cache_dir is not None:
         os.makedirs(cache_dir, exist_ok=True)
-        log(f"Saving sliced sequences to cache: {cache_path}")
+        print(f"Saving sliced sequences to cache: {cache_path}...", end="")
         result_dataset.save_to_disk(cache_path)
+        print(" Done.")
 
     return result_dataset
 
@@ -113,10 +115,14 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len):
         num_proc=num_proc,
     )
 
+    print("Shuffling dataset...", end="")
     dataset = dataset.shuffle(seed=42)
+    print(" Done.")
 
     # Set torch format after tokenization when only token data remains
+    print("Setting torch format...", end="")
     dataset.set_format(type='torch')
+    print(" Done.")
 
     return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir)
 
