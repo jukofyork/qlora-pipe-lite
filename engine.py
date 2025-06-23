@@ -4,17 +4,23 @@ from deepspeed.runtime import utils as ds_utils
 from deepspeed.runtime.activation_checkpointing import checkpointing as ds_checkpointing
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.pipe import schedule
-from deepspeed.runtime.pipe.engine import PipelineEngine, TRAIN_BATCH_TIMER, PIPE_SEND_OUTPUT_TIMER, PIPE_SEND_GRAD_TIMER, PIPE_RECV_INPUT_TIMER, PIPE_RECV_GRAD_TIMER
+from deepspeed.runtime.pipe.engine import (
+    PipelineEngine,
+    TRAIN_BATCH_TIMER,
+    PIPE_SEND_OUTPUT_TIMER,
+    PIPE_SEND_GRAD_TIMER,
+    PIPE_RECV_INPUT_TIMER,
+    PIPE_RECV_GRAD_TIMER
+)
 from deepspeed.runtime.pipe.module import LayerSpec
 from deepspeed.runtime.pipe.module import PipelineModule
 from deepspeed.runtime.pipe.topology import ProcessTopology
 from deepspeed.runtime.utils import PartitionedTensor
 from torch import nn
-import deepspeed
 import time
 import torch
 
-from utils import eta_str, log
+from utils import log, seconds_to_time_str
 
 def initialize(config=None,
                args=None,
