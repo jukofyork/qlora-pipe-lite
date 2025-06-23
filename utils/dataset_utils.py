@@ -24,6 +24,7 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir):
 
     # Try to load from cache first
     if os.path.exists(cache_path):
+        log(f"Loading sliced sequences from cache: {cache_path}")
         cached_dataset = datasets.load_from_disk(cache_path)
         cached_dataset.set_format(type='torch')
         return cached_dataset
