@@ -293,7 +293,9 @@ class CustomPipelineModule(PipelineModule):
             num_dp = world_size // num_stages
             kwargs['topology'] = ColumnMajorParallelTopology(num_pp=num_stages, num_dp=num_dp)
 
-    def _partition_layers(self):
+    def _partition_layers(self, method='estimated_size'):
+        assert method == 'estimated_size', f"Only 'estimated_size' partitioning method is supported, got '{method}'"
+
         num_stages = self._topo.get_dim('pipe')
         stage_id = self._topo.get_coord(self.global_rank).pipe
 
