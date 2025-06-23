@@ -18,5 +18,4 @@ flash-attn
 pyyaml
 tqdm
 triton
-hqq
 torch-optimi
