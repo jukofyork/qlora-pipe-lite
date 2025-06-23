@@ -26,9 +26,8 @@ parser.add_argument('--resume_from_checkpoint', action='store_true', default=Non
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
 
-def setup_distributed_training(config):
-    """Initialize distributed training and return run directory."""
-    deepspeed.init_distributed(timeout=timedelta(hours=DEEPSPEED_TIMEOUT_HOURS))
+def setup_run_directory(config):
+    """Create or determine the run directory for this training session."""
 
     # Ensure output directory exists
     if is_main_process():
@@ -58,8 +57,11 @@ if __name__ == '__main__':
     with open(args.config) as f:
         config = toml.load(f)
 
-    # Setup distributed training and data
-    run_dir = setup_distributed_training(config)
+    # Increase deepspeed timeout to avoid timeouts during dataset loading
+    deepspeed.init_distributed(timeout=timedelta(hours=DEEPSPEED_TIMEOUT_HOURS))
+
+    # Setup run directory for this training session
+    run_dir = setup_run_directory(config)
 
     # Load and configure tokenizer
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -91,12 +93,7 @@ if __name__ == '__main__':
         shuffle=False,
     )
 
-    # Configure training schedule
-    model_engine.set_dataloader(train_dataloader)
-    steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
-    model_engine.total_steps = steps_per_epoch * config.get('epochs', 1)
-
-    # Initialize and start training
+    # Initialize trainer
     trainer = Trainer(
         config=config,
         model_engine=model_engine,
@@ -109,4 +106,5 @@ if __name__ == '__main__':
         resume_from_checkpoint=args.resume_from_checkpoint
     )
 
+    # Start training
     trainer.train()

@@ -43,6 +43,11 @@ class Trainer:
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
 
+        # Calculate and set total training steps
+        model_engine.set_dataloader(train_dataloader)
+        steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
+        model_engine.total_steps = steps_per_epoch * self.epochs
+
         # Calculate evaluation step indices to use across the entire run
         evals_per_run = config.get('evals_per_run', DEFAULT_EVALS_PER_RUN)
         self.eval_step_indices = self._calculate_eval_steps(model_engine.total_steps, evals_per_run)
