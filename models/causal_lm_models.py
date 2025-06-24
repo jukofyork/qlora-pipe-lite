@@ -34,16 +34,32 @@ class BaseCausalLMPipe(PipelineModel):
         torch.set_default_dtype(torch.float32)
 
     def to_layer_specs(self):
-        result = [
-            self._create_initial_layer(),
-            self._create_embedding_layer(),
-        ]
+        embedding_on_cpu = not self.full_fine_tune
+        embedding_size = 1 if embedding_on_cpu else self._get_embedding_size_hint()
+
+        result = []
+
+        result.append(LayerSpec(PrepareInputsPipe, _estimated_size=0))
+        result.append(LayerSpec(
+            EmbeddingPipe,
+            self.loader_util,
+            self.model.embed_tokens,
+            self.model,
+            embedding_on_cpu=embedding_on_cpu,
+            _estimated_size=embedding_size
+        ))
 
         for block in self.model.layers:
             result.append(LayerSpec(LlamaDecoderLayerPipe, self.loader_util, block))
 
         result.append(LayerSpec(LlamaRMSNormPipe, self.loader_util, self.model.norm, _estimated_size=0))
-        result.append(self._create_lm_head_layer())
+        result.append(LayerSpec(
+            LmHeadPipe,
+            self.loader_util,
+            self.lm_head,
+            tie_weights=self._get_tie_weights(),
+            _estimated_size=self._get_lm_head_size_hint()
+        ))
         result.append(LayerSpec(ComputeMetrics, **self._get_compute_metrics_kwargs()))
 
         return result
@@ -67,40 +83,6 @@ class BaseCausalLMPipe(PipelineModel):
     def _get_compute_metrics_kwargs(self):
         """Override to add model-specific ComputeMetrics parameters."""
         return {}
-
-    def _create_initial_layer(self):
-
-        def initial_layer(inputs):
-            input_ids, attention_mask, labels, sample_weights = inputs
-            batch_size, seq_length = input_ids.shape[:2]
-            device = input_ids.device
-            position_ids = torch.arange(0, seq_length, dtype=torch.long, device=device)
-            position_ids = position_ids.unsqueeze(0)
-            return input_ids, attention_mask, position_ids, labels, sample_weights
-
-        return initial_layer
-
-    def _create_embedding_layer(self):
-        embedding_on_cpu = not self.full_fine_tune
-        embedding_size = 1 if embedding_on_cpu else self._get_embedding_size_hint()
-
-        return LayerSpec(
-            EmbeddingPipe,
-            self.loader_util,
-            self.model.embed_tokens,
-            self.model,
-            embedding_on_cpu=embedding_on_cpu,
-            _estimated_size=embedding_size,
-        )
-
-    def _create_lm_head_layer(self):
-        return LayerSpec(
-            LmHeadPipe,
-            self.loader_util,
-            self.lm_head,
-            tie_weights=self._get_tie_weights(),
-            _estimated_size=self._get_lm_head_size_hint()
-        )
 
 class LlamaForCausalLMPipe(BaseCausalLMPipe, transformers.LlamaForCausalLM):
     CONFIG_CLASS = transformers.LlamaConfig

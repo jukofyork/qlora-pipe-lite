@@ -17,6 +17,20 @@ class LayerSpec(pipe_module.LayerSpec):
     def estimated_size(self):
         return self.module_kwargs.get('_estimated_size', 1)
 
+class PrepareInputsPipe(nn.Module):
+    """Adds position_ids to the input tuple for pipeline processing."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, inputs):
+        input_ids, attention_mask, labels, sample_weights = inputs
+        batch_size, seq_length = input_ids.shape[:2]
+        device = input_ids.device
+        position_ids = torch.arange(0, seq_length, dtype=torch.long, device=device)
+        position_ids = position_ids.unsqueeze(0)
+        return input_ids, attention_mask, position_ids, labels, sample_weights
+
 class EmbeddingPipe(nn.Module):
 
     def __init__(self, loader_util, orig, model, embedding_on_cpu=False):
@@ -139,7 +153,7 @@ class ComputeMetrics(nn.Module):
         return fast_cross_entropy_loss(
             logits,  # (batch_size, seq_len, vocab_size)
             shift_labels,  # (batch_size, seq_len)
-            sample_weights,
+            sample_weights,  # (batch_size, seq_len)
             logit_softcapping=self.logit_softcapping,
             logit_scaling=self.logit_scaling
         )
