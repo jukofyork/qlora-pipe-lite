@@ -18,7 +18,8 @@ MAX_FUSED_SIZE : int = 65536
 next_power_of_2 = triton.next_power_of_2
 import functools
 from typing import Optional
-from unsloth import DEVICE_TYPE
+
+DEVICE_TYPE == "cuda" 
 
 # torch.cuda.amp.custom_fwd is deprecated >= 2.4
 import torch
