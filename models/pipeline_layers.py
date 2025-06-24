@@ -28,7 +28,7 @@ class EmbeddingPipe(nn.Module):
         loader_util.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        input_ids, attention_mask, position_ids, labels = inputs
+        input_ids, attention_mask, position_ids, labels, sample_weights = inputs
         original_device = input_ids.device
         if self.embedding_on_cpu:
             self.orig.to('cpu')
@@ -75,7 +75,7 @@ class EmbeddingPipe(nn.Module):
             cos.requires_grad_(True)
         if torch.is_floating_point(sin):
             sin.requires_grad_(True)
-        return hidden_states, attention_mask, cos, sin, labels
+        return hidden_states, attention_mask, cos, sin, labels, sample_weights
 
 class LlamaDecoderLayerPipe(nn.Module):
 
@@ -85,8 +85,11 @@ class LlamaDecoderLayerPipe(nn.Module):
         loader_util.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, attention_mask, cos, sin, labels = inputs
-        result = (self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0], attention_mask, cos, sin, labels)
+        hidden_states, attention_mask, cos, sin, labels, sample_weights = inputs
+        result = (
+            self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0],
+            attention_mask, cos, sin, labels, sample_weights
+        )
         return result
 
 class LlamaRMSNormPipe(nn.Module):
@@ -97,8 +100,8 @@ class LlamaRMSNormPipe(nn.Module):
         loader_util.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, _, _, _, labels = inputs
-        return self.orig(hidden_states), labels
+        hidden_states, _, _, _, labels, sample_weights = inputs
+        return self.orig(hidden_states), labels, sample_weights
 
 class LmHeadPipe(nn.Module):
 
@@ -112,9 +115,9 @@ class LmHeadPipe(nn.Module):
         loader_util.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, labels = inputs
+        hidden_states, labels, sample_weights = inputs
         logits = self.lm_head(hidden_states)
-        return logits, labels
+        return logits, labels, sample_weights
 
 class ComputeMetrics(nn.Module):
 
@@ -124,7 +127,7 @@ class ComputeMetrics(nn.Module):
         self.logit_softcapping = logit_softcapping
 
     def forward(self, inputs):
-        logits, labels = inputs
+        logits, labels, sample_weights = inputs
         batch_size, seq_len, vocab_size = logits.shape
 
         # Shift labels for causal LM: [labels[1:], -100_padding]
@@ -136,6 +139,7 @@ class ComputeMetrics(nn.Module):
         return fast_cross_entropy_loss(
             logits,  # (batch_size, seq_len, vocab_size)
             shift_labels,  # (batch_size, seq_len)
+            sample_weights,
             logit_softcapping=self.logit_softcapping,
             logit_scaling=self.logit_scaling
         )

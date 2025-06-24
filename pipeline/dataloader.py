@@ -135,8 +135,9 @@ class PipelineDataLoader:
             input_ids = torch.stack([ex['input_ids'] for ex in examples])
             attention_mask = torch.stack([ex['attention_mask'] for ex in examples])
             labels = torch.stack([ex['labels'] for ex in examples])
+            sample_weights = torch.stack([ex['sample_weights'] for ex in examples])
 
-            return ((input_ids, attention_mask, labels), None)
+            return ((input_ids, attention_mask, labels, sample_weights), None)
 
         self.dataloader = DataLoader(
             self.dataset,

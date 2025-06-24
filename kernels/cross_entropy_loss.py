@@ -385,14 +385,15 @@ pass
 def fast_cross_entropy_loss(
     logits,
     labels,
+    sample_weights = None,
     logit_softcapping = 0,
     logit_scaling = 0,
-    n_items = None,
 ):
     """
     Arguments:
         logits: (batch, seq_len, vocab_size)
         labels: (batch, seq_len,)
+        sample_weights: (batch, seq_len,) - optional weights per token
     Returns:
         losses: float
     """
@@ -405,9 +406,13 @@ def fast_cross_entropy_loss(
         logit_softcapping,
         logit_scaling,
     )
-    if n_items is None:
-        n_items = torch.count_nonzero(labels != -100)
-    return loss.sum() / n_items
+    
+    if sample_weights is not None:
+        weights = sample_weights.view(-1)
+        weighted_loss = loss * weights
+        return weighted_loss.mean()
+    else:
+        return loss.mean()
 pass
 if (Version(torch.__version__) < Version("2.4.0")) and \
     not hasattr(fast_cross_entropy_loss, "__wrapped__"):

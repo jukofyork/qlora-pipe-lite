@@ -71,12 +71,12 @@ class BaseCausalLMPipe(PipelineModel):
     def _create_initial_layer(self):
 
         def initial_layer(inputs):
-            input_ids, attention_mask, labels = inputs
+            input_ids, attention_mask, labels, sample_weights = inputs
             batch_size, seq_length = input_ids.shape[:2]
             device = input_ids.device
             position_ids = torch.arange(0, seq_length, dtype=torch.long, device=device)
             position_ids = position_ids.unsqueeze(0)
-            return input_ids, attention_mask, position_ids, labels
+            return input_ids, attention_mask, position_ids, labels, sample_weights
 
         return initial_layer
 
