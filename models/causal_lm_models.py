@@ -41,6 +41,7 @@ class BaseCausalLMPipe(PipelineModel):
         result = []
 
         result.append(LayerSpec(PrepareInputsPipe, _estimated_size=0))
+
         result.append(LayerSpec(
             EmbeddingPipe,
             self.loader_util,
@@ -54,14 +55,17 @@ class BaseCausalLMPipe(PipelineModel):
             result.append(LayerSpec(LlamaDecoderLayerPipe, self.loader_util, block))
 
         result.append(LayerSpec(LlamaRMSNormPipe, self.loader_util, self.model.norm, _estimated_size=0))
+
         result.append(LayerSpec(
             LmHeadPipe,
             self.loader_util,
             self.lm_head,
             tie_weights=self._get_tie_weights(),
-            _estimated_size=self._get_lm_head_size_hint()
+            _estimated_size=self._get_lm_head_size_hint(),
+            **self._get_lm_head_kwargs()
         ))
-        result.append(LayerSpec(ComputeMetrics, **self._get_compute_metrics_kwargs()))
+
+        result.append(LayerSpec(ComputeMetrics))
 
         return result
 
@@ -73,16 +77,16 @@ class BaseCausalLMPipe(PipelineModel):
         """Override for models with large embeddings."""
         return 1
 
-    def _get_lm_head_size_hint(self):
-        """Override for models with large untied LM heads tensors."""
-        return 0
-
     def _get_tie_weights(self):
         """Override for models with different tie_weights behavior."""
         return 'model.embed_tokens.weight' if getattr(self.config, 'tie_word_embeddings', False) else None
 
-    def _get_compute_metrics_kwargs(self):
-        """Override to add model-specific ComputeMetrics parameters."""
+    def _get_lm_head_size_hint(self):
+        """Override for models with large untied LM heads tensors."""
+        return 0
+
+    def _get_lm_head_kwargs(self):
+        """Override to add model-specific LmHead parameters."""
         return {}
 
 class LlamaForCausalLMPipe(BaseCausalLMPipe, transformers.LlamaForCausalLM):
@@ -115,8 +119,8 @@ class CohereForCausalLMPipe(BaseCausalLMPipe, transformers.CohereForCausalLM):
     def _get_tie_weights(self):
         return 'model.embed_tokens.weight'
 
-    def _get_compute_metrics_kwargs(self):
-        return {'logit_scaling': getattr(self.config, 'logit_scale', 0)}
+    def _get_lm_head_kwargs(self):
+        return {'logit_scale': getattr(self.config, 'logit_scale', None)}
 
 class Cohere2ForCausalLMPipe(BaseCausalLMPipe, transformers.Cohere2ForCausalLM):
     CONFIG_CLASS = transformers.Cohere2Config
@@ -128,8 +132,8 @@ class Cohere2ForCausalLMPipe(BaseCausalLMPipe, transformers.Cohere2ForCausalLM):
     def _get_tie_weights(self):
         return 'model.embed_tokens.weight'
 
-    def _get_compute_metrics_kwargs(self):
-        return {'logit_scaling': getattr(self.config, 'logit_scale', 0)}
+    def _get_lm_head_kwargs(self):
+        return {'logit_scale': getattr(self.config, 'logit_scale', None)}
 
 class Gemma2ForCausalLMPipe(BaseCausalLMPipe, transformers.Gemma2ForCausalLM):
     CONFIG_CLASS = transformers.Gemma2Config
@@ -144,5 +148,5 @@ class Gemma2ForCausalLMPipe(BaseCausalLMPipe, transformers.Gemma2ForCausalLM):
     def _get_tie_weights(self):
         return 'model.embed_tokens.weight'
 
-    def _get_compute_metrics_kwargs(self):
-        return {'logit_softcapping': getattr(self.config, 'final_logit_softcapping', 0)}
+    def _get_lm_head_kwargs(self):
+        return {'final_logit_softcapping': getattr(self.config, 'final_logit_softcapping', None)}

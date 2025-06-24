@@ -119,26 +119,32 @@ class LlamaRMSNormPipe(nn.Module):
 
 class LmHeadPipe(nn.Module):
 
-    def __init__(self, loader_util, lm_head, tie_weights=None):
+    def __init__(self, loader_util, lm_head, logit_scale=None, final_logit_softcapping=None, tie_weights=None):
         super().__init__()
         # Unlike the other wrapper classes, this is called lm_head and not orig. Because this is directly a
         # nn.Linear layer, it needs to keep the same attribute name so quantization knows not to quantize it.
         self.lm_head = lm_head
+        self.logit_scale = logit_scale
+        self.final_logit_softcapping = final_logit_softcapping
         if tie_weights:
             self.lm_head.weight.original_name = tie_weights
         loader_util.load_state_dict_into_module(self)
 
     def forward(self, inputs):
         hidden_states, labels, sample_weights = inputs
+        if self.logit_scale is not None:
+            hidden_states = hidden_states * self.logit_scale
         logits = self.lm_head(hidden_states)
+        if self.final_logit_softcapping is not None:
+            logits = logits / self.final_logit_softcapping
+            logits = torch.tanh(logits)
+            logits = logits * self.final_logit_softcapping
         return logits, labels, sample_weights
 
 class ComputeMetrics(nn.Module):
 
-    def __init__(self, logit_scaling=0, logit_softcapping=0):
+    def __init__(self):
         super().__init__()
-        self.logit_scaling = logit_scaling
-        self.logit_softcapping = logit_softcapping
 
     def forward(self, inputs):
         logits, labels, sample_weights = inputs
@@ -154,6 +160,4 @@ class ComputeMetrics(nn.Module):
             logits,  # (batch_size, seq_len, vocab_size)
             shift_labels,  # (batch_size, seq_len)
             sample_weights,  # (batch_size, seq_len)
-            logit_softcapping=self.logit_softcapping,
-            logit_scaling=self.logit_scaling
         )
