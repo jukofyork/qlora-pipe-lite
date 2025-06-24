@@ -17,12 +17,12 @@ def tokenize_and_add_eos(batch, tokenizer):
             result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
     return result
 
-def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weights=1.0):
+def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weight=1.0):
     # Use the dataset's built-in fingerprint - it's already computed and deterministic
     cache_key = (
         f"{dataset._fingerprint}_{sequence_len}_"
         f"{tokenizer.bos_token_id}_{tokenizer.eos_token_id}_{tokenizer.pad_token_id}_"
-        f"{sample_weights}"
+        f"{sample_weight}"
     )
     cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
 
@@ -58,7 +58,7 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_wei
                 input_ids = torch.as_tensor(sequence_tokens, dtype=torch.long)
                 attention_mask = torch.ones(sequence_len, dtype=torch.long)
                 labels = input_ids.clone()
-                sample_weights = torch.full((sequence_len,), sample_weights, dtype=torch.float32)
+                sample_weights = torch.full((sequence_len,), sample_weight, dtype=torch.float32)
 
                 # Mask out BOS tokens in labels (if they exist)
                 if tokenizer.bos_token_id is not None:
@@ -99,7 +99,7 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_wei
 
     return result_dataset
 
-def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weights=1.0):
+def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weight=1.0):
     base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
     cache_dir = os.path.join(base_dir, "hf_cache")
 
@@ -144,7 +144,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weights=1.
     # Set torch format after tokenization when only token data remains
     dataset.set_format(type='torch')
 
-    return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weights)
+    return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weight)
 
 def load_datasets(config, tokenizer):
     if 'sequence_len' not in config:
@@ -163,12 +163,12 @@ def load_datasets(config, tokenizer):
     with zero_first(is_main_process()):
         datasets_list = []
         for dataset_config in config['datasets']:
-            sample_weights = dataset_config.get('sample_weights', 1.0)
+            sample_weight = dataset_config.get('sample_weight', 1.0)
             dataset = load_single_dataset(
                 dataset_config['dataset_path'],
                 tokenizer,
                 sequence_len,
-                sample_weights
+                sample_weight
             )
             datasets_list.append(dataset)
         combined_dataset = datasets.concatenate_datasets(datasets_list)
