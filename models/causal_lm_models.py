@@ -6,6 +6,7 @@ import transformers
 
 from models.pipeline_layers import (
     LayerSpec,
+    PrepareInputsPipe,
     EmbeddingPipe,
     LlamaDecoderLayerPipe,
     LlamaRMSNormPipe,
