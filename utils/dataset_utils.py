@@ -19,7 +19,10 @@ def tokenize_and_add_eos(batch, tokenizer):
 
 def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir):
     # Use the dataset's built-in fingerprint - it's already computed and deterministic
-    cache_key = f"{dataset._fingerprint}_{sequence_len}_{tokenizer.bos_token_id}"
+    cache_key = (
+        f"{dataset._fingerprint}_{sequence_len}_"
+        f"{tokenizer.bos_token_id}_{tokenizer.eos_token_id}_{tokenizer.pad_token_id}"
+    )
     cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
 
     # Try to load from cache first
@@ -49,12 +52,41 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir):
             sequence_tokens.extend(taken)
             if len(sequence_tokens) >= sequence_len:
                 assert len(sequence_tokens) == sequence_len
-                all_sequences.append(torch.as_tensor(sequence_tokens, dtype=torch.long))
+
+                # Create the triplet
+                input_ids = torch.as_tensor(sequence_tokens, dtype=torch.long)
+                attention_mask = torch.ones(sequence_len, dtype=torch.long)
+                labels = input_ids.clone()
+
+                # Mask out BOS tokens in labels (if they exist)
+                if tokenizer.bos_token_id is not None:
+                    labels[labels == tokenizer.bos_token_id] = -100
+
+                # Mask out EOS tokens in labels
+                if tokenizer.eos_token_id is not None:
+                    labels[labels == tokenizer.eos_token_id] = -100
+
+                # Mask out pad tokens in both labels AND attention_mask
+                if tokenizer.pad_token_id is not None:
+                    pad_mask = input_ids == tokenizer.pad_token_id
+                    labels[pad_mask] = -100
+                    attention_mask[pad_mask] = 0
+
+                all_sequences.append({
+                    'input_ids': input_ids,
+                    'attention_mask': attention_mask,
+                    'labels': labels
+                })
+
                 # Reset sequence_tokens with BOS token if it exists
                 sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
 
-    # Discard the final partial sequence to ensure all are exactly sequence_len in length...
-    result_dataset = datasets.Dataset.from_dict({'input_ids': all_sequences})
+    # Create dataset from the triplets
+    result_dataset = datasets.Dataset.from_dict({
+        'input_ids': [seq['input_ids'] for seq in all_sequences],
+        'attention_mask': [seq['attention_mask'] for seq in all_sequences],
+        'labels': [seq['labels'] for seq in all_sequences]
+    })
     result_dataset.set_format(type='torch')
 
     # Save to cache

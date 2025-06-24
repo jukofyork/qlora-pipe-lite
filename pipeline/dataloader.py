@@ -133,13 +133,8 @@ class PipelineDataLoader:
 
         def collate_fn(examples):
             input_ids = torch.stack([ex['input_ids'] for ex in examples])
-            batch_size, seq_len = input_ids.shape
-
-            # Create attention mask once (all ones for fixed-length sequences)
-            attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long)
-
-            # Labels are identical to input_ids for causal LM
-            labels = input_ids
+            attention_mask = torch.stack([ex['attention_mask'] for ex in examples])
+            labels = torch.stack([ex['labels'] for ex in examples])
 
             return ((input_ids, attention_mask, labels), None)
 
