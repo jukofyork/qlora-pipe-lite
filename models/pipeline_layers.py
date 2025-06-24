@@ -2,7 +2,7 @@ from deepspeed.runtime.pipe import module as pipe_module
 from torch import nn
 import torch
 
-from kernels.cross_entropy_loss import Fast_CrossEntropyLoss
+from kernels.cross_entropy_loss import fast_cross_entropy_loss
 
 class LayerSpec(pipe_module.LayerSpec):
 
@@ -102,46 +102,40 @@ class LlamaRMSNormPipe(nn.Module):
 
 class LmHeadPipe(nn.Module):
 
-    def __init__(self, loader_util, lm_head, logit_scale=None, final_logit_softcapping=None, tie_weights=None):
+    def __init__(self, loader_util, lm_head, tie_weights=None):
         super().__init__()
         # Unlike the other wrapper classes, this is called lm_head and not orig. Because this is directly a
         # nn.Linear layer, it needs to keep the same attribute name so quantization knows not to quantize it.
         self.lm_head = lm_head
-        self.logit_scale = logit_scale
-        self.final_logit_softcapping = final_logit_softcapping
         if tie_weights:
             self.lm_head.weight.original_name = tie_weights
         loader_util.load_state_dict_into_module(self)
 
     def forward(self, inputs):
         hidden_states, labels = inputs
-        if self.logit_scale is not None:
-            hidden_states = hidden_states * self.logit_scale
         logits = self.lm_head(hidden_states)
-        if self.final_logit_softcapping is not None:
-            logits = logits / self.final_logit_softcapping
-            logits = torch.tanh(logits)
-            logits = logits * self.final_logit_softcapping
         return logits, labels
 
 class ComputeMetrics(nn.Module):
 
-    def __init__(self):
+    def __init__(self, logit_scaling=0, logit_softcapping=0):
         super().__init__()
+        self.logit_scaling = logit_scaling
+        self.logit_softcapping = logit_softcapping
 
     def forward(self, inputs):
         logits, labels = inputs
-        shift_logits = logits
-        extra_ignored_labels = torch.full((labels.shape[0], 1), -100, device=logits.device)
-        shift_labels = torch.hstack((labels[..., 1:], extra_ignored_labels))
-        # Flatten the tokens
-        vocab_size = shift_logits.size(-1)
-        shift_logits = shift_logits.view(-1, vocab_size)
-        shift_labels = shift_labels.view(-1)
-        # Enable model parallelism
-        shift_labels = shift_labels.to(shift_logits.device)
-        valid_loss = (shift_labels >= 0)
+        batch_size, seq_len, vocab_size = logits.shape
 
-        loss_unreduced = Fast_CrossEntropyLoss.apply(shift_logits, shift_labels)[valid_loss]
+        # Shift labels for causal LM: [labels[1:], -100_padding]
+        shift_labels = torch.cat([
+            labels[:, 1:],
+            torch.full((batch_size, 1), -100, device=labels.device, dtype=labels.dtype)
+        ], dim=1)
 
-        return loss_unreduced.mean()
+        return fast_cross_entropy_loss(
+            logits,  # (batch_size, seq_len, vocab_size)
+            shift_labels,  # (batch_size, seq_len)
+            logit_softcapping=self.logit_softcapping,
+            logit_scaling=self.logit_scaling
+        )
