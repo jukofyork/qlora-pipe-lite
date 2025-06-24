@@ -64,5 +64,5 @@ def prune_checkpoints(run_dir, max_checkpoints):
     # Remove oldest checkpoints
     while len(checkpoints) > max_checkpoints:
         step_num, path = checkpoints.pop(0)
-        log(f"- Deleting checkpoint: 'global_step{step_num}'")
+        log(f"Pruning oldest checkpoint: 'global_step{step_num}'")
         safe_rmtree(path)
