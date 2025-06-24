@@ -82,18 +82,25 @@ max_checkpoints = 3            # (default: 3)
 # DATASET CONFIGURATION
 # =====================
 
-# Text data stored in text files will just be read in, split up and used as "raw" training data:
 [[datasets]]
 dataset_path = 'test_data/*.txt'
-
-# Structured data stored in json, jsonl or parquet will use their "text" fields as training data:
-[[datasets]]
-dataset_path = 'json_data/*.json'
+# sample_weights = 1.0  # Default weight (can be omitted)
 
 [[datasets]]
-dataset_path = 'jsonl_data/*.jsonl'
+dataset_path = 'high_quality_data/*.json'
 
 [[datasets]]
-dataset_path = 'parquet_data/*.parquet'
+dataset_path = 'noisy_data/*.jsonl'
+sample_weights = 0.5  # Lower quality data - reduce its influence
 
-# NOTE: The HuggingFace dataset cache will be added below the dataset paths and is shared between nodes
+[[datasets]]
+dataset_path = 'harmful_content/*.parquet'
+sample_weights = -1.0  # Negative example data for unlearning/gradient ascent:
+
+# NOTE: 
+# - Text files are read as raw training data, structured formats (json/jsonl/parquet) use their "text" fields
+# - All datasets support optional sample_weights for controlling learning influence:
+# -- Positive weights increase learning from that dataset
+# -- Negative weights perform gradient ascent (unlearning/pushing away)
+# -- Default weight is 1.0 if sample_weights is not specified
+# - The HuggingFace dataset cache will be added below the dataset paths and is shared between nodes
