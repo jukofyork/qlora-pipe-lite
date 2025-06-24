@@ -17,7 +17,7 @@ from constants import (
 )
 from models import causal_lm_models
 from pipeline import engine
-from utils.unsloth_utils import unsloth_checkpoint
+from utils.unsloth_checkpoint import unsloth_checkpoint
 from utils.utils import log
 
 # Utility functions
