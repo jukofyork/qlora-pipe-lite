@@ -104,7 +104,7 @@ class CustomPipelineEngine(PipelineEngine):
 
                 log(f'step: {self.global_steps} / {self.total_steps}, '
                     f'loss: {self.agg_train_loss:0.4f}, '
-                    f'throughput: {iter_throughput:0.3f} samples/s, '
+                    f'throughput: {iter_throughput:0.3f} sequences/s, '
                     f'elapsed: {seconds_to_time_str(total_elapsed)}, '
                     f'eta: {seconds_to_time_str(eta)}')
             else:
