@@ -174,14 +174,24 @@ def create_pipeline_model(model, config):
 # Training configuration functions
 def create_lora_config(config, target_modules, layers_to_transform):
     """Create LoRA configuration."""
-    return LoraConfig(
+    # Handle empty list case for Control Adapters
+    use_dummy_target = target_modules == []
+    actual_target_modules = ['none'] if use_dummy_target else (target_modules if target_modules else 'all-linear')
+
+    lora_config = LoraConfig(
         r=config['lora_rank'],
         lora_alpha=config.get('lora_alpha', round(config['lora_rank'] ** 0.5)),  # rslora: s = 1/sqrt(rank)
         lora_dropout=config.get('lora_dropout', DEFAULT_LORA_DROPOUT),
-        target_modules=target_modules if target_modules else 'all-linear',
+        target_modules=actual_target_modules,
         layers_to_transform=layers_to_transform if layers_to_transform else None,
         task_type='CAUSAL_LM'
     )
+
+    # Reset target_modules to empty list if we used dummy value
+    if use_dummy_target:
+        lora_config.target_modules = []
+
+    return lora_config
 
 def apply_lora_adapters(model, config, lora_config):
     """Apply LoRA configuration to model."""
