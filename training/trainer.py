@@ -1,4 +1,3 @@
-from aiohttp._http_parser import name
 from torch.utils.tensorboard import SummaryWriter
 import gc
 import time
@@ -190,19 +189,6 @@ class Trainer:
     def _save_model(self, name):
         """Save the trained model (LoRA adapters, Control Adapters, or full model)."""
         if self.lora_config is None:
-            save_full_model(
-                self.model_engine,
-                self.pipeline_model,
-                self.model_dir,
-                self.run_dir,
-                name
-            )
+            save_full_model(self.model_engine, self.pipeline_model, self.model_dir, self.run_dir, name)
         else:
-            save_lora(
-                self.model_engine,
-                self.pipeline_model,
-                self.lora_config,
-                self.run_dir,
-                name,
-                expand_control_adapters=self.use_control_adapters
-            )
+            save_lora(self.model_engine, self.pipeline_model, self.lora_config, self.run_dir, name)
