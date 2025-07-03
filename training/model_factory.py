@@ -220,21 +220,23 @@ def apply_control_adapters(model, config, lora_config):
             should_transform = (layers_to_transform is None or layer_idx in layers_to_transform)
 
             if should_transform:
+                device = next(module.orig.parameters()).device
                 hidden_size = module.orig.hidden_size
 
                 # Add dropout
                 module.control_dropout = torch.nn.Dropout(p=adapter_dropout_p) if adapter_dropout_p > 0 else torch.nn.Identity()
+                module.control_dropout = module.control_dropout.to(device)
 
                 # Create Control Adapter layers (following PEFT pattern)
-                module.control_A = torch.nn.Linear(hidden_size, adapter_rank, bias=False)
-                module.control_B = torch.nn.Linear(adapter_rank, hidden_size, bias=False)
+                module.control_A = torch.nn.Linear(hidden_size, adapter_rank, bias=False).to(device)
+                module.control_B = torch.nn.Linear(adapter_rank, hidden_size, bias=False).to(device)
 
                 # Store scaling as attribute (needed in forward)
                 module.control_scaling = adapter_alpha / adapter_rank
 
                 # Add original_name for saving compatibility
-                module.control_A.weight.original_name = f"base_model.model.model.layers.{layer_idx}.control_adapter_A.weight"
-                module.control_B.weight.original_name = f"base_model.model.model.layers.{layer_idx}.control_adapter_B.weight"
+                module.control_A.weight.original_name = f"base_model.model.model.layers.{layer_idx}.control_A.weight"
+                module.control_B.weight.original_name = f"base_model.model.model.layers.{layer_idx}.control_B.weight"
 
                 # Initialize
                 torch.nn.init.kaiming_uniform_(module.control_A.weight, a=5 ** 0.5)
@@ -256,6 +258,13 @@ def apply_control_adapters(model, config, lora_config):
     for name, p in model.named_parameters():
         if not hasattr(p, 'original_name'):
             p.original_name = name
+
+    # Disable gradients for all base model parameters, enable only for Control Adapters
+    for name, p in model.named_parameters():
+        if 'control_A' in name or 'control_B' in name:
+            p.requires_grad = True
+        else:
+            p.requires_grad = False
 
     log(f"Applied Control Adapters to {applied_count} of {layer_idx} decoder layers")
 

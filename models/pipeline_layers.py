@@ -89,6 +89,8 @@ class EmbeddingPipe(nn.Module):
             cos.requires_grad_(True)
         if torch.is_floating_point(sin):
             sin.requires_grad_(True)
+        if torch.is_floating_point(sample_weights):
+            sample_weights.requires_grad_(True)
         return hidden_states, attention_mask, cos, sin, labels, sample_weights
 
 class LlamaDecoderLayerPipe(nn.Module):
