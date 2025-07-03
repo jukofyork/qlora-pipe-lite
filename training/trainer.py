@@ -68,6 +68,7 @@ class Trainer:
             self._print_eval_progress(step - 1, last_eval_loss)
 
         # Main training loop
+        current_epoch = self.train_dataloader.epoch
         while self.train_dataloader.epoch <= self.epochs:
             self._cleanup_memory()
 
@@ -88,10 +89,13 @@ class Trainer:
 
             # Time-based checkpointing
             self._save_checkpoint(step)
-            step += 1
 
-        # Save final model
-        self._save_model('final')
+            # Check for epoch change and save model
+            if self.train_dataloader.epoch > current_epoch:
+                self._save_model(f'epoch{current_epoch}')
+                current_epoch = self.train_dataloader.epoch
+
+            step += 1
 
         log('TRAINING COMPLETE!')
 
