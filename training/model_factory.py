@@ -58,9 +58,8 @@ def patch_decoder_layer_control_adapter(module):
         adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
 
         # Use sample_weights sign for negate
-        negate_mask = (sample_weights < 0).any(dim=-1, keepdim=True)
-        while negate_mask.dim() < adapter_output.dim():
-            negate_mask = negate_mask.unsqueeze(-1)
+        # NOTE: This allows both positive and negative samples to be in the same sequence!
+        negate_mask = (sample_weights < 0)[..., None]  # (batch, seq_len, 1)
 
         # Apply negate logic
         adapter_contribution = torch.where(negate_mask, -adapter_output, adapter_output)
