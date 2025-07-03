@@ -6,7 +6,7 @@ import os
 import os.path
 import torch
 
-from constants import DATASET_TOKENIZE_BATCH_SIZE, DEFAULT_EVAL_FRACTION
+from constants import DATASET_MAP_BATCH_SIZE, DEFAULT_EVAL_FRACTION
 from utils.utils import is_main_process, zero_first, log
 
 def tokenize_and_add_eos(batch, tokenizer):
@@ -128,15 +128,13 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weight=1.0
     else:
         raise NotImplementedError()
 
-    num_proc = min(os.cpu_count(), len(dataset))
-
     dataset = dataset.map(
         lambda x: tokenize_and_add_eos(x, tokenizer),
         batched=True,
-        batch_size=DATASET_TOKENIZE_BATCH_SIZE,
+        batch_size=DATASET_MAP_BATCH_SIZE,
         remove_columns=dataset.column_names,
         desc='tokenizing',
-        num_proc=num_proc,
+        num_proc=min(os.cpu_count(), len(dataset)),
     )
 
     dataset = dataset.shuffle(seed=42)
@@ -145,6 +143,28 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weight=1.0
     dataset.set_format(type='torch')
 
     return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weight)
+
+def normalize_sample_weights(dataset):
+    """
+    Normalize sample weights so their mean absolute value is 1.0.
+    Using abs() ensures this works for mixed positive/negative weights while
+    preserving relative ratios and signs.
+    """
+    # Using abs() ensures we always divide by a positive value, preserving signs
+    abs_mean_sample_weight = torch.cat(dataset['sample_weights']).abs().mean().item()
+
+    # This preserves relative ratios while making mean absolute weight = 1.0
+    normalized_dataset = dataset.map(
+        lambda batch: {
+            'sample_weights': [sw / abs_mean_sample_weight for sw in batch['sample_weights']]
+        },
+        batched=True,
+        batch_size=DATASET_MAP_BATCH_SIZE,
+        desc='normalizing sample weights',
+        num_proc=min(os.cpu_count(), len(dataset)),
+    )
+
+    return normalized_dataset
 
 def load_datasets(config, tokenizer):
     if 'sequence_len' not in config:
@@ -164,6 +184,7 @@ def load_datasets(config, tokenizer):
         datasets_list = []
         for dataset_config in config['datasets']:
             sample_weight = dataset_config.get('sample_weight', 1.0)
+            assert sample_weight != 0, "sample_weight cannot be zero"
             dataset = load_single_dataset(
                 dataset_config['dataset_path'],
                 tokenizer,
@@ -172,6 +193,7 @@ def load_datasets(config, tokenizer):
             )
             datasets_list.append(dataset)
         combined_dataset = datasets.concatenate_datasets(datasets_list)
+        combined_dataset = normalize_sample_weights(combined_dataset)  # Convert to absolute relative sample weights
         split_datasets = combined_dataset.train_test_split(test_size=eval_fraction, shuffle=True, seed=42)
         train_dataset = split_datasets['train']
         eval_dataset = split_datasets['test']
