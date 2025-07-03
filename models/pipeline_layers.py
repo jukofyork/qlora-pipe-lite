@@ -156,8 +156,11 @@ class ComputeMetrics(nn.Module):
             torch.full((batch_size, 1), -100, device=labels.device, dtype=labels.dtype)
         ], dim=1)
 
+        # Use absolute values for loss (sign was used for Control Adapter negate)
+        abs_sample_weights = torch.abs(sample_weights)
+
         return fast_cross_entropy_loss(
             logits,  # (batch_size, seq_len, vocab_size)
             shift_labels,  # (batch_size, seq_len)
-            sample_weights,  # (batch_size, seq_len)
+            abs_sample_weights,  # (batch_size, seq_len)
         )

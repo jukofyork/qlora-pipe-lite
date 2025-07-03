@@ -35,6 +35,44 @@ def patch_bitsandbytes_cuda():
 
     bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
 
+def patch_decoder_layer_control_adapter(module):
+    """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
+
+    def control_adapter_forward(inputs):
+        hidden_states, attention_mask, cos, sin, labels, sample_weights = inputs
+
+        # Save input for residual computation
+        input_hidden_states = hidden_states
+
+        # Original layer computation (equivalent to base_layer)
+        layer_output = module.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0]
+        torch_result_dtype = layer_output.dtype
+
+        # Control Adapter computation (following PEFT pattern)
+        layer_delta = layer_output - input_hidden_states
+
+        # Cast input to match adapter dtype (following PEFT pattern)
+        layer_delta = layer_delta.to(module.control_A.weight.dtype)
+
+        # Apply Control Adapter: dropout -> A -> B -> scaling (following PEFT function call pattern)
+        adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
+
+        # Use sample_weights sign for negate
+        negate_mask = (sample_weights < 0).any(dim=-1, keepdim=True)
+        while negate_mask.dim() < adapter_output.dim():
+            negate_mask = negate_mask.unsqueeze(-1)
+
+        # Apply negate logic
+        adapter_contribution = torch.where(negate_mask, -adapter_output, adapter_output)
+        result = layer_output + adapter_contribution
+
+        # Cast back to original dtype (following PEFT pattern)
+        result = result.to(torch_result_dtype)
+
+        return (result, attention_mask, cos, sin, labels, sample_weights)
+
+    return control_adapter_forward
+
 def get_model_type(config):
     """Extract model type from model config."""
     with open(os.path.join(config['model_dir'], 'config.json')) as f:
@@ -157,6 +195,60 @@ def apply_lora_adapters(model, config, lora_config):
     for name, p in lora_model.named_parameters():
         p.original_name = name
 
+def apply_control_adapters(model, config, lora_config):
+    """Apply Control Adapters using the LoraConfig object."""
+    layers_to_transform = lora_config.layers_to_transform
+    adapter_rank = lora_config.r
+    adapter_alpha = lora_config.lora_alpha
+    adapter_dropout_p = lora_config.lora_dropout
+
+    layer_idx = 0
+    applied_count = 0
+
+    for name, module in model.named_modules():
+        if 'decoderlayerpipe' in module.__class__.__name__.lower():
+            should_transform = (layers_to_transform is None or layer_idx in layers_to_transform)
+
+            if should_transform:
+                hidden_size = module.orig.hidden_size
+
+                # Add dropout
+                module.control_dropout = torch.nn.Dropout(p=adapter_dropout_p) if adapter_dropout_p > 0 else torch.nn.Identity()
+
+                # Create Control Adapter layers (following PEFT pattern)
+                module.control_A = torch.nn.Linear(hidden_size, adapter_rank, bias=False)
+                module.control_B = torch.nn.Linear(adapter_rank, hidden_size, bias=False)
+
+                # Store scaling as attribute (needed in forward)
+                module.control_scaling = adapter_alpha / adapter_rank
+
+                # Add original_name for saving compatibility
+                module.control_A.weight.original_name = f"base_model.model.model.layers.{layer_idx}.control_adapter_A.weight"
+                module.control_B.weight.original_name = f"base_model.model.model.layers.{layer_idx}.control_adapter_B.weight"
+
+                # Initialize
+                torch.nn.init.kaiming_uniform_(module.control_A.weight, a=5 ** 0.5)
+                torch.nn.init.zeros_(module.control_B.weight)
+
+                # Cast to bfloat16 like the original apply_lora_adapters
+                module.control_A.weight.data = module.control_A.weight.data.to(torch.bfloat16)
+                module.control_B.weight.data = module.control_B.weight.data.to(torch.bfloat16)
+
+                # Store original forward method and replace with Control Adapter version
+                module._original_forward = module.forward
+                module.forward = patch_decoder_layer_control_adapter(module)
+
+                applied_count += 1
+
+            layer_idx += 1
+
+    # Set original_name for all parameters (for saving compatibility)
+    for name, p in model.named_parameters():
+        if not hasattr(p, 'original_name'):
+            p.original_name = name
+
+    log(f"Applied Control Adapters to {applied_count} of {layer_idx} decoder layers")
+
 def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
     """Setup full fine-tuning by setting requires_grad on parameters."""
     for name, p in model.named_parameters():
@@ -175,13 +267,20 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
         p.requires_grad = should_train
 
 def setup_training_adapters(model, config):
-    """Setup LoRA or full fine-tuning adapters."""
+    """Setup LoRA, Control Adapters, or full fine-tuning adapters."""
     target_modules = config.get('target_modules', [])
     layers_to_transform = parse_layers_to_transform(config)
 
     if config.get('full_fine_tune', False):
         lora_config = None
         configure_full_fine_tuning(model, config, target_modules, layers_to_transform)
+    elif config.get('use_control_adapters', False):
+        # Assert that target_modules is empty for Control Adapters
+        assert not target_modules or target_modules == [], \
+            "Control Adapters don't use target_modules - they apply to entire decoder layers"
+
+        lora_config = create_lora_config(config, [], layers_to_transform)  # Empty target_modules
+        apply_control_adapters(model, config, lora_config)
     else:
         lora_config = create_lora_config(config, target_modules, layers_to_transform)
         apply_lora_adapters(model, config, lora_config)

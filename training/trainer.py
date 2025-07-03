@@ -1,3 +1,4 @@
+from aiohttp._http_parser import name
 from torch.utils.tensorboard import SummaryWriter
 import gc
 import time
@@ -39,6 +40,7 @@ class Trainer:
         self.eval_gradient_accumulation_steps = config.get('eval_gradient_accumulation_steps', 1)
         self.checkpoint_interval_hours = config.get('checkpoint_interval_hours', DEFAULT_CHECKPOINT_INTERVAL_HOURS)
         self.max_checkpoints = config.get('max_checkpoints', DEFAULT_MAX_CHECKPOINTS)
+        self.use_control_adapters = config.get('use_control_adapters', False)
 
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
@@ -186,8 +188,21 @@ class Trainer:
                 prune_checkpoints(self.run_dir, self.max_checkpoints)
 
     def _save_model(self, name):
-        """Save the trained model (LoRA adapters or full model)."""
+        """Save the trained model (LoRA adapters, Control Adapters, or full model)."""
         if self.lora_config is None:
-            save_full_model(self.model_engine, self.pipeline_model, self.model_dir, self.run_dir, name)
+            save_full_model(
+                self.model_engine,
+                self.pipeline_model,
+                self.model_dir,
+                self.run_dir,
+                name
+            )
         else:
-            save_lora(self.model_engine, self.pipeline_model, self.lora_config, self.run_dir, name)
+            save_lora(
+                self.model_engine,
+                self.pipeline_model,
+                self.lora_config,
+                self.run_dir,
+                name,
+                expand_control_adapters=self.use_control_adapters
+            )

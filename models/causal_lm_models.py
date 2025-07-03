@@ -89,6 +89,10 @@ class BaseCausalLMPipe(PipelineModel):
         """Override to add model-specific LmHead parameters."""
         return {}
 
+    def _get_control_adapter_target_modules(self):
+        """Override to specify which modules need Control Adapter merging."""
+        return ['mlp.down_proj']
+
 class LlamaForCausalLMPipe(BaseCausalLMPipe, transformers.LlamaForCausalLM):
     CONFIG_CLASS = transformers.LlamaConfig
     TRANSFORMERS_CLASS = transformers.LlamaForCausalLM
@@ -100,6 +104,13 @@ class MistralForCausalLMPipe(BaseCausalLMPipe, transformers.MistralForCausalLM):
 class MixtralForCausalLMPipe(BaseCausalLMPipe, transformers.MixtralForCausalLM):
     CONFIG_CLASS = transformers.MixtralConfig
     TRANSFORMERS_CLASS = transformers.MixtralForCausalLM
+
+    def _get_control_adapter_target_modules(self):
+        num_experts = getattr(self.config, 'num_local_experts', 8)
+        target_modules = []
+        for expert_idx in range(num_experts):
+            target_modules.append(f'block_sparse_moe.experts.{expert_idx}.w2')
+        return target_modules
 
 class Qwen2ForCausalLMPipe(BaseCausalLMPipe, transformers.Qwen2ForCausalLM):
     CONFIG_CLASS = transformers.Qwen2Config
@@ -122,6 +133,9 @@ class CohereForCausalLMPipe(BaseCausalLMPipe, transformers.CohereForCausalLM):
     def _get_lm_head_kwargs(self):
         return {'logit_scale': getattr(self.config, 'logit_scale', None)}
 
+    def _get_control_adapter_target_modules(self):
+        return ['self_attn.o_proj', 'mlp.down_proj']
+
 class Cohere2ForCausalLMPipe(BaseCausalLMPipe, transformers.Cohere2ForCausalLM):
     CONFIG_CLASS = transformers.Cohere2Config
     TRANSFORMERS_CLASS = transformers.Cohere2ForCausalLM
@@ -134,6 +148,9 @@ class Cohere2ForCausalLMPipe(BaseCausalLMPipe, transformers.Cohere2ForCausalLM):
 
     def _get_lm_head_kwargs(self):
         return {'logit_scale': getattr(self.config, 'logit_scale', None)}
+
+    def _get_control_adapter_target_modules(self):
+        return ['self_attn.o_proj', 'mlp.down_proj']
 
 class Gemma2ForCausalLMPipe(BaseCausalLMPipe, transformers.Gemma2ForCausalLM):
     CONFIG_CLASS = transformers.Gemma2Config
