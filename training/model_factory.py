@@ -276,27 +276,6 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
                 log(f'not training {name} because layer {layer_num} is not in layers_to_transform')
         p.requires_grad = should_train
 
-def setup_training_adapters(model, config):
-    """Setup LoRA, Control Adapters, or full fine-tuning adapters."""
-    target_modules = config.get('target_modules', [])
-    layers_to_transform = parse_layers_to_transform(config)
-
-    if config.get('full_fine_tune', False):
-        lora_config = None
-        configure_full_fine_tuning(model, config, target_modules, layers_to_transform)
-    elif config.get('use_control_adapters', False):
-        # Assert that target_modules is empty for Control Adapters
-        assert not target_modules or target_modules == [], \
-            "Control Adapters don't use target_modules - they apply to entire decoder layers"
-
-        lora_config = create_lora_config(config, [], layers_to_transform)  # Empty target_modules
-        apply_control_adapters(model, config, lora_config)
-    else:
-        lora_config = create_lora_config(config, target_modules, layers_to_transform)
-        apply_lora_adapters(model, config, lora_config)
-
-    return lora_config
-
 # Main setup function
 def setup_model_and_engine(config, args):
     """Complete model setup including LoRA/full fine-tuning and engine initialization."""
@@ -307,8 +286,20 @@ def setup_model_and_engine(config, args):
     model = create_model(config, model_type)
     pipeline_model = create_pipeline_model(model, config)
 
-    # Setup training adapters (LoRA or full fine-tuning)
-    lora_config = setup_training_adapters(model, config)
+    # Setup training adapters
+    target_modules = config.get('target_modules', None)
+    layers_to_transform = parse_layers_to_transform(config)
+
+    if config.get('full_fine_tune', False):
+        lora_config = None
+        configure_full_fine_tuning(model, config, target_modules, layers_to_transform)
+    elif config.get('use_control_adapters', False):
+        assert not target_modules, "Control Adapters don't use target_modules - they apply to entire decoder layers"
+        lora_config = create_lora_config(config, [], layers_to_transform)
+        apply_control_adapters(pipeline_model, config, lora_config)  # Apply to pipeline_model
+    else:
+        lora_config = create_lora_config(config, target_modules, layers_to_transform)
+        apply_lora_adapters(model, config, lora_config)  # Apply to base model
 
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
