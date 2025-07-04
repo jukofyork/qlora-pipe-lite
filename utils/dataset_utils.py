@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import os.path
+import sys
 import torch
 
 from constants import DATASET_MAP_BATCH_SIZE, DEFAULT_EVAL_FRACTION
@@ -17,12 +18,12 @@ def tokenize_and_add_eos(batch, tokenizer):
             result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
     return result
 
-def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weight=1.0):
+def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weight=1.0, max_sequences=sys.maxsize):
     # Use the dataset's built-in fingerprint - it's already computed and deterministic
     cache_key = (
         f"{dataset._fingerprint}_{sequence_len}_"
         f"{tokenizer.bos_token_id}_{tokenizer.eos_token_id}_{tokenizer.pad_token_id}_"
-        f"{sample_weight}"
+        f"{sample_weight}_{max_sequences}"
     )
     cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
 
@@ -34,11 +35,16 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_wei
         return cached_dataset
 
     all_sequences = []
+    sequence_count = 0
+
     # Initialize sequence_tokens with BOS token if it exists
     sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
 
     # Process dataset item by item (streaming)
     for item in tqdm(dataset, desc="Creating sequences"):
+        if sequence_count >= max_sequences:
+            break
+
         tokens = item['input_ids'].tolist()
         assert len(tokens) > 0, 'Empty tokens list'
         idx = 0
@@ -46,6 +52,9 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_wei
         if tokenizer.bos_token_id is not None and tokens[0] == tokenizer.bos_token_id:
             idx += 1
         while idx < len(tokens):
+            if sequence_count >= max_sequences:
+                break
+
             # Calculate how many tokens are needed to fill the sequence
             need = sequence_len - len(sequence_tokens)
             taken = tokens[idx: idx + need]
@@ -81,6 +90,8 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_wei
                     'sample_weights': sample_weights
                 })
 
+                sequence_count += 1  # Increment counter
+
                 # Reset sequence_tokens with BOS token if it exists
                 sequence_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
 
@@ -99,7 +110,7 @@ def slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_wei
 
     return result_dataset
 
-def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weight=1.0):
+def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weight=1.0, max_sequences=sys.maxsize):
     base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
     cache_dir = os.path.join(base_dir, "hf_cache")
 
@@ -142,7 +153,7 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weight=1.0
     # Set torch format after tokenization when only token data remains
     dataset.set_format(type='torch')
 
-    return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weight)
+    return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weight, max_sequences)
 
 def normalize_sample_weights(dataset):
     """
@@ -183,13 +194,16 @@ def load_datasets(config, tokenizer):
     with zero_first(is_main_process()):
         datasets_list = []
         for dataset_config in config['datasets']:
+            max_sequences = dataset_config.get('max_sequences', sys.maxsize)
+            assert max_sequences > 0, "max_sequences must be positive"
             sample_weight = dataset_config.get('sample_weight', 1.0)
             assert sample_weight != 0, "sample_weight cannot be zero"
             dataset = load_single_dataset(
                 dataset_config['dataset_path'],
                 tokenizer,
                 sequence_len,
-                sample_weight
+                sample_weight,
+                max_sequences
             )
             datasets_list.append(dataset)
         combined_dataset = datasets.concatenate_datasets(datasets_list)
