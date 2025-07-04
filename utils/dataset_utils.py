@@ -155,28 +155,6 @@ def load_single_dataset(dataset_path, tokenizer, sequence_len, sample_weight=1.0
 
     return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, sample_weight, max_sequences)
 
-def normalize_sample_weights(dataset):
-    """
-    Normalize sample weights so their mean absolute value is 1.0.
-    Using abs() ensures this works for mixed positive/negative weights while
-    preserving relative ratios and signs.
-    """
-    # Using abs() ensures we always divide by a positive value, preserving signs
-    abs_mean_sample_weight = dataset['sample_weights'].abs().mean().item()
-
-    # This preserves relative ratios while making mean absolute weight = 1.0
-    normalized_dataset = dataset.map(
-        lambda batch: {
-            'sample_weights': [sw / abs_mean_sample_weight for sw in batch['sample_weights']]
-        },
-        batched=True,
-        batch_size=DATASET_MAP_BATCH_SIZE,
-        desc='normalizing sample weights',
-        num_proc=min(os.cpu_count(), len(dataset)),
-    )
-
-    return normalized_dataset
-
 def load_datasets(config, tokenizer):
     if 'sequence_len' not in config:
         raise ValueError('Need to specify a sequence_len')
@@ -207,7 +185,6 @@ def load_datasets(config, tokenizer):
             )
             datasets_list.append(dataset)
         combined_dataset = datasets.concatenate_datasets(datasets_list)
-        combined_dataset = normalize_sample_weights(combined_dataset)  # Convert to absolute relative sample weights
         split_datasets = combined_dataset.train_test_split(test_size=eval_fraction, shuffle=True, seed=42)
         train_dataset = split_datasets['train']
         eval_dataset = split_datasets['test']
