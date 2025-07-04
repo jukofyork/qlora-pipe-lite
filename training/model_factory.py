@@ -38,35 +38,76 @@ def patch_bitsandbytes_cuda():
 def patch_decoder_layer_control_adapter(module):
     """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
 
+    # When ‖A‖₂ ≲ 0.2–0.3 (see monitoring ‖W‖_F below), the 1-st order truncation error O(‖A‖₂²) ≤ 1–2%.
+    # Going to order 2 halves the error (O(‖A‖₂³)) but doubles the extra matmul cost.
+    # Order 3+ are looking at less than 0.1% gains in the intended ‖A‖₂ norm range.
+    NEUMANN_SERIES_ORDER = 1
+
+    # The Neumann series approximation for matrix inverse: (I + A)^(-1) = I - A + A^2 - A^3 + ...
+    # converges when ρ(A) < 1, where ρ(A) is the spectral radius (max |eigenvalue|).
+    # NOTE: Requiring the spectral norm ‖A‖₂ < 1 is a sufficient condition because ρ(A) ≤ ‖A‖₂.
+    #
+    # Scalar intuition: For 1/(1 + δ) where |δ| < 1:
+    #   True value: 1/(1 + δ)
+    #   1st order:  1 - δ                    (error ≈ δ^2)
+    #   2nd order:  1 - δ + δ^2              (error ≈ δ^3)
+    #
+    # Example with δ = 0.1:
+    #   True:     1/1.1 ≈ 0.9091
+    #   1st:      1 - 0.1 = 0.9000          (error ≈ 1.0%)
+    #   2nd:      1 - 0.1 + 0.01 = 0.9100   (error ≈ 0.1%)
+    #
+    # - For our Control Adapters, the composite matrix (scale * B @ A) should have a spectral
+    #   norm << 1 for convergence. Computing ‖W‖₂ every step is expensive, so we monitor the
+    #   cheaper Frobenius norm ‖W‖_F. For rank-r matrices: ‖W‖₂ ≤ ‖W‖_F ≤ √r · ‖W‖₂
+    #   so keeping ‖W‖_F ≪ √r guarantees ‖W‖₂ < 1 ⇒ ρ(W) < 1 ⇒ the series converges.
+    # - Keeping ‖W‖_F ≲ 0.25 √r (≈ 0.2-0.3 times √r) which guarantees ‖A‖₂ ≲ 0.2–0.3, and in
+    #   turn this will mean the default `NEUMANN_SERIES_ORDER = 1` should be good enough...
+    # - Using `trainer::_apply_lora_weight_decay()` helps maintain this by properly scaling
+    #   all singular values of the BA composite, unlike naive weight decay on A and B separately.
+
     def control_adapter_forward(inputs):
         hidden_states, attention_mask, cos, sin, labels, sample_weights = inputs
 
         # Save input for residual computation
         input_hidden_states = hidden_states
 
-        # Original layer computation (equivalent to base_layer)
         layer_output = module.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0]
         torch_result_dtype = layer_output.dtype
 
-        # Control Adapter computation (following PEFT pattern)
         layer_delta = layer_output - input_hidden_states
-
-        # Cast input to match adapter dtype (following PEFT pattern)
         layer_delta = layer_delta.to(module.control_A.weight.dtype)
 
-        # Apply Control Adapter: dropout -> A -> B -> scaling (following PEFT function call pattern)
+        # Apply Control Adapter: dropout -> A -> B -> scaling
         adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
 
-        # Use sample_weights sign for negate
-        # NOTE: This allows both positive and negative samples to be in the same sequence!
+        # Use sample_weights sign to determine positive vs negative samples
         negate_mask = (sample_weights < 0)[..., None]  # (batch, seq_len, 1)
 
-        # Apply negate logic
-        adapter_contribution = torch.where(negate_mask, -adapter_output, adapter_output)
-        result = layer_output + adapter_contribution
+        # For positive samples: just add adapter_output
+        # For negative samples: apply Neumann series approximation of (I + A)^-1
+        # (I + A)^-1 ≈ I - A + A^2 - A^3 + ... ≈ sum_{k=0}^{n} (-1)^k * A^k
 
-        # Cast back to original dtype (following PEFT pattern)
-        result = result.to(torch_result_dtype)
+        if NEUMANN_SERIES_ORDER == 1:
+            # Simple case: (I + A)^-1 ≈ I - A, so negate samples get -adapter_output
+            adapter_contribution = torch.where(negate_mask, -adapter_output, adapter_output)
+        else:
+            # Higher order: compute Neumann series for negative samples
+            neumann_sum = adapter_output  # Start with A^1 term
+            current_power = adapter_output
+
+            for k in range(1, NEUMANN_SERIES_ORDER):
+                # Compute next power: A^(k+1) (no dropout on higher order terms)
+                current_power = module.control_B(module.control_A(current_power)) * module.control_scaling
+
+                # Add (-1)^k * A^(k+1) to the series
+                neumann_sum = neumann_sum + ((-1.0) ** k) * current_power
+
+            adapter_contribution = torch.where(negate_mask, -neumann_sum, adapter_output)
+
+        # Cast adapter contribution back to original dtype before residual add
+        adapter_contribution = adapter_contribution.to(torch_result_dtype)
+        result = layer_output + adapter_contribution
 
         return (result, attention_mask, cos, sin, labels, sample_weights)
 
