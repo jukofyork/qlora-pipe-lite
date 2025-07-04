@@ -162,7 +162,7 @@ def normalize_sample_weights(dataset):
     preserving relative ratios and signs.
     """
     # Using abs() ensures we always divide by a positive value, preserving signs
-    abs_mean_sample_weight = torch.cat(dataset['sample_weights']).abs().mean().item()
+    abs_mean_sample_weight = dataset['sample_weights'].abs().mean().item()
 
     # This preserves relative ratios while making mean absolute weight = 1.0
     normalized_dataset = dataset.map(
