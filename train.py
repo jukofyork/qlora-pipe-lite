@@ -103,6 +103,7 @@ if __name__ == '__main__':
         pipeline_model=pipeline_model,
         args=args,
         lora_config=lora_config,
+        optimizer=optimizer,
         resume_from_checkpoint=args.resume_from_checkpoint
     )
 

@@ -1,3 +1,4 @@
+from deepspeed import comm as dist
 from torch.utils.tensorboard import SummaryWriter
 import gc
 import time
@@ -21,6 +22,7 @@ class Trainer:
         pipeline_model,
         args,
         lora_config,
+        optimizer,
         resume_from_checkpoint=False
     ):
         self.config = config
@@ -31,6 +33,7 @@ class Trainer:
         self.pipeline_model = pipeline_model
         self.args = args
         self.lora_config = lora_config
+        self.optimizer = optimizer
         self.resume_from_checkpoint = resume_from_checkpoint
 
         # Extract config values with defaults
@@ -77,9 +80,21 @@ class Trainer:
             metrics = self.model_engine.train_batch()
             self.train_dataloader.sync_epoch()
 
+            # Apply LoRA-specific decoupled weight decay and get the norm stats
+            if self.lora_config is not None:
+                avg_norm, max_norm = self._apply_lora_weight_decay(
+                    self.pipeline_model,
+                    self.config,
+                    self.optimizer.param_groups[0]['lr']
+                )
+
             # Log training metrics
             if is_main_process():
                 self._write_metrics('train', metrics, step)
+                self.tb_writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], step)
+                if self.lora_config is not None:
+                    self.tb_writer.add_scalar('train/norm_avg', avg_norm, step)
+                    self.tb_writer.add_scalar('train/norm_max', max_norm, step)
 
             # Periodic evaluation
             if step in self.eval_step_indices:
@@ -146,6 +161,66 @@ class Trainer:
     def _extract_loss(self, metrics):
         """Extract loss (first metric) as a scalar value."""
         return metrics[0].mean().item()
+
+    def _apply_lora_weight_decay(self, model, config, lr):
+        """Apply decoupled weight decay (indirectly) to the composite matrix BA if specified"""
+        local_norms = []
+
+        lora_scale = config['lora_alpha'] / config['lora_rank']
+        weight_decay = config.get('lora_weight_decay', 0.0)
+
+        for name, param in model.named_parameters():
+            if any(adapter_type in name for adapter_type in ['lora_A', 'control_A']):
+                A = param
+                B_name = name.replace('lora_A', 'lora_B').replace('control_A', 'control_B')
+
+                try:
+                    B = next(p for n, p in model.named_parameters() if n == B_name)
+                except StopIteration:
+                    raise RuntimeError(f"Could not find corresponding B parameter '{B_name}' for A parameter '{name}'")
+
+                with torch.no_grad():
+                    W = lora_scale * (B @ A)
+
+                    # Using L = λ⋅½||W||_F²:
+                    #    ∂L/∂W = λ⋅W, as ∂(½||W||_F²)/∂W = W
+                    #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = λ⋅s⋅BᵗW
+                    #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = λ⋅s⋅WAᵗ
+                    if weight_decay > 0:
+                        grad_A = weight_decay * lora_scale * (B.t() @ W)
+                        grad_B = weight_decay * lora_scale * (W @ A.t())
+                        A.sub_(lr * grad_A)
+                        B.sub_(lr * grad_B)
+                        W = lora_scale * (B @ A)
+
+                    local_norms.append(W.norm().item())
+
+        # Aggregate across pipeline stages
+        if len(local_norms) > 0:
+            local_norms_tensor = torch.tensor(local_norms, dtype=torch.float32, device=self.model_engine.device)
+            local_count = torch.tensor(len(local_norms), dtype=torch.float32, device=self.model_engine.device)
+            local_sum = torch.sum(local_norms_tensor)
+            local_max = torch.max(local_norms_tensor)
+        else:
+            local_count = torch.tensor(0.0, device=self.model_engine.device)
+            local_sum = torch.tensor(0.0, device=self.model_engine.device)
+            local_max = torch.tensor(0.0, device=self.model_engine.device)
+
+        # Aggregate across pipeline stages if using pipeline parallelism
+        if self.model_engine.is_pipe_parallel:
+            pp_group = self.model_engine.grid.get_pipe_parallel_group()
+            dist.all_reduce(local_count, op=dist.ReduceOp.SUM, group=pp_group)
+            dist.all_reduce(local_sum, op=dist.ReduceOp.SUM, group=pp_group)
+            dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=pp_group)
+
+        if local_count.item() > 0:
+            global_avg = (local_sum / local_count).item()
+            global_max = local_max.item()
+        else:
+            global_avg = 0
+            global_max = 0
+
+        return global_avg, global_max
 
     def _write_metrics(self, prefix, metrics, step):
         """Write all metrics to tensorboard."""
