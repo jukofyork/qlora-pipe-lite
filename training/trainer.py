@@ -166,7 +166,7 @@ class Trainer:
         """Apply decoupled weight decay (indirectly) to the composite matrix BA if specified"""
         local_norms = []
 
-        lora_alpha = config.get('lora_alpha', round(config['lora_rank'] ** 0.5)),  # rslora: s = 1/sqrt(rank)
+        lora_alpha = config.get('lora_alpha', round(config['lora_rank'] ** 0.5))  # rslora: s = 1/sqrt(rank)
         lora_scale = lora_alpha / config['lora_rank']
         weight_decay = config.get('lora_weight_decay', 0.0)
 
