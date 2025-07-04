@@ -39,9 +39,9 @@ def patch_decoder_layer_control_adapter(module):
     """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
 
     # When ‖A‖₂ ≲ 0.2–0.3 (see monitoring ‖W‖_F below), the 1-st order truncation error O(‖A‖₂²) ≤ 1–2%.
-    # Going to order 2 halves the error (O(‖A‖₂³)) but doubles the extra matmul cost.
-    # Order 3+ are looking at less than 0.1% gains in the intended ‖A‖₂ norm range.
-    NEUMANN_SERIES_ORDER = 1
+    # - Going to order 2 halves the error (O(‖A‖₂³)) but doubles the extra matmul cost.
+    # - Order 3+ are looking at less than 0.1% gains in the intended ‖A‖₂ norm range.
+    NEUMANN_SERIES_ORDER = 2
 
     # The Neumann series approximation for matrix inverse: (I + A)^(-1) = I - A + A^2 - A^3 + ...
     # converges when ρ(A) < 1, where ρ(A) is the spectral radius (max |eigenvalue|).
