@@ -163,8 +163,8 @@ class Trainer:
 
     def _apply_lora_weight_decay_local(self, model, config, lr):
         """Apply decoupled weight decay to LoRA parameters and collect local norms."""
-        norms_before = []
-        norms_after = []
+        norms = []
+        decays = []
 
         lora_alpha = config.get('lora_alpha', round(config['lora_rank'] ** 0.5))  # rslora: s = 1/sqrt(rank)
         lora_scale = lora_alpha / config['lora_rank']
@@ -180,40 +180,57 @@ class Trainer:
                 except StopIteration:
                     raise RuntimeError(f"Could not find corresponding B parameter '{B_name}' for A parameter '{name}'")
 
-                with torch.no_grad():
-                    W = lora_scale * (B @ A)
+                # operate in fp32 to avoid bf16 rounding loss
+                A_fp32 = A.float()
+                B_fp32 = B.float()
+                W = lora_scale * (B_fp32 @ A_fp32)
+
+                if weight_decay > 0:
+                    norm_before = W.norm().item()
 
                     # Using L = λ⋅½||W||_F²:
                     #    ∂L/∂W = λ⋅W, as ∂(½||W||_F²)/∂W = W
                     #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = λ⋅s⋅BᵗW
                     #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = λ⋅s⋅WAᵗ
-                    if weight_decay > 0:
-                        norms_before.append(W.norm().item())
-                        grad_A = weight_decay * lora_scale * (B.t() @ W)
-                        grad_B = weight_decay * lora_scale * (W @ A.t())
-                        A.sub_(lr * grad_A)
-                        B.sub_(lr * grad_B)
-                        W = lora_scale * (B @ A)
+                    grad_A = weight_decay * lora_scale * (B_fp32.t() @ W)
+                    grad_B = weight_decay * lora_scale * (W @ A_fp32.t())
 
-                    norms_after.append(W.norm().item())
+                    # apply update in fp32 then copy back to original dtype
+                    A_fp32 = A_fp32 - lr * grad_A
+                    B_fp32 = B_fp32 - lr * grad_B
 
-        return norms_before, norms_after
+                    with torch.no_grad():
+                        A.copy_(A_fp32.to(A.dtype))
+                        B.copy_(B_fp32.to(B.dtype))
 
-    def _aggregate_lora_norms(self, local_norms_before, local_norms_after):
+                    # recompute after update using the UPDATED fp32 values
+                    W = lora_scale * (B_fp32 @ A_fp32)
+                    norm_after = W.norm().item()
+
+                    norms.append(norm_after)
+                    decays.append(norm_before - norm_after)
+                else:
+                    norms.append(W.norm().item())
+                    decays.append(0.0)
+
+        # Convert to tensors, handling empty case
+        if len(norms) > 0:
+            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.model_engine.device)
+            decays_tensor = torch.tensor(decays, dtype=torch.float32, device=self.model_engine.device)
+        else:
+            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+            decays_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+
+        return norms_tensor, decays_tensor
+
+    def _aggregate_lora_norms(self, local_norms, local_decays):
         """Aggregate LoRA norms across pipeline stages and compute statistics."""
-        if len(local_norms_after) > 0:
-            norms_after_tensor = torch.tensor(local_norms_after, dtype=torch.float32, device=self.model_engine.device)
-            norm_count = torch.tensor(len(local_norms_after), dtype=torch.float32, device=self.model_engine.device)
-            norm_sum = torch.sum(norms_after_tensor)
-            norm_max = torch.max(norms_after_tensor)
-            if len(local_norms_before) > 0:
-                norms_before_tensor = torch.tensor(local_norms_before, dtype=torch.float32, device=self.model_engine.device)
-                decay_tensor = norms_before_tensor - norms_after_tensor
-                decay_sum = torch.sum(decay_tensor)
-                decay_max = torch.max(decay_tensor)
-            else:
-                decay_sum = torch.tensor(0.0, device=self.model_engine.device)
-                decay_max = torch.tensor(0.0, device=self.model_engine.device)
+        if local_norms.numel() > 0:
+            norm_count = torch.tensor(local_norms.numel(), dtype=torch.float32, device=self.model_engine.device)
+            norm_sum = torch.sum(local_norms)
+            norm_max = torch.max(local_norms)
+            decay_sum = torch.sum(local_decays)
+            decay_max = torch.max(local_decays)
         else:
             norm_count = torch.tensor(0.0, device=self.model_engine.device)
             norm_sum = torch.tensor(0.0, device=self.model_engine.device)
@@ -231,13 +248,11 @@ class Trainer:
             dist.all_reduce(decay_max, op=dist.ReduceOp.MAX, group=pp_group)
 
         if norm_count.item() > 0:
-            # Calculate global averages and maximums across all pipeline stages
             global_norm_avg = (norm_sum / norm_count).item()
             global_norm_max = norm_max.item()
             global_decay_avg = (decay_sum / norm_count).item()
             global_decay_max = decay_max.item()
         else:
-            # No LoRA parameters found, return zeros
             global_norm_avg = 0
             global_norm_max = 0
             global_decay_avg = 0
@@ -247,8 +262,8 @@ class Trainer:
 
     def _apply_lora_weight_decay(self, model, config, lr):
         """Apply decoupled weight decay to LoRA parameters and return aggregated statistics."""
-        local_norms_before, local_norms_after = self._apply_lora_weight_decay_local(model, config, lr)
-        return self._aggregate_lora_norms(local_norms_before, local_norms_after)
+        local_norms, local_decays = self._apply_lora_weight_decay_local(model, config, lr)
+        return self._aggregate_lora_norms(local_norms, local_decays)
 
     def _extract_loss(self, metrics):
         """Extract loss (first metric) as a scalar value."""
