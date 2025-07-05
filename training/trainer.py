@@ -182,7 +182,7 @@ class Trainer:
 
                 with torch.no_grad():
                     W = lora_scale * (B @ A)
-                    norm_before = W.norm().item()
+                    norms_before.append(W.norm().item())
 
                     # Using L = λ⋅½||W||_F²:
                     #    ∂L/∂W = λ⋅W, as ∂(½||W||_F²)/∂W = W
@@ -196,8 +196,7 @@ class Trainer:
                         B.sub_(lr * grad_B)
                         W = lora_scale * (B @ A)
 
-                    norm_after = W.norm().item()
-                    norms_after.append(norm_after)
+                    norms_after.append(W.norm().item())
 
         return norms_before, norms_after
 
