@@ -158,10 +158,6 @@ class Trainer:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def _extract_loss(self, metrics):
-        """Extract loss (first metric) as a scalar value."""
-        return metrics[0].mean().item()
-
     def _apply_lora_weight_decay(self, model, config, lr):
         """Apply decoupled weight decay (indirectly) to the composite matrix BA if specified"""
         local_norms = []
@@ -223,9 +219,14 @@ class Trainer:
 
         return global_avg, global_max
 
+    def _extract_loss(self, metrics):
+        """Extract loss (first metric) as a scalar value."""
+        return metrics[0].mean().item()
+
     def _write_metrics(self, prefix, metrics, step):
         """Write all metrics to tensorboard."""
         self.tb_writer.add_scalar(f'{prefix}/loss', metrics[0].mean().item(), step)
+        self.tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[1].mean().item(), step)
 
     def _print_eval_progress(self, step, current_loss, last_loss=None):
         """Print evaluation progress with optional percentage change."""
