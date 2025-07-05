@@ -82,7 +82,7 @@ class Trainer:
 
             # Apply LoRA-specific decoupled weight decay and get the norm stats
             if self.lora_config is not None:
-                norm_avg, norm_max, norm_decay_avg, norm_decay_max = self._apply_lora_weight_decay(
+                norm_avg, norm_max, weight_decay_avg, weight_decay_max = self._apply_lora_weight_decay(
                     self.pipeline_model,
                     self.config,
                     self.optimizer.param_groups[0]['lr']
@@ -96,8 +96,8 @@ class Trainer:
                     self.tb_writer.add_scalar('train/norm_avg', norm_avg, step)
                     self.tb_writer.add_scalar('train/norm_max', norm_max, step)
                     if self.config.get('lora_weight_decay', 0.0) > 0:
-                        self.tb_writer.add_scalar('train/norm_decay_avg', norm_decay_avg, step)
-                        self.tb_writer.add_scalar('train/norm_decay_max', norm_decay_max, step)
+                        self.tb_writer.add_scalar('train/weight_decay_avg', weight_decay_avg, step)
+                        self.tb_writer.add_scalar('train/weight_decay_max', weight_decay_max, step)
 
             # Periodic evaluation
             if step in self.eval_step_indices:
