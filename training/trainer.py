@@ -82,7 +82,7 @@ class Trainer:
 
             # Apply LoRA-specific decoupled weight decay and get the norm stats
             if self.lora_config is not None:
-                avg_norm, max_norm = self._apply_lora_weight_decay(
+                norm_avg, norm_max, shrinkage_avg, shrinkage_max = self._apply_lora_weight_decay(
                     self.pipeline_model,
                     self.config,
                     self.optimizer.param_groups[0]['lr']
@@ -93,8 +93,11 @@ class Trainer:
                 self._write_metrics('train', metrics, step)
                 self.tb_writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], step)
                 if self.lora_config is not None:
-                    self.tb_writer.add_scalar('train/norm_avg', avg_norm, step)
-                    self.tb_writer.add_scalar('train/norm_max', max_norm, step)
+                    self.tb_writer.add_scalar('train/norm_avg', norm_avg, step)
+                    self.tb_writer.add_scalar('train/norm_max', norm_max, step)
+                    if self.config.get('lora_weight_decay', 0.0) > 0:
+                        self.tb_writer.add_scalar('train/shrinkage_avg', shrinkage_avg, step)
+                        self.tb_writer.add_scalar('train/shrinkage_max', shrinkage_max, step)
 
             # Periodic evaluation
             if step in self.eval_step_indices:
@@ -158,9 +161,10 @@ class Trainer:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def _apply_lora_weight_decay(self, model, config, lr):
-        """Apply decoupled weight decay (indirectly) to the composite matrix BA if specified"""
-        local_norms = []
+    def _apply_lora_weight_decay_local(self, model, config, lr):
+        """Apply decoupled weight decay to LoRA parameters and collect local norms."""
+        local_norms_before = []
+        local_norms_after = []
 
         lora_alpha = config.get('lora_alpha', round(config['lora_rank'] ** 0.5))  # rslora: s = 1/sqrt(rank)
         lora_scale = lora_alpha / config['lora_rank']
@@ -178,6 +182,8 @@ class Trainer:
 
                 with torch.no_grad():
                     W = lora_scale * (B @ A)
+                    norm_before = W.norm().item()
+                    local_norms_before.append(norm_before)
 
                     # Using L = λ⋅½||W||_F²:
                     #    ∂L/∂W = λ⋅W, as ∂(½||W||_F²)/∂W = W
@@ -190,34 +196,59 @@ class Trainer:
                         B.sub_(lr * grad_B)
                         W = lora_scale * (B @ A)
 
-                    local_norms.append(W.norm().item())
+                    norm_after = W.norm().item()
+                    local_norms_after.append(norm_after)
 
-        # Aggregate across pipeline stages
-        if len(local_norms) > 0:
-            local_norms_tensor = torch.tensor(local_norms, dtype=torch.float32, device=self.model_engine.device)
-            local_count = torch.tensor(len(local_norms), dtype=torch.float32, device=self.model_engine.device)
-            local_sum = torch.sum(local_norms_tensor)
-            local_max = torch.max(local_norms_tensor)
+        return local_norms_before, local_norms_after
+
+    def _aggregate_lora_norms(self, local_norms_before, local_norms_after):
+        """Aggregate LoRA norms across pipeline stages and compute statistics."""
+        # Aggregate norms across pipeline stages
+        if len(local_norms_after) > 0:
+            local_norms_after_tensor = torch.tensor(local_norms_after, dtype=torch.float32, device=self.model_engine.device)
+            local_norms_before_tensor = torch.tensor(local_norms_before, dtype=torch.float32, device=self.model_engine.device)
+            local_shrinkages_tensor = local_norms_before_tensor - local_norms_after_tensor
+
+            local_norm_count = torch.tensor(len(local_norms_after), dtype=torch.float32, device=self.model_engine.device)
+            local_norm_sum = torch.sum(local_norms_after_tensor)
+            local_norm_max = torch.max(local_norms_after_tensor)
+            local_shrinkage_sum = torch.sum(local_shrinkages_tensor)
+            local_shrinkage_max = torch.max(local_shrinkages_tensor)
         else:
-            local_count = torch.tensor(0.0, device=self.model_engine.device)
-            local_sum = torch.tensor(0.0, device=self.model_engine.device)
-            local_max = torch.tensor(0.0, device=self.model_engine.device)
+            local_norm_count = torch.tensor(0.0, device=self.model_engine.device)
+            local_norm_sum = torch.tensor(0.0, device=self.model_engine.device)
+            local_norm_max = torch.tensor(0.0, device=self.model_engine.device)
+            local_shrinkage_sum = torch.tensor(0.0, device=self.model_engine.device)
+            local_shrinkage_max = torch.tensor(0.0, device=self.model_engine.device)
 
         # Aggregate across pipeline stages if using pipeline parallelism
         if self.model_engine.is_pipe_parallel:
             pp_group = self.model_engine.grid.get_pipe_parallel_group()
-            dist.all_reduce(local_count, op=dist.ReduceOp.SUM, group=pp_group)
-            dist.all_reduce(local_sum, op=dist.ReduceOp.SUM, group=pp_group)
-            dist.all_reduce(local_max, op=dist.ReduceOp.MAX, group=pp_group)
+            dist.all_reduce(local_norm_count, op=dist.ReduceOp.SUM, group=pp_group)
+            dist.all_reduce(local_norm_sum, op=dist.ReduceOp.SUM, group=pp_group)
+            dist.all_reduce(local_norm_max, op=dist.ReduceOp.MAX, group=pp_group)
+            dist.all_reduce(local_shrinkage_sum, op=dist.ReduceOp.SUM, group=pp_group)
+            dist.all_reduce(local_shrinkage_max, op=dist.ReduceOp.MAX, group=pp_group)
 
-        if local_count.item() > 0:
-            global_avg = (local_sum / local_count).item()
-            global_max = local_max.item()
+        if local_norm_count.item() > 0:
+            # Calculate global averages and maximums across all pipeline stages
+            norm_avg = (local_norm_sum / local_norm_count).item()
+            norm_max = local_norm_max.item()
+            shrinkage_avg = (local_shrinkage_sum / local_norm_count).item()
+            shrinkage_max = local_shrinkage_max.item()
         else:
-            global_avg = 0
-            global_max = 0
+            # No LoRA parameters found, return zeros
+            norm_avg = 0
+            norm_max = 0
+            shrinkage_avg = 0
+            shrinkage_max = 0
 
-        return global_avg, global_max
+        return norm_avg, norm_max, shrinkage_avg, shrinkage_max
+
+    def _apply_lora_weight_decay(self, model, config, lr):
+        """Apply decoupled weight decay to LoRA parameters and return aggregated statistics."""
+        local_norms_before, local_norms_after = self._apply_lora_weight_decay_local(model, config, lr)
+        return self._aggregate_lora_norms(local_norms_before, local_norms_after)
 
     def _extract_loss(self, metrics):
         """Extract loss (first metric) as a scalar value."""
