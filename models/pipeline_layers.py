@@ -161,16 +161,9 @@ class ComputeMetrics(nn.Module):
         # Use absolute values for loss (sign was used for Control Adapter negate)
         abs_sample_weights = torch.abs(sample_weights)
 
-        # Calculate the mean loss for the batch
-        loss = fast_cross_entropy_loss(
+        # Return the mean loss for the batch
+        return fast_cross_entropy_loss(
             logits,  # (batch_size, seq_len, vocab_size)
             shift_labels,  # (batch_size, seq_len)
             abs_sample_weights,  # (batch_size, seq_len)
         )
-
-        # Calculate the mean top1 accuracy for the batch.
-        with torch.no_grad():
-            mask = shift_labels != -100
-            top1_accuracy = (torch.argmax(logits, -1) == shift_labels).masked_select(mask).float().mean()
-
-        return (loss, top1_accuracy)
