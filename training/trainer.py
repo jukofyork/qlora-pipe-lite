@@ -182,14 +182,13 @@ class Trainer:
 
                 with torch.no_grad():
                     W = lora_scale * (B @ A)
-                    norms_before.append(W.norm().item())
 
                     # Using L = λ⋅½||W||_F²:
                     #    ∂L/∂W = λ⋅W, as ∂(½||W||_F²)/∂W = W
                     #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = λ⋅s⋅BᵗW
                     #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = λ⋅s⋅WAᵗ
                     if weight_decay > 0:
-                        norms_before.append(norm_before)
+                        norms_before.append(W.norm().item())
                         grad_A = weight_decay * lora_scale * (B.t() @ W)
                         grad_B = weight_decay * lora_scale * (W @ A.t())
                         A.sub_(lr * grad_A)
@@ -209,9 +208,9 @@ class Trainer:
             norm_max = torch.max(norms_after_tensor)
             if len(local_norms_before) > 0:
                 norms_before_tensor = torch.tensor(local_norms_before, dtype=torch.float32, device=self.model_engine.device)
-                shrinkages_tensor = norms_before_tensor - norms_after_tensor
-                decay_sum = torch.sum(shrinkages_tensor)
-                decay_max = torch.max(shrinkages_tensor)
+                decay_tensor = norms_before_tensor - norms_after_tensor
+                decay_sum = torch.sum(decay_tensor)
+                decay_max = torch.max(decay_tensor)
             else:
                 decay_sum = torch.tensor(0.0, device=self.model_engine.device)
                 decay_max = torch.tensor(0.0, device=self.model_engine.device)
