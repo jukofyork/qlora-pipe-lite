@@ -1,0 +1,112 @@
+# ==============================
+# MODEL AND OUTPUT CONFIGURATION
+# ==============================
+
+model_dir = '/data2/models/Meta-Llama-3.1-8B'
+output_dir = '/data/training_runs/llama3_8b_example'
+
+# ===========================
+# TRAINING TYPE CONFIGURATION
+# ===========================
+
+# Set to perform full fine-tuning instead of training a LoRA/Control adapter
+#full_fine_tune = true
+
+# Set to train Control Adapters "per layer" instead of LoRAs "per module" (precludes target_modules option)
+#use_control_adapters = true
+
+# Set to train a LoRA/Control adapter on top of a 4-bit quantised model (ie: a "QLoRA")
+load_in_4bit = true
+
+# ==================
+# LORA CONFIGURATION
+# ==================
+
+#lora_weight_dtype = bfloat16  # (default: float32)
+lora_rank = 64
+lora_alpha = 64                # (default: 1/sqrt(rank) [ie: use the "Rank-Stabilized" RSLoRA scale factor])
+lora_dropout = 0.05            # (default: 0.0)
+lora_weight_decay = 10.0       # (default: 0.0 [for numerical reasons, allowed only if lora_weight_dtype=float32])
+
+# =================================
+# MODULE/LAYER FILTER CONFIGURATION
+# =================================
+
+# Train only specific modules (defaults to: 'all linear' modules for LoRA, or all modules for full fine-tuning)
+#target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+
+# Train only specific layers (can be combined with target_modules and used with LoRA/Control adapters or full fine-tuning)
+#layers_to_transform = '16:31'
+
+# =======================
+# OPTIMIZER CONFIGURATION
+# =======================
+
+lr = 5e-5
+epochs = 1                # (default: 1)
+beta1 = 0.9               # (default: 0.9)
+beta2 = 0.99              # (default: 0.99)
+eps = 1e-6                # (default: 1e-6)
+
+# ========================
+# EVALUATION CONFIGURATION
+# ========================
+
+eval_fraction = 0.01  # (default: 0.01)
+evals_per_run = 5     # (default: 11)
+
+# ======================
+# TRAINING CONFIGURATION
+# ======================
+
+sequence_len = 32768
+
+# The number of pipeline parallel stages (NOTE: must evenly divide world_size)
+pipeline_stages = 1                   # (default: 1)
+
+# Controls the effective batch size: gradient_accumulation_steps x (world_size / pipeline_stages)
+gradient_accumulation_steps = 32      # (default: 1)
+
+# Setting this lower can help to drop fewer examples when trying to make equal-sized batches 
+eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_steps)
+
+# Set for optimised LoRA training with hybrid data+pipeline parallelism:
+# - Sends high-volume "per token" hidden states over PCIe/NVLink
+# - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand
+#use_column_major_topology = true
+
+# ========================
+# CHECKPOINT CONFIGURATION
+# ========================
+
+checkpoint_interval_hours = 1  # (default: 1)
+max_checkpoints = 3            # (default: 3)
+
+# =====================
+# DATASET CONFIGURATION
+# =====================
+
+[[datasets]]
+dataset_path = 'raw_text_data/*.txt'
+# sample_weight = 1.0     # Default weight (can be omitted)
+# max_sequences = 10000   # Limit sequences from this dataset (default: unlimited)
+# drop_tails = false      # Drop any remaining tokens at document ends after emitting each sequence (default: false)
+
+[[datasets]]
+dataset_path = 'structured_data/*.json'
+
+[[datasets]]
+dataset_path = 'noisy_data/*.jsonl'
+sample_weight = 0.5
+
+[[datasets]]
+dataset_path = 'very_noisy_data/*.parquet'
+sample_weight = 0.25
+max_sequences = 5000      # Limit noisy data to 5000 sequences
+drop_tails = true         # Ensure emitted sequences start on clean document boundaries and not part way into a document
+
+# - Text files are read as raw training data, structured formats (json/jsonl/parquet) use their "text" fields
+# - All datasets support optional sample_weight for controlling learning influence
+# - max_sequences limits the number of training sequences extracted from each dataset
+# - drop_tails=true drops any partial document "tails" to maintain clean sequence boundaries
+# - The HuggingFace dataset cache will be added below the dataset paths and is shared between nodes
