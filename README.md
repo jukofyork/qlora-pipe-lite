@@ -472,7 +472,7 @@ This optimization:
 target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
 
 # Target specific layers (works with all training types, can combine with target_modules)
-layers_to_transform = '16:31'  # Layers 16-30 (inclusive:inclusive, with first layer = 0 / last layer = n-1)
+layers_to_transform = '16:31'  # Layers 16-31 (inclusive:inclusive, with first layer = 0 / last layer = n-1)
 ```
 
 #### Checkpointing
