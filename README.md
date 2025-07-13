@@ -1,5 +1,5 @@
 # qlora-pipe-lite
-A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) by tdrussell, focused on Control Adapter training.
+A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) by [tdrussell](https://github.com/tdrussell), focused on Control Adapter training.
 
 **For full fine-tuning, LoRA, or QLoRA training, please use the original [qlora-pipe](https://github.com/tdrussell/qlora-pipe) repository which is more feature-complete and actively maintained.**
 
@@ -94,11 +94,228 @@ Control Adapters excel in scenarios where you need:
 
 **NOTE**: For general fine-tuning tasks like instruction following or domain adaptation, traditional LoRA or QLoRA may be more appropriate. Control Adapters are specifically designed for behavioral steering applications.
 
+## Training
+
+Supports multiple training modes: **Control Adapters**, **LoRA**, **QLoRA**, and **full fine-tuning**. The training system uses **DeepSpeed** for efficient large model training with pipeline parallelism, data parallelism, and memory optimization techniques like 4-bit quantization.
+
+### Training Modes
+
+#### Full Fine-Tuning
+
+Loads and updates all model parameters using `bfloat16`:
+
+```toml
+full_fine_tune = true
+```
+
+**NOTE**: Weight decay is not supported for full fine-tuning due to:
+
+1. **Catastrophic cancellation** with `bfloat16` precision (see [LoRA Weight Decay Implementation](#lora-weight-decay-implementation) below)
+2. **Poor inductive bias** - pulling pretrained weights toward zero is counterproductive (unlike LoRA where a zero Bayesian prior is beneficial)
+
+#### LoRA (Low-Rank Adaptation)
+
+Trains low-rank adapter matrices on top of frozen base model weights:
+
+```toml
+lora_rank = 64
+lora_alpha = 64                # Default: 1/sqrt(rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
+lora_dropout = 0.05            # Default: 0.0
+lora_weight_decay = 10.0       # Default: 0.0, requires float32 adapters
+```
+
+#### QLoRA (Quantized LoRA)
+
+LoRA (or Control Adapter) training on 4-bit quantized base models for memory efficiency:
+
+```toml
+load_in_4bit = true
+```
+
+#### Control Adapters
+
+Contrastive training using LoRA-like (multiplicative) transformations on decoder block outputs:
+
+```toml
+use_control_adapters = true
+control_class0_lambda = 0.0    # Default: 0.0, auxiliary loss weight for neutral examples
+```
+
+Control Adapters support **class-aware training** with positive, negative, and (optional) neutral examples:
+
+```toml
+[[datasets]]
+dataset_path = '/path/to/positive_examples/*.json'
+control_class = 1   # Enhance behaviors (default)
+
+[[datasets]]
+dataset_path = '/path/to/negative_examples/*.json'
+control_class = -1  # Suppress/unlearn behaviors
+
+[[datasets]]
+dataset_path = '/path/to/neutral_examples/*.json'
+control_class = 0   # Behavior we wish to preserve
+```
+
+### Configuration Structure
+
+Training configurations use TOML files with the following main sections:
+
+#### Model and Output
+
+```toml
+model_dir = '/path/to/model'
+output_dir = '/path/to/output'
+```
+
+**NOTE**: For multi-node training, ensure paths use the same mount point across all nodes.
+
+#### Optimizer Settings
+
+```toml
+lr = 5e-5
+epochs = 1                     # Default: 1
+beta1 = 0.9                    # Default: 0.9
+beta2 = 0.99                   # Default: 0.99
+eps = 1e-6                     # Default: 1e-6
+```
+
+**NOTE**: Uses the [**optimi Adam optimizer**](https://optimi.benjaminwarner.dev/optimizers/adam/) with [Kahan summation](https://en.wikipedia.org/wiki/Kahan_summation_algorithm) automatically applied for low-precision parameters.
+
+#### Training Parameters
+
+```toml
+sequence_len = 32768
+gradient_accumulation_steps = 32    # Controls effective batch size
+pipeline_stages = 1                 # Must evenly divide world_size
+```
+
+#### Dataset Configuration
+
+Multiple datasets with optional limits and class labels:
+
+```toml
+[[datasets]]
+dataset_path = 'raw_text_data/*.txt'
+max_sequences = 10000          # Optional limit
+drop_tails = false             # Drop partial sequences at document ends
+
+[[datasets]]
+dataset_path = 'structured_data/*.json'
+```
+
+**Supported formats**: `.txt` (raw text), `.json`, `.jsonl`, `.parquet` (structured with "text" field)
+
+### Parallelism and Scaling
+
+#### Pipeline Parallelism
+
+Splits the model across multiple GPUs vertically (by layers):
+
+```toml
+pipeline_stages = 2            # Divide model across 2 GPUs
+```
+
+#### Data Parallelism
+
+Automatically configured based on available GPUs:
+- **Total GPUs**: `world_size`
+- **Data parallel instances**: `world_size / pipeline_stages`
+- **Effective batch size**: `gradient_accumulation_steps × (world_size / pipeline_stages)`
+
+#### Hybrid Parallelism Optimization
+
+For LoRA training with mixed interconnects:
+
+```toml
+use_column_major_topology = true
+```
+
+This optimization:
+
+- Sends high-volume hidden states over **PCIe/NVLink**
+- Sends low-volume LoRA gradients over **Ethernet/InfiniBand**
+
+### Advanced Configuration
+
+#### Layer and Module Targeting
+
+```toml
+# Target specific modules (not available with Control Adapters - they operate per layer)
+target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
+
+# Target specific layers (works with all training types, can combine with target_modules)
+layers_to_transform = '16:31'  # Layers 16-30 (inclusive:exclusive)
+```
+
+#### Checkpointing
+
+```toml
+checkpoint_interval_hours = 1  # Default: 1
+max_checkpoints = 3            # Default: 3
+```
+
+**Resuming Training**: Use the `--resume_from_checkpoint` flag to continue training from the most recent checkpoint:
+
+```bash
+python train.py --config examples/config.toml --resume_from_checkpoint
+```
+
+**NOTE**: The system automatically resumes from the latest checkpoint in the output directory, including dataloader state for seamless continuation.
+
+#### Evaluation
+
+```toml
+eval_fraction = 0.01           # Default: 0.01
+evals_per_run = 5              # Default: 11 (eg: 1 at start, 1 at end, 9 evenly spaced)
+```
+
+#### LoRA Weight Decay Implementation
+
+```toml
+lora_weight_decay = 10.0       # Default: 0.0
+```
+
+For details on the custom composite matrix weight decay implementation, see [A note on LoRA weight decay](#a-note-on-lora-weight-decay) below.
+
+### Example Training Commands
+
+```bash
+# Single GPU LoRA Training
+python train.py --config examples/config.toml --num_gpus 1
+```
+
+```bash
+# Multi-GPU Pipeline Parallel Training
+python train.py --config examples/config_qwq.toml --num_gpus 4
+```
+
+```bash
+# Multi-Node Training
+python train.py --config config.toml --num_gpus 8 --master_addr node0.example.com
+```
+
+**NOTES**:
+
+- The `--num_gpus` option may not be required depending on your setup
+- RTX 4000 series GPUs may need `NCCL_P2P_DISABLE="1" NCCL_IB_DISABLE="1"` environment variables
+- For multi-node training guidance, see the [Stanford DeepSpeed tutorial](https://nlp.stanford.edu/mistral/tutorials/deepspeed.html) and how to setup [passwordless SSH](https://wiki.debian.org/Setup%20SSH%20Passwordless%20Login) between nodes
+
+### Monitoring Training
+
+You can use [TensorBoard](tensorboard) to visualize training and evaluation metrics:
+
+```bash
+tensorboard --host 0.0.0.0 --logdir="/path/to/output_dir"
+```
+
+Then open `http://localhost:6006` in your browser.
+
 ## A note on LoRA weight decay
 
 Traditional weight decay applied directly to LoRA parameters (`lora_A` and `lora_B`) has significant limitations that this implementation addresses through **decoupled weight decay on the composite matrix**.
 
-### The Problem with Standard Weight Decay
+### The Problem with standard (decoupled) weight decay
 
 1. **Catastrophic Cancellation**: Standard optimizer weight decay fails with `float16`/`bfloat16` precision because the tiny decay amounts cancel out to zero when applied to the (relatively) large parameter tensors!
 

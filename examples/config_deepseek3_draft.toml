@@ -1,0 +1,37 @@
+# ==============================
+# MODEL AND OUTPUT CONFIGURATION
+# ==============================
+
+model_dir = '/mnt/shared/models/DeepSeek-V3-0324-DRAFT-0.6B-UNTRAINED'
+output_dir = '/mnt/shared/finetunes/finetuned'
+
+# ===========================
+# TRAINING TYPE CONFIGURATION
+# ===========================
+
+full_fine_tune = true
+
+# =======================
+# OPTIMIZER CONFIGURATION
+# =======================
+
+lr = 5e-5
+epochs = 2
+
+# ======================
+# TRAINING CONFIGURATION
+# ======================
+
+sequence_len = 65536
+
+gradient_accumulation_steps = 10  # 10×6×65536 = ~4M tokens per step
+
+# =====================
+# DATASET CONFIGURATION
+# =====================
+
+[[datasets]]
+dataset_path = '/mnt/shared/datasets/common-crawl-sample/*.json'
+
+[[datasets]]
+dataset_path = '/mnt/shared/datasets/the-stack-smol-xl/converted/the-stack-smol-xl.jsonl'
