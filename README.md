@@ -577,4 +577,4 @@ Contributions to this project are welcome. Please feel free to fork the reposito
 
 ## License
 
-This project is licensed under the Apache-2.0 license - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT license - see the [LICENSE](LICENSE) file for details.
