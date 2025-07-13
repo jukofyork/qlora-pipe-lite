@@ -7,6 +7,122 @@ A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) by [
 
 Control Adapters are a new Parameter-Efficient Fine-Tuning ([PEFT](https://github.com/huggingface/peft)) method that applies multiplicative transformations (and their inverse) to the residual stream of whole (ie: attention + MLP) decoder blocks, enabling the same adapter to both enhance and suppress behaviors through positive and negative training examples.
 
+## Table of Contents
+
+- [About](#about)
+- [Features](#features)
+- [What are Control Adapters?](#what-are-control-adapters)
+  - [Relationship to Control Vectors](#relationship-to-control-vectors)
+  - [Mathematical Foundation](#mathematical-foundation)
+  - [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay)
+  - [Conversion and Compatibility](#conversion-and-compatibility)
+  - [Why Use Control Adapters?](#why-use-control-adapters)
+- [Quick Start](#quick-start)
+- [Training](#training)
+  - [Training Modes](#training-modes)
+  - [Configuration Structure](#configuration-structure)
+  - [Parallelism and Scaling](#parallelism-and-scaling)
+  - [Advanced Configuration](#advanced-configuration)
+  - [Example Training Commands](#example-training-commands)
+  - [Monitoring Training](#monitoring-training)
+- [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay)
+- [Credits](#credits)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- PyTorch 2.0+
+- CUDA-capable GPU(s)
+- 24GB+ VRAM recommended (or use QLoRA with `load_in_4bit = true`)
+
+### Installation
+
+```bash
+git clone https://github.com/your-username/qlora-pipe-lite
+cd qlora-pipe-lite
+pip install -r requirements.txt
+```
+
+### Basic Control Adapter Training
+
+1. **Create a configuration file** (`config.toml`):
+
+```toml
+# Model and output paths
+model_dir = '/path/to/your/model'  # e.g., meta-llama/Llama-3.1-8B
+output_dir = './outputs/my_control_adapter'
+
+# Control Adapter settings
+use_control_adapters = true
+lora_rank = 16
+lora_alpha = 4.0  # sqrt(16)
+lora_weight_decay = 100.0
+lora_weight_dtype = "float32"  # Required for weight decay
+
+# Training parameters
+lr = 5e-5
+epochs = 1
+sequence_len = 2048
+gradient_accumulation_steps = 8
+
+# Datasets with class labels
+[[datasets]]
+dataset_path = 'data/positive_examples.json'
+control_class = 1  # Enhance this behavior
+
+[[datasets]]
+dataset_path = 'data/negative_examples.json'
+control_class = -1  # Suppress this behavior
+```
+
+2. **Prepare your data** in JSON format with a "text" field:
+
+```json
+[
+  {"text": "Your training example text here..."},
+  {"text": "Another example..."}
+]
+```
+
+3. **Start training**:
+
+```bash
+# Single GPU
+python train.py --config config.toml --num_gpus 1
+
+# Multi-GPU with pipeline parallelism
+python train.py --config config.toml --num_gpus 4
+
+# Resume from checkpoint
+python train.py --config config.toml --resume_from_checkpoint
+```
+
+4. **Monitor training** with TensorBoard:
+
+```bash
+tensorboard --host 0.0.0.0 --logdir="./outputs/my_control_adapter"
+```
+
+### Quick QLoRA Example
+
+For memory-constrained setups, use 4-bit quantization:
+
+```toml
+# Add to your config.toml
+load_in_4bit = true
+```
+
+### Next Steps
+
+- See [Training](#training) for detailed configuration options
+- Check [example configs](examples/) for model-specific settings
+- Read about [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for Control Adapters
+- Learn about [LoRA Weight Decay](#a-note-on-lora-weight-decay) implementation
+
 ## Features
 - Pipeline parallel training, for efficiently training large models that cannot fit on one GPU
 - Multi-node training support with improved data-parallel handling via shared network storage
@@ -44,8 +160,17 @@ Control Adapters are conceptually similar to [Control Vectors](https://github.co
 Control Adapters can represent several classical transformations, including:
 
 - [Orthogonal projection onto the null space](https://en.wikipedia.org/wiki/Projection_(linear_algebra)) (aka: 
-["Abliteration"](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction): `I - u u^T` when `B = -A`
-- [Householder transformations](https://en.wikipedia.org/wiki/Householder_transformation): `I - 2 * u u^T` when `B = -2A`
+["Abliteration"](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction)):
+
+```
+I - u u^T` when `B = -A
+```
+
+- [Householder transformations](https://en.wikipedia.org/wiki/Householder_transformation):
+
+```
+I - 2 * u u^T` when `B = -2A
+```
 
 When combined with Control Vectors, they enable full [affine transformations](https://en.wikipedia.org/wiki/Affine_transformation) of the decoder layer outputs.
 
@@ -169,7 +294,7 @@ lora_weight_decay = 10.0       # Default: 0.0, requires float32 adapters
 lora_weight_dtype = "float32"  # Default: "float32", use "bfloat16" to save memory (disables weight decay)
 ```
 
-**NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to `float32` (default), it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A note on LoRA weight decay](#a-note-on-lora-weight-decay) below). For Control Adapters, `float32` and weight decay are essential for mathematical stability - see [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for details.
+**NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to `float32` (default), it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below). For Control Adapters, `float32` and weight decay are essential for mathematical stability - see [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for details.
 
 #### QLoRA (Quantized LoRA)
 
@@ -328,7 +453,7 @@ evals_per_run = 5              # Default: 11 (eg: 1 at start, 1 at end, 9 evenly
 lora_weight_decay = 10.0       # Default: 0.0
 ```
 
-For details on the custom composite matrix weight decay implementation, see [A note on LoRA weight decay](#a-note-on-lora-weight-decay) below.
+For details on the custom composite matrix weight decay implementation, see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below.
 
 ### Example Training Commands
 
@@ -363,17 +488,17 @@ tensorboard --host 0.0.0.0 --logdir="/path/to/output_dir"
 
 Then open `http://localhost:6006` in your browser.
 
-## A note on LoRA weight decay
+## A Note on LoRA Weight Decay
 
 Traditional weight decay applied directly to LoRA parameters (`lora_A` and `lora_B`) has significant limitations that this implementation addresses through **decoupled weight decay on the composite matrix**.
 
 ### The Problem with standard (decoupled) weight decay
 
-1. **Catastrophic Cancellation**: Standard optimizer weight decay fails with `float16`/`bfloat16` precision because the tiny decay amounts cancel out to zero when applied to the (relatively) large parameter tensors!
+1. **Catastrophic Cancellation**: Standard optimizer weight decay fails with `float16`/`bfloat16` precision because the tiny decay amounts cancel out to zero when applied to the relatively large parameter tensors!
 
 2. **Incorrect Regularization Target**: Applying weight decay to `A` and `B` matrices separately doesn't properly regularize the actual learned transformation `W = scale * B @ A` that affects the model's behavior!
 
-### Solution: Custom "composite" decoupled weight decay + use `float32` adapters only
+### Solution: Custom 'composite' decoupled weight decay + use `float32` adapters only
 
 Instead of regularizing `A` and `B` independently, we apply decoupled weight decay to the composite matrix `W = scale * B @ A` using manually calculated gradients. This directly penalizes the composite transformation that actually affects model behavior:
 
