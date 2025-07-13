@@ -24,7 +24,7 @@ load_in_4bit = true
 
 #lora_weight_dtype = bfloat16  # (default: float32)
 lora_rank = 64
-lora_alpha = 64                # (default: 1/sqrt(rank) [ie: use the "Rank-Stabilized" RSLoRA scale factor])
+lora_alpha = 64                # (default: sqrt(lora_rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
 lora_dropout = 0.05            # (default: 0.0)
 lora_weight_decay = 10.0       # (default: 0.0 [for numerical reasons, allowed only if lora_weight_dtype=float32])
 
@@ -88,7 +88,6 @@ max_checkpoints = 3            # (default: 3)
 
 [[datasets]]
 dataset_path = 'raw_text_data/*.txt'
-# sample_weight = 1.0     # Default weight (can be omitted)
 # max_sequences = 10000   # Limit sequences from this dataset (default: unlimited)
 # drop_tails = false      # Drop any remaining tokens at document ends after emitting each sequence (default: false)
 
@@ -96,17 +95,13 @@ dataset_path = 'raw_text_data/*.txt'
 dataset_path = 'structured_data/*.json'
 
 [[datasets]]
-dataset_path = 'noisy_data/*.jsonl'
-sample_weight = 0.5
+dataset_path = 'more_structured_data/*.jsonl'
 
 [[datasets]]
-dataset_path = 'very_noisy_data/*.parquet'
-sample_weight = 0.25
-max_sequences = 5000      # Limit noisy data to 5000 sequences
-drop_tails = true         # Ensure emitted sequences start on clean document boundaries and not part way into a document
+dataset_path = 'parquet_data/*.parquet'
 
 # - Text files are read as raw training data, structured formats (json/jsonl/parquet) use their "text" fields
-# - All datasets support optional sample_weight for controlling learning influence
-# - max_sequences limits the number of training sequences extracted from each dataset
-# - drop_tails=true drops any partial document "tails" to maintain clean sequence boundaries
+# - The 'max_sequences' option limits the number of training sequences extracted from each dataset
+# - The 'drop_tails=true' setting drops any partial document "tails" to maintain clean sequence boundaries
 # - The HuggingFace dataset cache will be added below the dataset paths and is shared between nodes
+# - See the other example 'config.toml' files for how to setup Control Adapter training

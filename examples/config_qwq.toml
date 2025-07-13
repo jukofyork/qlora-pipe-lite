@@ -1,0 +1,66 @@
+# ==============================
+# MODEL AND OUTPUT CONFIGURATION
+# ==============================
+
+model_dir = '/mnt/shared/models/QwQ-32B'
+output_dir = '/mnt/shared/fiction_finetunes/finetuned'
+
+# ==================
+# LORA CONFIGURATION
+# ==================
+
+use_control_adapters = true
+
+lora_rank = 16
+
+# =================================
+# MODULE/LAYER FILTER CONFIGURATION
+# =================================
+
+# Skip last 2 layers: 16*2*5120*(64−2) = ~10M parameters total
+layers_to_transform = '0:61'
+
+# =======================
+# OPTIMIZER CONFIGURATION
+# =======================
+
+lr = 2e-5
+lora_weight_decay = 4e2
+
+# ======================
+# TRAINING CONFIGURATION
+# ======================
+
+pipeline_stages = 2
+
+sequence_len = 4096
+
+# Targeting 1k total steps and ~20 tokens per parameter:
+#   round(solve((1000*4096*3*x)/(16*2*5120*(64−2)) = 20, x)) --> x = 17
+#   3*17    = 51 sequences per step, 1000*3*17  = 51000 sequences total
+#   4096*51 = ~204K tokens per step, 4096*51000 = ~204M tokens total
+gradient_accumulation_steps = 17
+
+use_column_major_topology = true
+
+# =====================
+# DATASET CONFIGURATION
+# =====================
+
+[[datasets]]
+dataset_path = '/mnt/shared/datasets/books-markdown-cleaned-fiction--filtered/*.json'
+control_class = 1
+max_sequences = 25757   # floor(0.5*51000/(1-0.01))
+drop_tails = true
+
+[[datasets]]
+dataset_path = '/mnt/shared/datasets/ajibawa-2023-Stories-Collections--filtered/*.json'
+control_class = -1
+max_sequences = 12878   # floor(0.25*51000/(1−0.01))
+drop_tails = true
+
+[[datasets]]
+dataset_path = '/mnt/shared/datasets/literotica-stories--filtered/*.json'
+control_class = -1
+max_sequences = 12878   # floor(0.25*51000/(1−0.01))
+drop_tails = true
