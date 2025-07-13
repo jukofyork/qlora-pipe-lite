@@ -7,17 +7,35 @@ A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) by [
 
 Control Adapters are a new Parameter-Efficient Fine-Tuning ([PEFT](https://github.com/huggingface/peft)) method that applies multiplicative transformations (and their inverse) to the residual stream of whole (ie: attention + MLP) decoder blocks, enabling the same adapter to both enhance and suppress behaviors through positive and negative training examples.
 
+## Features
+- Pipeline parallel training, for efficiently training large models that cannot fit on one GPU
+- Multi-node training support with improved data-parallel handling via shared network storage
+- Supports Control Adapters (primary focus), QLoRA, LoRA, and full fine tuning
+- Proper decoupled weight decay for LoRA parameters (applies weight decay to the full reconstructed weight matrix)
+- Quantize weights using bitsandbytes
+- Efficient model loading. Each process only loads the layers it needs, and quantizes and moves them to the GPU layer-by-layer. This means you can load a large model on a lot of GPUs even with limited system RAM.
+- Support for "raw text" training using either a structured list of documents in a JSON file, or a single txt file
+- Support for resuming training from a checkpoint, including the dataloader state, to easily allow training in a piecemeal fashion
+- Useful metrics logged to Tensorboard
+- Train on multiple datasets simultaneously, with support for contrastive datasets (eg: `class -1` and `class 1` for Control Adapters)
+- Models currently supported: Llama, Mistral, Mixtral, Qwen, Cohere (Command R), Cohere 2 (Command-A), and Gemma 2
+
 ## Table of Contents
 
 - [About](#about)
 - [Features](#features)
+- [Quick Start](#quick-start)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [Basic Control Adapter Training](#basic-control-adapter-training)
+  - [Quick QLoRA Example](#quick-qlora-example)
+  - [Next Steps](#next-steps)
 - [What are Control Adapters?](#what-are-control-adapters)
   - [Relationship to Control Vectors](#relationship-to-control-vectors)
   - [Mathematical Foundation](#mathematical-foundation)
-  - [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay)
+  - [Convergence Requirements and the need for Weight Decay](#convergence-requirements-and-the-need-for-weight-decay)
   - [Conversion and Compatibility](#conversion-and-compatibility)
   - [Why Use Control Adapters?](#why-use-control-adapters)
-- [Quick Start](#quick-start)
 - [Training](#training)
   - [Training Modes](#training-modes)
   - [Configuration Structure](#configuration-structure)
@@ -53,30 +71,30 @@ pip install -r requirements.txt
 
 ```toml
 # Model and output paths
-model_dir = '/path/to/your/model'  # e.g., meta-llama/Llama-3.1-8B
-output_dir = './outputs/my_control_adapter'
+model_dir = '/path/to/your/model'  # eg: Llama-3.1-8B
+output_dir = './my_control_adapter'
 
 # Control Adapter settings
 use_control_adapters = true
 lora_rank = 16
-lora_alpha = 4.0  # sqrt(16)
-lora_weight_decay = 100.0
-lora_weight_dtype = "float32"  # Required for weight decay
+
+# For Llama-3.1-8B (32 layers total), skip last 2 layers
+layers_to_transform = '0:29'       # Train layers 0-29 (30 layers total)
 
 # Training parameters
-lr = 5e-5
-epochs = 1
-sequence_len = 2048
-gradient_accumulation_steps = 8
+lr = 2e-5
+lora_weight_decay = 500.0
+sequence_len = 4096
+gradient_accumulation_steps = 64   # ie: ~250k tokens per step
 
 # Datasets with class labels
 [[datasets]]
 dataset_path = 'data/positive_examples.json'
-control_class = 1  # Enhance this behavior
+control_class = 1                  # Enhance this behavior
 
 [[datasets]]
 dataset_path = 'data/negative_examples.json'
-control_class = -1  # Suppress this behavior
+control_class = -1                 # Suppress this behavior
 ```
 
 2. **Prepare your data** in JSON format with a "text" field:
@@ -104,8 +122,43 @@ python train.py --config config.toml --resume_from_checkpoint
 4. **Monitor training** with TensorBoard:
 
 ```bash
-tensorboard --host 0.0.0.0 --logdir="./outputs/my_control_adapter"
+tensorboard --host 0.0.0.0 --logdir="./my_control_adapter"
 ```
+
+5. **Convert to standard LoRA format**:
+
+After training completes, you can convert your Control Adapter to standard PEFT-compatible LoRA format:
+
+```bash
+# Multiplicative LoRA conversion (lossless, very fast, and preserves multiplicative behavior)
+./tools/control_adapter_to_multiplicative_lora.py ./my_control_adapter/epoch1 ./my_multiplicative_lora
+
+# Additive LoRA approximation (compatible with standard LoRA tools, but slow due to SVD decomposition)
+./tools/control_adapter_to_additive_lora.py ./Llama-3.1-8B ./my_control_adapter/epoch1 ./my_lora
+```
+
+6. **Merge with base model**:
+
+To create a standalone merged model, use the included merge tool:
+
+```bash
+# Merge multiplicative LoRA
+./tools/merge_lora.py ./Llama-3.1-8B ./my_multiplicative_lora ./my_merged_model --multiplicative
+
+# Merge additive LoRA
+./tools/merge_lora.py ./Llama-3.1-8B ./my_lora ./my_merged_model
+```
+
+Alternatively, use my [huggingface space](https://huggingface.co/spaces/jukofyork/merge-lora) capable of merging in the cloud and saving on upload bandwidth.
+
+7. **Convert to GGUF format** (optional):
+
+```bash
+# NOTE: Additive LoRA *ONLY* (multiplicative LoRA cannot be used with llama.cpp!)
+./llama.cpp/convert_lora_to_gguf.py --base ./Llama-3.1-8B --outtype f32 --outfile ./my_lora.gguf ./my_lora
+```
+
+and then run [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) using the `--lora FNAME` option (or `--lora-scaled FNAME SCALE` if you want to adjust the effect of the LoRA).
 
 ### Quick QLoRA Example
 
@@ -122,19 +175,6 @@ load_in_4bit = true
 - Check [example configs](examples/) for model-specific settings
 - Read about [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for Control Adapters
 - Learn about [LoRA Weight Decay](#a-note-on-lora-weight-decay) implementation
-
-## Features
-- Pipeline parallel training, for efficiently training large models that cannot fit on one GPU
-- Multi-node training support with improved data-parallel handling via shared network storage
-- Supports Control Adapters (primary focus), QLoRA, LoRA, and full fine tuning
-- Proper decoupled weight decay for LoRA parameters (applies weight decay to the full reconstructed weight matrix)
-- Quantize weights using bitsandbytes
-- Efficient model loading. Each process only loads the layers it needs, and quantizes and moves them to the GPU layer-by-layer. This means you can load a large model on a lot of GPUs even with limited system RAM.
-- Support for "raw text" training using either a structured list of documents in a JSON file, or a single txt file
-- Support for resuming training from a checkpoint, including the dataloader state, to easily allow training in a piecemeal fashion
-- Useful metrics logged to Tensorboard
-- Train on multiple datasets simultaneously, with support for contrastive datasets (eg: `class -1` and `class 1` for Control Adapters)
-- Models currently supported: Llama, Mistral, Mixtral, Qwen, Cohere (Command R), Cohere 2 (Command-A), and Gemma 2
 
 ## What are Control Adapters?
 
