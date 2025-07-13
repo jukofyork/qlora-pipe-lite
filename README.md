@@ -133,7 +133,7 @@ load_in_4bit = true
 - Support for "raw text" training using either a structured list of documents in a JSON file, or a single txt file
 - Support for resuming training from a checkpoint, including the dataloader state, to easily allow training in a piecemeal fashion
 - Useful metrics logged to Tensorboard
-- Train on multiple datasets simultaneously, with support for contrastive datasets (eg: class -1 and class 1 for Control Adapters)
+- Train on multiple datasets simultaneously, with support for contrastive datasets (eg: `class -1` and `class 1` for Control Adapters)
 - Models currently supported: Llama, Mistral, Mixtral, Qwen, Cohere (Command R), Cohere 2 (Command-A), and Gemma 2
 
 ## What are Control Adapters?
@@ -163,38 +163,42 @@ Control Adapters can represent several classical transformations, including:
 ["Abliteration"](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction)):
 
 ```
-I - u u^T` when `B = -A
+I - u u^T, when B = -A
 ```
 
 - [Householder transformations](https://en.wikipedia.org/wiki/Householder_transformation):
 
 ```
-I - 2 * u u^T` when `B = -2A
+I - 2 * u u^T, when B = -2A
 ```
 
 When combined with Control Vectors, they enable full [affine transformations](https://en.wikipedia.org/wiki/Affine_transformation) of the decoder layer outputs.
 
 ### Mathematical Foundation
 
-Control Adapters apply multiplicative transformations to the residual stream using a rank-decomposed matrix `scale * B @ A`:
+Control Adapters apply multiplicative transformations to the residual stream using a (scaled) rank-decomposed matrix:
+
+```
+W = scale * B @ A, where scale = alpha / rank
+```
 
 #### For positive examples (`class +1`):
 
 ```
-h' = (I + scale * B @ A) @ h
+h' = (I + W) @ h
 ```
 
 #### For negative examples (`class -1`):
 
 ```
-h' = (I + scale * B @ A)^{-1} @ h ≈ (I - scale * B @ A + higher_order_terms) @ h
+h' = (I + W)^{-1} @ h ≈ (I - W + higher_order_terms) @ h
 ```
 
 The inverse transformation uses a [Neumann series approximation](https://en.wikipedia.org/wiki/Neumann_series), allowing the same adapter parameters to both enhance desired behaviors (positive) and suppress undesired behaviors (negative) during training.
 
-#### For neutral examples (`class 0`) - optional:
+#### For (optional) neutral examples (`class 0`):
 
-Neutral examples receive no transformation (`h' = h`) but contribute an auxiliary regularization loss that encourages the adapter to have minimal effect on these samples. This helps isolate the specific behavioral axis being modified and provides additional regularization beyond standard L2-regularization and/or decoupled weight decay.
+Neutral examples receive no transformation (`h' = h`) but contribute an auxiliary regularization loss that encourages the adapter to have minimal effect on these samples. This helps isolate the specific behavioral axis being modified and provides additional regularization beyond (decoupled) weight decay.
 
 ### Convergence Requirements and the need for Weight Decay
 
@@ -202,7 +206,9 @@ As mentioned above, Control Adapters rely on the [Neumann series approximation](
 
 #### Convergence Condition
 
-The Neumann series `(I + W)^{-1} = I - W + W^2 - W^3 + ...` converges when the [spectral radius](https://en.wikipedia.org/wiki/Spectral_radius) `ρ(W) < 1`. A sufficient condition is that the [spectral norm](https://en.wikipedia.org/wiki/Matrix_norm#Spectral_norm) `‖W‖₂ < 1`.
+The Neumann series `(I + W)^{-1} = I - W + W^2 - W^3 + ...` converges when the [spectral radius](https://en.wikipedia.org/wiki/Spectral_radius) `ρ(W) < 1`.
+
+A sufficient condition (ie: a stricter but easier-to-check requirement that guarantees convergence) is that the [spectral norm](https://en.wikipedia.org/wiki/Matrix_norm#Spectral_norm) `‖W‖₂ < 1`.
 
 For rank-`r` matrices, the relationship between norms is:
 
@@ -210,7 +216,9 @@ For rank-`r` matrices, the relationship between norms is:
 ‖W‖₂ ≤ ‖W‖_F ≤ √r · ‖W‖₂
 ```
 
-Where `‖W‖_F` is the [Frobenius norm](https://en.wikipedia.org/wiki/Frobenius_norm) (cheaper to compute than the spectral norm).
+Where `‖W‖_F` is the [Frobenius norm](https://en.wikipedia.org/wiki/Frobenius_norm).
+
+Since the Frobenius norm is much cheaper to compute than the spectral norm (which requires SVD or power iteration per step), we monitor it instead.
 
 #### Scalar Intuition
 
@@ -222,7 +230,7 @@ To ensure convergence with acceptable approximation error:
 
 - **Target**: Keep `‖W‖_F ≲ 0.25√r` (approximately 0.2-0.3 times `√rank`)
 - **Result**: This guarantees `‖W‖₂ ≲ 0.2-0.3`, giving truncation errors ≤ 1-2%
-- **Monitoring**: The training logs show `train/norm_avg` and `train/norm_max` values for `‖W‖_F`
+- **Monitoring**: The training logs show `norm_avg` and `norm_max` values for `‖W‖_F`
 
 #### Why Weight Decay is Essential
 
@@ -238,7 +246,7 @@ For typical setups:
 - **Rank 16**: Target `‖W‖_F < 1.0`, and use `lora_weight_decay` of `100-500`
 - **Rank 64**: Target `‖W‖_F < 4.0`, and use `lora_weight_decay` of `500` or more
 
-Monitor the `train/norm_max` values in TensorBoard to ensure they stay well below these thresholds throughout training.
+Monitor the `norm_max` values in TensorBoard to ensure they stay well below these thresholds throughout training.
 
 ### Conversion and Compatibility
 
@@ -249,13 +257,15 @@ Control Adapters can be converted to standard [PEFT](https://github.com/huggingf
 
 This flexibility allows Control Adapters to be used with existing LoRA-compatible inference frameworks while maintaining their unique training advantages.
 
+See the [tools](tools) folder for the conversion scripts. Note that the Cohere and Mixtral models require the `--cohere` and `--mixtral` command line options respectively, due to their different residual stream writing mechanisms (ie: via `o_proj` and `w2`).
+
 ### Why Use Control Adapters?
 
 Control Adapters excel in scenarios where you need:
 - **Precise behavioral steering** with "fuzzy" criteria (eg: writing style, tone) rather than requiring carefully crafted behavioral axes like Control Vectors
 - **Compositional control** - multiple Control Adapters can be combined with minimal interference due to high-dimensional space and the A/B decomposition
 - **Bidirectional training** with positive and negative examples to both enhance and suppress behaviors using the same parameters
-- **Smaller datasets** - more forgiving than traditional methods and work well with less structured data
+- **Smaller datasets** - more forgiving than traditional methods and are effective with less well-structured data
 - **Mathematical expressiveness** - can easily learn classical transformations like "abliteration" or Householder transforms
 - **Complementary to Control Vectors** - work together to enable full affine transformations of decoder outputs
 
@@ -294,7 +304,7 @@ lora_weight_decay = 10.0       # Default: 0.0, requires float32 adapters
 lora_weight_dtype = "float32"  # Default: "float32", use "bfloat16" to save memory (disables weight decay)
 ```
 
-**NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to `float32` (default), it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below). For Control Adapters, `float32` and weight decay are essential for mathematical stability - see [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for details.
+**NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to its default `float32`, it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below). For Control Adapters, `float32` and weight decay are essential for mathematical stability - see [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for details.
 
 #### QLoRA (Quantized LoRA)
 
@@ -422,7 +432,7 @@ This optimization:
 target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
 
 # Target specific layers (works with all training types, can combine with target_modules)
-layers_to_transform = '16:31'  # Layers 16-30 (inclusive:exclusive)
+layers_to_transform = '16:31'  # Layers 16-30 (inclusive:inclusive, with first layer = 0 / last layer = n-1)
 ```
 
 #### Checkpointing
@@ -432,10 +442,10 @@ checkpoint_interval_hours = 1  # Default: 1
 max_checkpoints = 3            # Default: 3
 ```
 
-**Resuming Training**: Use the `--resume_from_checkpoint` flag to continue training from the most recent checkpoint:
+Use the `--resume_from_checkpoint` flag to continue training from the most recent checkpoint:
 
 ```bash
-python train.py --config examples/config.toml --resume_from_checkpoint
+python train.py --config config.toml --resume_from_checkpoint
 ```
 
 **NOTE**: The system automatically resumes from the latest checkpoint in the output directory, including dataloader state for seamless continuation.
@@ -444,7 +454,7 @@ python train.py --config examples/config.toml --resume_from_checkpoint
 
 ```toml
 eval_fraction = 0.01           # Default: 0.01
-evals_per_run = 5              # Default: 11 (eg: 1 at start, 1 at end, 9 evenly spaced)
+evals_per_run = 5              # Default: 11 (eg: 1 at start, 1 at end, and 9 more evenly spaced)
 ```
 
 #### LoRA Weight Decay Implementation
@@ -453,7 +463,7 @@ evals_per_run = 5              # Default: 11 (eg: 1 at start, 1 at end, 9 evenly
 lora_weight_decay = 10.0       # Default: 0.0
 ```
 
-For details on the custom composite matrix weight decay implementation, see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below.
+See the [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) section below.
 
 ### Example Training Commands
 
@@ -475,8 +485,8 @@ python train.py --config config.toml --num_gpus 8 --master_addr node0.example.co
 **NOTES**:
 
 - The `--num_gpus` option may not be required depending on your setup
-- RTX 4000 series GPUs may need `NCCL_P2P_DISABLE="1" NCCL_IB_DISABLE="1"` environment variables
-- For multi-node training guidance, see the [Stanford DeepSpeed tutorial](https://nlp.stanford.edu/mistral/tutorials/deepspeed.html) and how to setup [passwordless SSH](https://wiki.debian.org/Setup%20SSH%20Passwordless%20Login) between nodes
+- RTX 4000 series GPUs may need `NCCL_P2P_DISABLE="1" NCCL_IB_DISABLE="1"` environment variables setting
+- For multi-node training guidance, see the [Stanford DeepSpeed tutorial](https://nlp.stanford.edu/mistral/tutorials/deepspeed.html) and how to setup [passwordless SSH](https://wiki.debian.org/Setup%20SSH%20Passwordless%20Login)
 
 ### Monitoring Training
 
@@ -492,7 +502,7 @@ Then open `http://localhost:6006` in your browser.
 
 Traditional weight decay applied directly to LoRA parameters (`lora_A` and `lora_B`) has significant limitations that this implementation addresses through **decoupled weight decay on the composite matrix**.
 
-### The Problem with standard (decoupled) weight decay
+### The Problem with standard weight decay
 
 1. **Catastrophic Cancellation**: Standard optimizer weight decay fails with `float16`/`bfloat16` precision because the tiny decay amounts cancel out to zero when applied to the relatively large parameter tensors!
 
@@ -511,7 +521,7 @@ L' = L + λ · ½||W||²_F
 ∂L'/∂B = λ · scale · W A^T
 ```
 
-- Use `Adam` (**NOT** `AdamW`) for the primary loss `L`
+- Use `Adam` (**NOT** `AdamW`) with the primary loss `L`
 - Use SGD (without momentum) for the regularization term using the same learning rate (ie: decoupled, pseudo-`AdamW`)
 - Always use `float32` precision for `A` and `B` matrices to avoid catastrophic cancellation
 - Use the `lora_weight_decay` parameter in your `config.toml` file to control the regularization strength
