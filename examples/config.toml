@@ -24,7 +24,7 @@ load_in_4bit = true
 
 #lora_weight_dtype = bfloat16  # (default: float32)
 lora_rank = 64
-lora_alpha = 64                # (default: 1/sqrt(rank) [ie: use the "Rank-Stabilized" RSLoRA scale factor])
+lora_alpha = 64                # (default: sqrt(lora_rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
 lora_dropout = 0.05            # (default: 0.0)
 lora_weight_decay = 10.0       # (default: 0.0 [for numerical reasons, allowed only if lora_weight_dtype=float32])
 

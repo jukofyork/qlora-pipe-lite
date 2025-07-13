@@ -71,6 +71,50 @@ The inverse transformation uses a [Neumann series approximation](https://en.wiki
 
 Neutral examples receive no transformation (`h' = h`) but contribute an auxiliary regularization loss that encourages the adapter to have minimal effect on these samples. This helps isolate the specific behavioral axis being modified and provides additional regularization beyond standard L2-regularization and/or decoupled weight decay.
 
+### Convergence Requirements and the need for Weight Decay
+
+As mentioned above, Control Adapters rely on the [Neumann series approximation](https://en.wikipedia.org/wiki/Neumann_series) for computing matrix inverses during negative example training. For mathematical stability and convergence, the composite matrix `W = scale * B @ A` must satisfy specific norm constraints.
+
+#### Convergence Condition
+
+The Neumann series `(I + W)^{-1} = I - W + W^2 - W^3 + ...` converges when the [spectral radius](https://en.wikipedia.org/wiki/Spectral_radius) `ρ(W) < 1`. A sufficient condition is that the [spectral norm](https://en.wikipedia.org/wiki/Matrix_norm#Spectral_norm) `‖W‖₂ < 1`.
+
+For rank-`r` matrices, the relationship between norms is:
+
+```
+‖W‖₂ ≤ ‖W‖_F ≤ √r · ‖W‖₂
+```
+
+Where `‖W‖_F` is the [Frobenius norm](https://en.wikipedia.org/wiki/Frobenius_norm) (cheaper to compute than the spectral norm).
+
+#### Scalar Intuition
+
+To understand why norm constraints matter, consider the simple scalar case: computing `1/(1 + δ)` using the series `1 - δ + δ² - δ³ + ...`. When `δ = 0.1`, the true value is `1/1.1 ≈ 0.9091`. The first-order approximation `1 - δ = 0.9000` has \~1% error, while the second-order `1 - δ + δ² = 0.9100` has \~0.1% error. However, if `δ = 2`, the series diverges completely since `|δ| ≥ 1`. The same principle applies to matrices: keeping `‖W‖₂ < 1` ensures the matrix inverse series converges, and smaller norms give better approximations with fewer terms.
+
+#### Practical Guidelines
+
+To ensure convergence with acceptable approximation error:
+
+- **Target**: Keep `‖W‖_F ≲ 0.25√r` (approximately 0.2-0.3 times `√rank`)
+- **Result**: This guarantees `‖W‖₂ ≲ 0.2-0.3`, giving truncation errors ≤ 1-2%
+- **Monitoring**: The training logs show `train/norm_avg` and `train/norm_max` values for `‖W‖_F`
+
+#### Why Weight Decay is Essential
+
+Unlike traditional LoRA where weight decay is optional, Control Adapters **require** proper regularization to maintain norm constraints:
+
+1. **Prevents divergence**: Without regularization, norms can grow beyond convergence limits
+2. **Uniform scaling**: Decoupled weight decay on the composite matrix `W` properly scales all singular values, unlike naive decay on `A` and `B` separately
+3. **Stability**: Maintains the mathematical guarantees needed for reliable inverse approximations
+
+**Recommendation**: Always use `lora_weight_dtype = "float32"` with `lora_weight_decay > 0` for Control Adapters. The `bfloat16` option should only be used when memory constraints are severe, as it disables the essential weight decay regularization.
+
+For typical setups:
+- **Rank 16**: Target `‖W‖_F < 1.0`, and use `lora_weight_decay` of `100-500`
+- **Rank 64**: Target `‖W‖_F < 4.0`, and use `lora_weight_decay` of `500` or more
+
+Monitor the `train/norm_max` values in TensorBoard to ensure they stay well below these thresholds throughout training.
+
 ### Conversion and Compatibility
 
 Control Adapters can be converted to standard [PEFT](https://github.com/huggingface/peft) compatible LoRAs easily:
@@ -119,10 +163,13 @@ Trains low-rank adapter matrices on top of frozen base model weights:
 
 ```toml
 lora_rank = 64
-lora_alpha = 64                # Default: 1/sqrt(rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
+lora_alpha = 64                # Default: sqrt(rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
 lora_dropout = 0.05            # Default: 0.0
 lora_weight_decay = 10.0       # Default: 0.0, requires float32 adapters
+lora_weight_dtype = "float32"  # Default: "float32", use "bfloat16" to save memory (disables weight decay)
 ```
+
+**NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to `float32` (default), it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A note on LoRA weight decay](#a-note-on-lora-weight-decay) below). For Control Adapters, `float32` and weight decay are essential for mathematical stability - see [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for details.
 
 #### QLoRA (Quantized LoRA)
 
@@ -138,7 +185,7 @@ Contrastive training using LoRA-like (multiplicative) transformations on decoder
 
 ```toml
 use_control_adapters = true
-control_class0_lambda = 0.0    # Default: 0.0, auxiliary loss weight for neutral examples
+control_class0_lambda = 0.0    # Auxiliary loss weight for neutral examples (default: 0.0)
 ```
 
 Control Adapters support **class-aware training** with positive, negative, and (optional) neutral examples:
@@ -186,9 +233,12 @@ eps = 1e-6                     # Default: 1e-6
 
 ```toml
 sequence_len = 32768
-gradient_accumulation_steps = 32    # Controls effective batch size
-pipeline_stages = 1                 # Must evenly divide world_size
+gradient_accumulation_steps = 32      # Controls effective batch size
+eval_gradient_accumulation_steps = 1  # Default: same as gradient_accumulation_steps
+pipeline_stages = 1                   # Must evenly divide world_size
 ```
+
+**NOTE**: Reducing `eval_gradient_accumulation_steps` can help drop fewer examples when creating equal-sized evaluation batches.
 
 #### Dataset Configuration
 
@@ -205,6 +255,8 @@ dataset_path = 'structured_data/*.json'
 ```
 
 **Supported formats**: `.txt` (raw text), `.json`, `.jsonl`, `.parquet` (structured with "text" field)
+
+**NOTE**: For multi-node training, ensure paths use the same mount point across all nodes. Using shared dataset paths also enables cache reuse, where secondary nodes can load preprocessed data created by the main node instead of reprocessing datasets independently.
 
 ### Parallelism and Scaling
 
@@ -303,7 +355,7 @@ python train.py --config config.toml --num_gpus 8 --master_addr node0.example.co
 
 ### Monitoring Training
 
-You can use [TensorBoard](tensorboard) to visualize training and evaluation metrics:
+You can use [TensorBoard](https://www.tensorflow.org/tensorboard) to visualize training and evaluation metrics:
 
 ```bash
 tensorboard --host 0.0.0.0 --logdir="/path/to/output_dir"
