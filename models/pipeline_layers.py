@@ -24,12 +24,12 @@ class PrepareInputsPipe(nn.Module):
         super().__init__()
 
     def forward(self, inputs):
-        input_ids, attention_mask, labels, control_class = inputs
+        input_ids, attention_mask, control_class, labels = inputs
         batch_size, seq_length = input_ids.shape[:2]
         device = input_ids.device
         position_ids = torch.arange(0, seq_length, dtype=torch.long, device=device)
         position_ids = position_ids.unsqueeze(0)
-        return input_ids, attention_mask, position_ids, labels, control_class
+        return input_ids, attention_mask, position_ids, control_class, labels
 
 class EmbeddingPipe(nn.Module):
 
@@ -51,7 +51,7 @@ class EmbeddingPipe(nn.Module):
         return self._model[0]
 
     def forward(self, inputs):
-        input_ids, attention_mask, position_ids, labels, control_class = inputs
+        input_ids, attention_mask, position_ids, control_class, labels = inputs
         # For tied weights case: only input_ids move CPU<->GPU, not the large embedding weights
         if self.orig.weight.device.type == 'cpu':
             original_device = input_ids.device
@@ -93,7 +93,7 @@ class EmbeddingPipe(nn.Module):
             if torch.is_floating_point(tensor):
                 tensor.requires_grad_(True)
 
-        return hidden_states, attention_mask, cos, sin, labels, control_class
+        return hidden_states, attention_mask, cos, sin, control_class, labels
 
 class LlamaDecoderLayerPipe(nn.Module):
 
@@ -104,10 +104,10 @@ class LlamaDecoderLayerPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, attention_mask, cos, sin, labels, control_class, *aux_losses = inputs
+        hidden_states, attention_mask, cos, sin, control_class, labels = inputs
         result = (
             self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0],
-            attention_mask, cos, sin, labels, control_class, *aux_losses
+            attention_mask, cos, sin, control_class, labels
         )
         return result
 
@@ -119,8 +119,8 @@ class LlamaRMSNormPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, _, _, _, labels, _, *aux_losses = inputs
-        return self.orig(hidden_states), labels, *aux_losses
+        hidden_states, _, _, _, _, labels = inputs
+        return self.orig(hidden_states), labels
 
 class LmHeadPipe(nn.Module):
 
@@ -137,7 +137,7 @@ class LmHeadPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, labels, *aux_losses = inputs
+        hidden_states, labels = inputs
         if self.logit_scale is not None:
             hidden_states = hidden_states * self.logit_scale
         # For tied weights case: uses separate GPU copy of embedding weights
@@ -146,16 +146,15 @@ class LmHeadPipe(nn.Module):
             logits = logits / self.final_logit_softcapping
             logits = torch.tanh(logits)
             logits = logits * self.final_logit_softcapping
-        return logits, labels, *aux_losses
+        return logits, labels
 
 class ComputeMetrics(nn.Module):
 
-    def __init__(self, control_class0_lambda=0.0):
+    def __init__(self):
         super().__init__()
-        self.control_class0_lambda = control_class0_lambda
 
     def forward(self, inputs):
-        logits, labels, *aux_losses = inputs
+        logits, labels = inputs
         batch_size, seq_len, vocab_size = logits.shape
 
         # Shift labels for causal LM: [labels[1:], -100_padding]
@@ -176,10 +175,4 @@ class ComputeMetrics(nn.Module):
             shift_labels,  # (batch_size, seq_len)
         )
 
-        # Add the auxiliary loss for the "neutral" control class 0 samples (if any)
-        if self.control_class0_lambda > 0.0 and aux_losses:
-            aux_loss = self.control_class0_lambda * torch.stack(aux_losses, dim=0).mean()  # λ-scaled mean across layers
-            combined_loss = ce_loss + aux_loss
-            return (combined_loss, top1_accuracy, aux_loss.detach())
-        else:
-            return (ce_loss, top1_accuracy)
+        return (ce_loss, top1_accuracy)

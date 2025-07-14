@@ -185,7 +185,6 @@ Control Adapters are a new form of PEFT adapter that simultaneously applies mult
 - **Multiplicative**: Uses `h' = (I + scale * B @ A) @ h` transformations instead of additive `h' = h + (scale * B @ A) @ h` transformations like normal LoRA adapters
 - **Layer-wide**: Affects the entire residual stream rather than individual weight matrices
 - **Class-aware**: Supports positive (ie: `class 1`) and negative (ie: `class -1`, aka "unlearning") training examples, with negative examples using inverse transformations of the same adapter `h' = (I + scale * B @ A)^{-1} @ h` to suppress rather than enhance behaviors
-- **Optional neutral examples**: Can include neutral (ie: `class 0`) examples to prevent unwanted forgetting and provide additional regularization by isolating the specific behavioral "axis" being modified
 
 ### Relationship to Control Vectors
 
@@ -235,10 +234,6 @@ h' = (I + W)^{-1} @ h ≈ (I - W + higher_order_terms) @ h
 ```
 
 The inverse transformation uses a [Neumann series approximation](https://en.wikipedia.org/wiki/Neumann_series), allowing the same adapter parameters to both enhance desired behaviors (positive) and suppress undesired behaviors (negative) during training.
-
-#### For (optional) neutral examples (`class 0`):
-
-Neutral examples receive no transformation (`h' = h`) but contribute an auxiliary regularization loss that encourages the adapter to have minimal effect on these samples. This helps isolate the specific behavioral axis being modified and provides additional regularization beyond (decoupled) weight decay.
 
 ### Convergence Requirements and the need for Weight Decay
 
@@ -360,10 +355,9 @@ Contrastive training using LoRA-like (multiplicative) transformations on decoder
 
 ```toml
 use_control_adapters = true
-control_class0_lambda = 0.0    # Auxiliary loss weight for neutral examples (default: 0.0)
 ```
 
-Control Adapters support **class-aware training** with positive, negative, and (optional) neutral examples:
+Control Adapters support **class-aware training** with positive and negative examples:
 
 ```toml
 [[datasets]]
@@ -373,10 +367,6 @@ control_class = 1   # Enhance behaviors (default)
 [[datasets]]
 dataset_path = '/path/to/negative_examples/*.json'
 control_class = -1  # Suppress/unlearn behaviors
-
-[[datasets]]
-dataset_path = '/path/to/neutral_examples/*.json'
-control_class = 0   # Behavior we wish to preserve
 ```
 
 ### Configuration Structure

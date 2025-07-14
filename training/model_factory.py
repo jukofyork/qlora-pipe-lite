@@ -67,9 +67,7 @@ def patch_decoder_layer_control_adapter(module):
     #   all singular values of the BA composite, unlike naive weight decay on A and B separately.
 
     def control_adapter_forward(inputs):
-        hidden_states, attention_mask, cos, sin, labels, control_class, *input_aux_losses = inputs
-
-        assert torch.any(control_class != 0), "Micro-batch contains only class-0 tokens; CE loss cannot be computed."
+        hidden_states, attention_mask, cos, sin, control_class, labels = inputs
 
         # Save input for residual computation
         input_hidden_states = hidden_states
@@ -82,31 +80,6 @@ def patch_decoder_layer_control_adapter(module):
 
         # Apply Control Adapter: dropout -> A -> B -> scaling
         adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
-
-        aux_losses = list(input_aux_losses)
-
-        # Compute auxiliary loss for any with control_class == 0
-        if torch.any(control_class == 0):
-            zero_mask = (control_class == 0).unsqueeze(-1).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
-
-            # aux_loss  = (1 / N₀) Σ_{class-0 tokens} (‖Δo‖² / (‖Δh‖² + ε))
-            #              ^ per-token average over *only* the class-0 examples
-            #
-            # NOTE: We regularise the **actual residual offset** that would be injected, i.e.:
-            #       (scale · B @ A @ Δh) instead of the weights themselves.
-            #       – scale-invariant:     rescaling A ↔ B leaves BA·Δh and the loss unchanged.
-            #       – input-aware:         only penalises when the adapter would move Δh.
-            #       – much cheaper/easier: no need for (semi-)orthogonality init or regularisation, etc.
-            output_norm = adapter_output.norm(dim=-1, keepdim=True).pow(2)  # ‖Δo‖²
-            delta_norm = layer_delta.norm(dim=-1, keepdim=True).pow(2).clamp_min(1e-6)  # ‖Δh‖²
-            relative_token_energy = output_norm / delta_norm  # (batch, seq_len, 1)
-
-            # Average *only* over the class-0 tokens
-            aux_loss = relative_token_energy[zero_mask].mean()  # per-layer, per-token average
-            aux_losses.append(aux_loss)
-
-            # Remove any adapter effect on class-0 tokens before downstream use
-            adapter_output = torch.where(zero_mask, 0.0, adapter_output)
 
         # For positive samples: Add adapter_output as normal
         # For negative samples: Apply kth-order Neumann series approximation of (I + A)^{-1}
@@ -131,7 +104,7 @@ def patch_decoder_layer_control_adapter(module):
         # Cast adapter contribution back to original dtype and add to the residual stream
         result = layer_output + adapter_output.to(torch_result_dtype)
 
-        return (result, attention_mask, cos, sin, labels, control_class, *aux_losses)
+        return (result, attention_mask, cos, sin, control_class, labels)
 
     return control_adapter_forward
 
