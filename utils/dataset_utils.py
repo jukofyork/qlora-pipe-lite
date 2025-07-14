@@ -76,10 +76,6 @@ def slice_into_sequences(
                 attention_mask = torch.ones(sequence_len, dtype=torch.int8)
                 labels = input_ids.clone()
 
-                # The class-0 samples must not contribute to the CE loss
-                if control_class == 0:
-                    labels[:] = -100
-
                 # Mask out BOS tokens in labels (if they exist)
                 if tokenizer.bos_token_id is not None:
                     labels[labels == tokenizer.bos_token_id] = -100
@@ -97,8 +93,8 @@ def slice_into_sequences(
                 all_sequences.append({
                     'input_ids': input_ids,
                     'attention_mask': attention_mask,
-                    'labels': labels,
-                    'control_class': control_class
+                    'control_class': control_class,
+                    'labels': labels
                 })
 
                 sequence_count += 1
@@ -114,8 +110,8 @@ def slice_into_sequences(
     result_dataset = datasets.Dataset.from_dict({
         'input_ids': [seq['input_ids'] for seq in all_sequences],
         'attention_mask': [seq['attention_mask'] for seq in all_sequences],
-        'labels': [seq['labels'] for seq in all_sequences],
-        'control_class': [seq['control_class'] for seq in all_sequences]
+        'control_class': [seq['control_class'] for seq in all_sequences],
+        'labels': [seq['labels'] for seq in all_sequences]
     })
     result_dataset.set_format(type='torch')
 
@@ -198,7 +194,7 @@ def load_datasets(config, tokenizer):
             max_sequences = dataset_config.get('max_sequences', sys.maxsize)
             assert max_sequences > 0, f"max_sequences must be positive, got {max_sequences}"
             control_class = dataset_config.get('control_class', 1)
-            assert control_class in [-1, 0, 1], f"control_class must be -1, 0, or 1, got {control_class}"
+            assert control_class in [-1, 1], f"control_class must be -1 or 1, got {control_class}"
             drop_tails = dataset_config.get('drop_tails', False)
             dataset = load_single_dataset(
                 dataset_config['dataset_path'],
