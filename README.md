@@ -194,25 +194,6 @@ Control Adapters are conceptually similar to [Control Vectors](https://github.co
 
 - **Control Adapters**: Learn steering transformations through gradient-based training, making them more forgiving and suitable for "fuzzy" criteria like writing style rather than requiring carefully selected behavioral "axes". They can be thought of as having two components: the `A` vectors act as "signed direction detectors" (via dot product), whilst the `B` vectors provide the steering effect. Due to the very high dimensionality of the hidden states, multiple Control Adapters are less likely to interfere when combined.
 
-#### Mathematical Relationship
-
-Control Adapters can represent several classical transformations, including:
-
-- [Orthogonal projection onto the null space](https://en.wikipedia.org/wiki/Projection_(linear_algebra)) (aka: 
-["Abliteration"](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction)):
-
-```
-I - u u^T, when B = -A
-```
-
-- [Householder transformations](https://en.wikipedia.org/wiki/Householder_transformation):
-
-```
-I - 2 * u u^T, when B = -2A
-```
-
-When combined with Control Vectors, they enable full [affine transformations](https://en.wikipedia.org/wiki/Affine_transformation) of the decoder layer outputs.
-
 ### Mathematical Foundation
 
 Control Adapters apply multiplicative transformations to the residual stream using a (scaled) rank-decomposed matrix:
@@ -234,6 +215,25 @@ h' = (I + W)^{-1} @ h ≈ (I - W + higher_order_terms) @ h
 ```
 
 The inverse transformation uses a [Neumann series approximation](https://en.wikipedia.org/wiki/Neumann_series), allowing the same adapter parameters to both enhance desired behaviors (positive) and suppress undesired behaviors (negative) during training.
+
+#### Classical Transformations as Special Cases
+
+Control Adapters can represent several classical transformations, including:
+
+- [Orthogonal projection onto the null space](https://en.wikipedia.org/wiki/Projection_(linear_algebra)) (aka: 
+["Abliteration"](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction)):
+
+```
+I - u u^T, when B = -A
+```
+
+- [Householder transformations](https://en.wikipedia.org/wiki/Householder_transformation):
+
+```
+I - 2 * u u^T, when B = -2A
+```
+
+When combined with Control Vectors, they enable full [affine transformations](https://en.wikipedia.org/wiki/Affine_transformation) of the decoder layer outputs.
 
 ### Convergence Requirements and the need for Weight Decay
 
@@ -407,16 +407,22 @@ pipeline_stages = 1                   # Must evenly divide world_size
 
 #### Dataset Configuration
 
-Multiple datasets with optional limits and class labels:
+Multiple datasets with optional limits, class labels, and custom separators:
 
 ```toml
 [[datasets]]
 dataset_path = 'raw_text_data/*.txt'
-max_sequences = 10000          # Optional limit
-drop_tails = false             # Drop partial sequences at document ends
+max_sequences = 10000                 # Optional limit
+separator = "<|endoftext|>"           # Custom separator added to text before tokenizing
+drop_tails = true                     # Drop partial sequences at document ends
 
 [[datasets]]
 dataset_path = 'structured_data/*.json'
+separator = ""                        # Empty separator: no additional tokens added
+
+[[datasets]]
+dataset_path = 'more_data/*.json'
+# separator not specified = default behavior (tokenize first, then add tokenizer's EOS token if missing)
 ```
 
 **Supported formats**: `.txt` (raw text), `.json`, `.jsonl`, `.parquet` (structured with "text" field)

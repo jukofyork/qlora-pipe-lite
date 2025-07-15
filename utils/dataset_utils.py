@@ -10,13 +10,22 @@ import torch
 from constants import DATASET_MAP_BATCH_SIZE, DEFAULT_EVAL_FRACTION
 from utils.utils import main_process_first, log, log_all
 
-def tokenize_and_add_eos(batch, tokenizer):
-    result = tokenizer(batch['text'])
-    # Add EOS token to the end of each text field if missing
-    for i, tokens in enumerate(result['input_ids']):
-        if tokens[-1] != tokenizer.eos_token_id:
-            result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
-    return result
+def tokenize_and_add_separator(batch, tokenizer, separator=None):
+    if separator is None:
+        # Default behavior: tokenize first, then add EOS token
+        result = tokenizer(batch['text'])
+        # Add EOS token to the end of each text field if missing
+        for i, tokens in enumerate(result['input_ids']):
+            if tokens[-1] != tokenizer.eos_token_id:
+                result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
+        return result
+    elif separator == "":
+        # Empty separator: just tokenize without adding anything
+        return tokenizer(batch['text'])
+    else:
+        # Custom separator: add to text before tokenizing
+        modified_texts = [text + separator for text in batch['text']]
+        return tokenizer(modified_texts)
 
 def slice_into_sequences(
         dataset,
@@ -25,13 +34,14 @@ def slice_into_sequences(
         cache_dir,
         control_class=1,
         max_sequences=sys.maxsize,
+        separator=None,
         drop_tails=False
 ):
     # Use the dataset's built-in fingerprint - it's already computed and deterministic
     cache_key = (
         f"{dataset._fingerprint}_{sequence_len}_"
         f"{tokenizer.bos_token_id}_{tokenizer.eos_token_id}_{tokenizer.pad_token_id}_"
-        f"{control_class}_{max_sequences}_{drop_tails}"
+        f"{control_class}_{max_sequences}_{separator}_{drop_tails}"
     )
     cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
 
@@ -127,6 +137,7 @@ def load_single_dataset(
         sequence_len,
         control_class=1,
         max_sequences=sys.maxsize,
+        separator=None,
         drop_tails=False
 ):
     base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
@@ -158,7 +169,7 @@ def load_single_dataset(
         raise NotImplementedError()
 
     dataset = dataset.map(
-        lambda x: tokenize_and_add_eos(x, tokenizer),
+        lambda x: tokenize_and_add_separator(x, tokenizer, separator),
         batched=True,
         batch_size=DATASET_MAP_BATCH_SIZE,
         remove_columns=dataset.column_names,
@@ -171,7 +182,16 @@ def load_single_dataset(
     # Set torch format after tokenization when only token data remains
     dataset.set_format(type='torch')
 
-    return slice_into_sequences(dataset, tokenizer, sequence_len, cache_dir, control_class, max_sequences, drop_tails)
+    return slice_into_sequences(
+        dataset,
+        tokenizer,
+        sequence_len,
+        cache_dir,
+        control_class,
+        max_sequences,
+        separator,
+        drop_tails
+    )
 
 def load_datasets(config, tokenizer):
     if 'sequence_len' not in config:
@@ -195,6 +215,7 @@ def load_datasets(config, tokenizer):
             assert max_sequences > 0, f"max_sequences must be positive, got {max_sequences}"
             control_class = dataset_config.get('control_class', 1)
             assert control_class in [-1, 1], f"control_class must be -1 or 1, got {control_class}"
+            separator = dataset_config.get('separator', None)  # None --> tokenize first, then add EOS token
             drop_tails = dataset_config.get('drop_tails', False)
             dataset = load_single_dataset(
                 dataset_config['dataset_path'],
@@ -202,6 +223,7 @@ def load_datasets(config, tokenizer):
                 sequence_len,
                 control_class,
                 max_sequences,
+                separator,
                 drop_tails
             )
             datasets_list.append(dataset)
