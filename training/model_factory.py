@@ -156,7 +156,7 @@ def get_lr_scheduler(optimizer, config):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=rms_ratio_fn)
 
 # Model creation functions
-def create_model(config, model_type):
+def create_model(config, model_type, trust_remote_code=False):
     """Create the base transformer model with appropriate quantization."""
     if config.get('full_fine_tune', False) or not config.get('load_in_4bit', False):
         quantization_config = None
@@ -172,21 +172,53 @@ def create_model(config, model_type):
         )
 
     if model_type == 'llama':
-        model = causal_lm_models.LlamaForCausalLMPipe(config, quantization_config=quantization_config)
+        model = causal_lm_models.LlamaForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     elif model_type == 'mistral' or model_type == 'mistral3':
-        model = causal_lm_models.MistralForCausalLMPipe(config, quantization_config=quantization_config)
+        model = causal_lm_models.MistralForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     elif model_type == 'mixtral':
-        model = causal_lm_models.MixtralForCausalLMPipe(config, quantization_config=quantization_config)
+        model = causal_lm_models.MixtralForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     elif model_type == 'qwen2':
-        model = causal_lm_models.Qwen2ForCausalLMPipe(config, quantization_config=quantization_config)
+        model = causal_lm_models.Qwen2ForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     elif model_type == 'phi3':
-        model = causal_lm_models.Phi3ForCausalLMPipe(config, quantization_config=quantization_config)
+        model = causal_lm_models.Phi3ForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     elif model_type == 'cohere':
-        model = causal_lm_models.CohereForCausalLMPipe(config, quantization_config=quantization_config)
+        model = causal_lm_models.CohereForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     elif model_type == 'cohere2':
-        model = causal_lm_models.Cohere2ForCausalLMPipe(config, quantization_config=quantization_config)
+        model = causal_lm_models.Cohere2ForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     elif model_type == 'gemma2':
-        model = causal_lm_models.Gemma2ForCausalLMPipe(config, quantization_config=quantization_config)
+        model = causal_lm_models.Gemma2ForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     else:
         raise NotImplementedError()
 
@@ -340,7 +372,7 @@ def setup_model_and_engine(config, args):
 
     # Create model and pipeline
     model_type = get_model_type(config)
-    model = create_model(config, model_type)
+    model = create_model(config, model_type, trust_remote_code=args.trust_remote_code)
     pipeline_model = create_pipeline_model(model, config)
 
     # Setup training adapters

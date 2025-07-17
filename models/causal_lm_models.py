@@ -23,13 +23,13 @@ class BaseCausalLMPipe(PipelineModel):
     CONFIG_CLASS = None  # To be overridden by subclasses
     TRANSFORMERS_CLASS = None  # To be overridden by subclasses
 
-    def __init__(self, config, quantization_config):
+    def __init__(self, config, quantization_config, trust_remote_code=False):
         if self.CONFIG_CLASS is None or self.TRANSFORMERS_CLASS is None:
             raise NotImplementedError("Subclasses must define CONFIG_CLASS and TRANSFORMERS_CLASS")
 
         self.training_config = config
 
-        model_config = self.CONFIG_CLASS.from_pretrained(config['model_dir'])
+        model_config = self.CONFIG_CLASS.from_pretrained(config['model_dir'], trust_remote_code=trust_remote_code)
         model_config._attn_implementation = self._get_attention_implementation()
 
         torch.set_default_dtype(torch.bfloat16)  # Always use bfloat16 for full fine-tuning regardless
