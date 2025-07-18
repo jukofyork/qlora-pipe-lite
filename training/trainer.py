@@ -275,6 +275,10 @@ class Trainer:
         """Write all metrics to tensorboard."""
         self.tb_writer.add_scalar(f'{prefix}/loss', metrics[0].mean().item(), step)
         self.tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[1].mean().item(), step)
+        if (len(metrics) > 2):
+            self.tb_writer.add_scalar(f'{prefix}/loss_ce_pos', metrics[2].mean().item(), step)
+            self.tb_writer.add_scalar(f'{prefix}/loss_ce_neg', metrics[3].mean().item(), step)
+            self.tb_writer.add_scalar(f'{prefix}/loss_symmetry_penalty', metrics[4].mean().item(), step)
 
     def _print_eval_progress(self, step, current_loss, last_loss=None):
         """Print evaluation progress with optional percentage change."""
