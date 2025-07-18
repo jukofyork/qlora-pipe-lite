@@ -176,6 +176,17 @@ class ComputeMetrics(nn.Module):
             assert mask_all.any(), "All labels are masked (-100), so no valid targets for top1_accuracy calculation"
             top1_accuracy = (torch.argmax(logits, -1) == shift_labels).masked_select(mask_all).float().mean()
 
+        # Check if a penalty should be applied (autograd-safe Python bool)
+        apply_penalty = (self.symmetry_lambda != 0.0)
+
+        # Default case: calculate the mean CE loss of the non-masked tokens
+        if not apply_penalty:
+            ce_loss = fast_cross_entropy_loss(
+                logits,  # (batch_size, seq_len, vocab_size)
+                shift_labels,  # (batch_size, seq_len)
+                )
+            return (ce_loss, top1_accuracy)
+
         # Split the batch into +1 / −1 classes
         # control_class has shape (batch,) -> expand to (batch, seq_len)
         mask_pos = (control_class == 1).unsqueeze(1).expand(-1, seq_len)
@@ -189,21 +200,15 @@ class ComputeMetrics(nn.Module):
                 return logits.new_zeros(())  # scalar 0.0, no grad
             return fast_cross_entropy_loss(logits, masked_labels)  # mean over class tokens
 
+        # Calculate the CE of each class separately
         ce_pos = class_ce(mask_pos)
         ce_neg = class_ce(mask_neg)
 
-        ce_loss_sum = ce_pos + ce_neg
+        # Symmetry penalty: λ · (Δ / S)²
+        # NOTE: We use the unweighted sum and difference here to gives every class equal weight.
+        # NOTE: Any degenerate batch that contains tokens from only one control class, still has the penalty applied...
+        symmetry_penalty = self.symmetry_lambda * ((ce_pos - ce_neg) / ((ce_pos + ce_neg) + self.eps)) ** 2
 
-        # Check if penalty should be applied (autograd-safe Python bools with short-circuit)
-        apply_penalty = (self.symmetry_lambda != 0.0) and \
-                        bool(torch.count_nonzero(mask_pos & (shift_labels != -100))) and \
-                        bool(torch.count_nonzero(mask_neg & (shift_labels != -100)))
-
-        if apply_penalty:
-            # Symmetry penalty: λ · (Δ / S)²
-            ce_loss_difference = ce_pos - ce_neg
-            symmetry_penalty = self.symmetry_lambda * (ce_loss_difference / (ce_loss_sum + self.eps)) ** 2
-            penalised_loss = ce_pos + ce_neg + symmetry_penalty
-            return (penalised_loss, top1_accuracy, ce_pos.detach(), ce_neg.detach(), symmetry_penalty.detach())
-        else:
-            return (ce_loss_sum, top1_accuracy)
+        # Return the penalised loss and the extra metrics for tensorboard
+        penalised_loss = ce_pos + ce_neg + symmetry_penalty
+        return (penalised_loss, top1_accuracy, ce_pos.detach(), ce_neg.detach(), symmetry_penalty.detach())
