@@ -69,7 +69,7 @@ class BaseCausalLMPipe(PipelineModel):
             **self._get_lm_head_kwargs()
         ))
 
-        result.append(LayerSpec(ComputeMetrics))
+        result.append(LayerSpec(ComputeMetrics, self.training_config.get('symmetry_lambda', 0.0)))
 
         return result
 

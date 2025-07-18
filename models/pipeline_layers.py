@@ -119,8 +119,8 @@ class LlamaRMSNormPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, _, _, _, _, labels = inputs
-        return self.orig(hidden_states), labels
+        hidden_states, _, _, _, control_class, labels = inputs
+        return self.orig(hidden_states), control_class, labels
 
 class LmHeadPipe(nn.Module):
 
@@ -137,7 +137,7 @@ class LmHeadPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, labels = inputs
+        hidden_states, control_class, labels = inputs
         if self.logit_scale is not None:
             hidden_states = hidden_states * self.logit_scale
         # For tied weights case: uses separate GPU copy of embedding weights
@@ -146,16 +146,23 @@ class LmHeadPipe(nn.Module):
             logits = logits / self.final_logit_softcapping
             logits = torch.tanh(logits)
             logits = logits * self.final_logit_softcapping
-        return logits, labels
+        return logits, control_class, labels
 
 class ComputeMetrics(nn.Module):
 
-    def __init__(self):
+    def __init__(self, symmetry_lambda: float=0.0, eps: float=1e-8):
+        """
+        symmetry_lambda – λ in CE₊ + CE₋ + λ (Δ/S)²
+                          set 0.0 to disable (ordinary training)
+        eps             – numerical guard for division by zero
+        """
         super().__init__()
+        self.symmetry_lambda = symmetry_lambda
+        self.eps = eps
 
     def forward(self, inputs):
-        logits, labels = inputs
-        batch_size, seq_len, vocab_size = logits.shape
+        logits, control_class, labels = inputs
+        batch_size, seq_len, _ = logits.shape
 
         # Shift labels for causal LM: [labels[1:], -100_padding]
         shift_labels = torch.cat([
@@ -165,14 +172,38 @@ class ComputeMetrics(nn.Module):
 
         # Calculate the mean top1 accuracy for the batch.
         with torch.no_grad():
-            mask = shift_labels != -100
-            assert mask.any(), "All labels are masked (-100), so no valid targets for top1_accuracy calculation"
-            top1_accuracy = (torch.argmax(logits, -1) == shift_labels).masked_select(mask).float().mean()
+            mask_all = shift_labels != -100
+            assert mask_all.any(), "All labels are masked (-100), so no valid targets for top1_accuracy calculation"
+            top1_accuracy = (torch.argmax(logits, -1) == shift_labels).masked_select(mask_all).float().mean()
 
-        # Calculate the mean CE loss of the non-masked tokens
-        ce_loss = fast_cross_entropy_loss(
-            logits,  # (batch_size, seq_len, vocab_size)
-            shift_labels,  # (batch_size, seq_len)
-        )
+        # Split the batch into +1 / −1 classes
+        # control_class has shape (batch,) -> expand to (batch, seq_len)
+        mask_pos = (control_class == 1).unsqueeze(1).expand(-1, seq_len)
+        mask_neg = (control_class == -1).unsqueeze(1).expand(-1, seq_len)
 
-        return (ce_loss, top1_accuracy)
+        def class_ce(mask):
+            # Clone & mask labels; skip call if class absent (avoids Triton assert)
+            lab = shift_labels.clone()
+            lab[~mask] = -100
+            if torch.count_nonzero(lab != -100) == 0:
+                return logits.new_zeros(())  # scalar 0.0, no grad
+            return fast_cross_entropy_loss(logits, lab)  # mean over class tokens
+
+        ce_pos = class_ce(mask_pos)
+        ce_neg = class_ce(mask_neg)
+
+        ce_loss_sum = ce_pos + ce_neg
+
+        # Check if penalty should be applied (autograd-safe Python bools with short-circuit)
+        apply_penalty = (self.symmetry_lambda != 0.0) and \
+                        bool(torch.count_nonzero(mask_pos & (shift_labels != -100))) and \
+                        bool(torch.count_nonzero(mask_neg & (shift_labels != -100)))
+
+        if apply_penalty:
+            # Symmetry penalty: λ · (Δ / S)²
+            ce_loss_difference = ce_pos - ce_neg
+            symmetry_penalty = self.symmetry_lambda * (ce_loss_difference / (ce_loss_sum + self.eps)) ** 2
+            penalised_loss = ce_pos + ce_neg + symmetry_penalty
+            return (penalised_loss, top1_accuracy, ce_pos.detach(), ce_neg.detach(), symmetry_penalty.detach())
+        else:
+            return (ce_loss_sum, top1_accuracy)
