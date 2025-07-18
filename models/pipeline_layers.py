@@ -183,11 +183,11 @@ class ComputeMetrics(nn.Module):
 
         def class_ce(mask):
             # Clone & mask labels; skip call if class absent (avoids Triton assert)
-            lab = shift_labels.clone()
-            lab[~mask] = -100
-            if torch.count_nonzero(lab != -100) == 0:
+            masked_labels = shift_labels.clone()
+            masked_labels[~mask] = -100
+            if torch.count_nonzero(masked_labels != -100) == 0:
                 return logits.new_zeros(())  # scalar 0.0, no grad
-            return fast_cross_entropy_loss(logits, lab)  # mean over class tokens
+            return fast_cross_entropy_loss(logits, masked_labels)  # mean over class tokens
 
         ce_pos = class_ce(mask_pos)
         ce_neg = class_ce(mask_neg)
