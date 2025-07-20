@@ -1,5 +1,6 @@
 from tqdm import tqdm
 import datasets
+import glob
 import hashlib
 import json
 import os
@@ -27,6 +28,33 @@ def tokenize_and_add_separator(batch, tokenizer, separator=None):
         modified_texts = [text + separator for text in batch['text']]
         return tokenizer(modified_texts)
 
+def create_dataset_cache_key(dataset_path, tokenizer, sequence_len, control_class, max_sequences, separator, drop_tails):
+    """Create a deterministic cache key from input parameters."""
+
+    # Get all matching files (handles both wildcards and literal paths)
+    matching_files = sorted(glob.glob(dataset_path))  # Sort for deterministic order
+    if not matching_files:
+        raise FileNotFoundError(f"No files found matching pattern: {dataset_path}")
+
+    # Get combined file info from all matching files
+    file_infos = []
+    for file_path in matching_files:
+        file_stat = os.stat(file_path)
+        file_infos.append(f"{file_path}_{file_stat.st_size}_{file_stat.st_mtime}")
+    file_info = "_".join(file_infos)
+
+    # Tokenizer info
+    tokenizer_info = f"{tokenizer.vocab_size}_{tokenizer.bos_token_id}_{tokenizer.eos_token_id}_{tokenizer.pad_token_id}"
+
+    # Processing parameters
+    params = f"{sequence_len}_{control_class}_{max_sequences}_{separator}_{drop_tails}"
+
+    # Create hash of all components
+    cache_string = f"{file_info}_{tokenizer_info}_{params}"
+    cache_hash = hashlib.md5(cache_string.encode()).hexdigest()
+
+    return cache_hash
+
 def slice_into_sequences(
         dataset,
         tokenizer,
@@ -37,21 +65,6 @@ def slice_into_sequences(
         separator=None,
         drop_tails=False
 ):
-    # Use the dataset's built-in fingerprint - it's already computed and deterministic
-    cache_key = (
-        f"{dataset._fingerprint}_{sequence_len}_"
-        f"{tokenizer.bos_token_id}_{tokenizer.eos_token_id}_{tokenizer.pad_token_id}_"
-        f"{control_class}_{max_sequences}_{separator}_{drop_tails}"
-    )
-    cache_path = os.path.join(cache_dir, f"sliced_sequences_{cache_key}")
-
-    # Load from cache if available (from previous run or just created by main process)
-    if os.path.exists(cache_path):
-        # log_all(f"Loading sliced sequences from cache: {cache_path}")
-        cached_dataset = datasets.load_from_disk(cache_path)
-        cached_dataset.set_format(type='torch')
-        return cached_dataset
-
     all_sequences = []
     sequence_count = 0
 
@@ -125,10 +138,6 @@ def slice_into_sequences(
     })
     result_dataset.set_format(type='torch')
 
-    # Save to cache
-    os.makedirs(cache_dir, exist_ok=True)
-    result_dataset.save_to_disk(cache_path)
-
     return result_dataset
 
 def load_single_dataset(
@@ -142,6 +151,19 @@ def load_single_dataset(
 ):
     base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
     cache_dir = os.path.join(base_dir, "hf_cache")
+
+    # Create cache key from input parameters and check cache first
+    cache_key = create_dataset_cache_key(
+        dataset_path, tokenizer, sequence_len, control_class, max_sequences, separator, drop_tails
+    )
+    cache_path = os.path.join(cache_dir, f"processed_dataset_{cache_key}")
+
+    # Load from cache if available
+    if os.path.exists(cache_path):
+        # log_all(f"Loading processed dataset from cache: {cache_path}")
+        cached_dataset = datasets.load_from_disk(cache_path)
+        cached_dataset.set_format(type='torch')
+        return cached_dataset
 
     if dataset_path.endswith('.txt'):
         dataset = datasets.load_dataset(
@@ -182,7 +204,7 @@ def load_single_dataset(
     # Set torch format after tokenization when only token data remains
     dataset.set_format(type='torch')
 
-    return slice_into_sequences(
+    result_dataset = slice_into_sequences(
         dataset,
         tokenizer,
         sequence_len,
@@ -193,7 +215,13 @@ def load_single_dataset(
         drop_tails
     )
 
-def load_datasets(config, tokenizer):
+    # Save to cache
+    os.makedirs(cache_dir, exist_ok=True)
+    result_dataset.save_to_disk(cache_path)
+
+    return result_dataset
+
+def load_datasets(config, tokenizer, run_dir):
     if 'sequence_len' not in config:
         raise ValueError('Need to specify a sequence_len')
     sequence_len = config['sequence_len']
@@ -207,30 +235,46 @@ def load_datasets(config, tokenizer):
     eval_fraction = config.get('eval_fraction', DEFAULT_EVAL_FRACTION)
     assert 0 < eval_fraction < 1, "eval_fraction must be between 0 and 1"
 
-    # Only main process loads/processes data and caches it, others wait then use cached result
+    data_dir = os.path.join(run_dir, "data")
+    train_subdir = os.path.join(data_dir, "train")
+    eval_subdir = os.path.join(data_dir, "eval")
+
+    # Only main process loads/processes data and saves final datasets, others wait then load
     with main_process_first():
-        datasets_list = []
-        for dataset_config in config['datasets']:
-            max_sequences = dataset_config.get('max_sequences', sys.maxsize)
-            assert max_sequences > 0, f"max_sequences must be positive, got {max_sequences}"
-            control_class = dataset_config.get('control_class', 1)
-            assert control_class in [-1, 1], f"control_class must be -1 or 1, got {control_class}"
-            separator = dataset_config.get('separator', None)  # None --> tokenize first, then add EOS token
-            drop_tails = dataset_config.get('drop_tails', False)
-            dataset = load_single_dataset(
-                dataset_config['dataset_path'],
-                tokenizer,
-                sequence_len,
-                control_class,
-                max_sequences,
-                separator,
-                drop_tails
-            )
-            datasets_list.append(dataset)
-        combined_dataset = datasets.concatenate_datasets(datasets_list)
-        split_datasets = combined_dataset.train_test_split(test_size=eval_fraction, shuffle=True, seed=42)
-        train_dataset = split_datasets['train']
-        eval_dataset = split_datasets['test']
+        # Check if final datasets already exist
+        if os.path.exists(data_dir):
+            train_dataset = datasets.load_from_disk(train_subdir)
+            eval_dataset = datasets.load_from_disk(eval_subdir)
+            train_dataset.set_format(type='torch')
+            eval_dataset.set_format(type='torch')
+        else:
+            datasets_list = []
+            for dataset_config in config['datasets']:
+                max_sequences = dataset_config.get('max_sequences', sys.maxsize)
+                assert max_sequences > 0, f"max_sequences must be positive, got {max_sequences}"
+                control_class = dataset_config.get('control_class', 1)
+                assert control_class in [-1, 1], f"control_class must be -1 or 1, got {control_class}"
+                separator = dataset_config.get('separator', None)  # None --> tokenize first, then add EOS token
+                drop_tails = dataset_config.get('drop_tails', False)
+                dataset = load_single_dataset(
+                    dataset_config['dataset_path'],
+                    tokenizer,
+                    sequence_len,
+                    control_class,
+                    max_sequences,
+                    separator,
+                    drop_tails
+                )
+                datasets_list.append(dataset)
+            combined_dataset = datasets.concatenate_datasets(datasets_list)
+            split_datasets = combined_dataset.train_test_split(test_size=eval_fraction, shuffle=True, seed=42)
+            train_dataset = split_datasets['train']
+            eval_dataset = split_datasets['test']
+
+            # Save final datasets to run directory
+            os.makedirs(data_dir, exist_ok=True)
+            train_dataset.save_to_disk(train_subdir)
+            eval_dataset.save_to_disk(eval_subdir)
 
     log(f'train data size: {len(train_dataset)} sequences ({len(train_dataset) * sequence_len} tokens)')
     log(f'eval data size: {len(eval_dataset)} sequences ({len(eval_dataset) * sequence_len} tokens)')

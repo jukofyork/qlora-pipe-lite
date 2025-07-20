@@ -79,7 +79,7 @@ if __name__ == '__main__':
     )
 
     # Load, convert and split the datasets
-    train_data, eval_data = load_datasets(config, tokenizer)
+    train_data, eval_data = load_datasets(config, tokenizer, run_dir)
 
     # Setup model and training engine
     model_engine, pipeline_model, lora_config, optimizer = setup_model_and_engine(config, args)
