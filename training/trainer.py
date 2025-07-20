@@ -49,6 +49,7 @@ class Trainer:
         self.checkpoint_interval_hours = config.get('checkpoint_interval_hours', DEFAULT_CHECKPOINT_INTERVAL_HOURS)
         self.max_checkpoints = config.get('max_checkpoints', DEFAULT_MAX_CHECKPOINTS)
         self.use_control_adapters = config.get('use_control_adapters', False)
+        self.tie_word_embeddings = config.get('tie_word_embeddings', False)
 
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
@@ -71,6 +72,9 @@ class Trainer:
             resumed_step = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
             if resumed_step is not None:
                 step = resumed_step
+        # Apply initial word embedding tying for full fine-tuning
+        elif self.tie_word_embeddings:
+            self._tie_word_embeddings(self.pipeline_model)
 
         # Initial evaluation
         last_eval_loss = self.evaluate(step - 1)
@@ -93,6 +97,9 @@ class Trainer:
                     self.config,
                     self.optimizer.param_groups[0]['lr']
                 )
+            # Apply word embedding tying for full fine-tuning
+            elif self.tie_word_embeddings:
+                self._tie_word_embeddings(self.pipeline_model)
 
             # Log training metrics
             if is_main_process():
@@ -166,6 +173,55 @@ class Trainer:
         """Clean up GPU memory before training step."""
         gc.collect()
         torch.cuda.empty_cache()
+
+    def _tie_word_embeddings(self, model):
+        """Apply word embedding tying by averaging lm_head and embed_tokens weights."""
+        # NOTE: This is a bit of a crap way of doing this, but TiedLayerSpec will be hard to integrate...
+        lm_head_param = None
+        embed_tokens_param = None
+
+        # Find embedding parameters on this pipeline stage
+        for name, param in model.named_parameters():
+            if name.endswith('lm_head.weight'):
+                lm_head_param = param
+            elif name.endswith('model.embed_tokens.weight'):
+                embed_tokens_param = param
+
+        # Determine tensor shape and dtype from local parameters
+        tensor_shape = (lm_head_param or embed_tokens_param).shape if (lm_head_param or embed_tokens_param) else None
+        tensor_dtype = (lm_head_param or embed_tokens_param).dtype if (lm_head_param or embed_tokens_param) else None
+
+        # Synchronize shape and dtype across pipeline stages
+        if self.model_engine.is_pipe_parallel:
+            pp_group = self.model_engine.grid.get_pipe_parallel_group()
+            shape_info = [tensor_shape, tensor_dtype]
+            all_shapes = [None] * dist.get_world_size(group=pp_group)
+            torch.distributed.all_gather_object(all_shapes, shape_info, group=pp_group)
+            for shape, dtype in all_shapes:
+                if shape is not None:
+                    tensor_shape, tensor_dtype = shape, dtype
+                    break
+
+        assert tensor_shape is not None, "Failed to determine embedding weight shape"
+
+        # Create sum tensor and add local contributions
+        weight_sum = torch.zeros(tensor_shape, dtype=tensor_dtype, device=self.model_engine.device)
+        if lm_head_param is not None:
+            weight_sum += lm_head_param
+        if embed_tokens_param is not None:
+            weight_sum += embed_tokens_param
+
+        # Aggregate across pipeline stages
+        if self.model_engine.is_pipe_parallel:
+            dist.all_reduce(weight_sum, op=dist.ReduceOp.SUM, group=pp_group)
+
+        # Compute average and update local parameters
+        avg_weight = weight_sum * 0.5
+        with torch.no_grad():
+            if lm_head_param is not None:
+                lm_head_param.copy_(avg_weight)
+            if embed_tokens_param is not None:
+                embed_tokens_param.copy_(avg_weight)
 
     def _apply_lora_weight_decay_local(self, model, config, lr):
         """Apply decoupled weight decay to LoRA parameters and collect local norms."""
