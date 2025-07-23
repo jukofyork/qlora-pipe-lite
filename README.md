@@ -263,8 +263,10 @@ To understand why norm constraints matter, consider the simple scalar case: comp
 
 To ensure convergence with acceptable approximation error:
 
-- **Target**: Keep `‖W‖_F ≲ 0.25√r` (approximately 0.2-0.3 times `√rank`)
-- **Result**: This guarantees `‖W‖₂ ≲ 0.2-0.3`, giving truncation errors ≤ 1-2%
+- **Target**: Keep `‖W‖_F ≲ 0.25 · √r` (approximately 0.2-0.3 times `√rank`)
+- **Assumption**: This guidance assumes relatively balanced singular values in `W`
+- **Result**: Under this assumption, `‖W‖₂ ≈ ‖W‖_F / √r ≲ 0.25`, giving truncation errors ≤ 1-2%
+- **Worst-case**: Without balanced singular values, `‖W‖₂` could be as high as `‖W‖_F` (ie: `0.25 · √r`)
 - **Monitoring**: The training logs show `norm_avg` and `norm_max` values for `‖W‖_F`
 
 #### Why Weight Decay is Essential
@@ -279,7 +281,8 @@ Unlike traditional LoRA where weight decay is optional, Control Adapters **requi
 
 For typical setups:
 - **Rank 16**: Target `‖W‖_F < 1.0`, and use `lora_weight_decay` of `100-500`
-- **Rank 64**: Target `‖W‖_F < 4.0`, and use `lora_weight_decay` of `500` or more
+- **Rank 64**: Target `‖W‖_F < 2.0`, and use `lora_weight_decay` of `500` or more
+- **Higher ranks**: Monitor `‖W‖_F / √r` and keep < 0.3 (assuming relatively balanced singular values)
 
 Monitor the `norm_max` values in TensorBoard to ensure they stay well below these thresholds throughout training.
 

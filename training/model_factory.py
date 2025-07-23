@@ -57,14 +57,14 @@ def patch_decoder_layer_control_adapter(module):
     #   1st:      1 - 0.1 = 0.9000          (error ≈ 1.0%)
     #   2nd:      1 - 0.1 + 0.01 = 0.9100   (error ≈ 0.1%)
     #
-    # - For our Control Adapters, the composite matrix (scale * B @ A) should have a spectral
-    #   norm << 1 for convergence. Computing ‖W‖₂ every step is expensive, so we monitor the
-    #   cheaper Frobenius norm ‖W‖_F. For rank-r matrices: ‖W‖₂ ≤ ‖W‖_F ≤ √r · ‖W‖₂
-    #   so keeping ‖W‖_F ≪ √r guarantees ‖W‖₂ < 1 ⇒ ρ(W) < 1 ⇒ the series converges.
-    # - Keeping ‖W‖_F ≲ 0.25 √r (≈ 0.2-0.3 times √r) which guarantees ‖A‖₂ ≲ 0.2–0.3, and in
-    #   turn this will mean the default `NEUMANN_SERIES_ORDER = 1` should be good enough...
-    # - Using `trainer::_apply_lora_weight_decay()` helps maintain this by properly scaling
-    #   all singular values of the BA composite, unlike naive weight decay on A and B separately.
+    # For Control Adapters (W = scale * B @ A):
+    # - Computing ‖W‖₂ is expensive, so we monitor ‖W‖_F instead (via `norm_avg` and `norm_max` metrics)
+    # - For rank-r matrices: ‖W‖₂ ≤ ‖W‖_F ≤ √r · ‖W‖₂ (depending on the "balancedness" of the singular values)
+    # - Keeping ‖W‖_F ≲ 0.25 √r:
+    #   • With balanced singular values: ‖W‖₂ ≈ 0.25
+    #   • Worst-case: ‖W‖₂ ≤ 0.25 √r
+    # - Using `_apply_lora_weight_decay_local()` helps maintain this by properly scaling all
+    #   singular values of the BA composite, unlike naive weight decay on A and B separately.
 
     def control_adapter_forward(inputs):
         hidden_states, attention_mask, cos, sin, control_class, labels = inputs
