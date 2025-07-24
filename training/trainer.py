@@ -168,12 +168,13 @@ class Trainer:
         torch.cuda.empty_cache()
 
     def _apply_lora_weight_decay_local(self, model, config, lr):
-        """Apply decoupled weight decay to LoRA parameters and collect local norms."""
+        """Apply decoupled weight decay and/or max-norm regularisation to LoRA parameters and collect local norms."""
         norms = []
         decays = []
 
         lora_scale = config['lora_alpha'] / config['lora_rank']
         weight_decay = config.get('lora_weight_decay', DEFAULT_LORA_WEIGHT_DECAY)
+        max_norm = config.get('lora_max_norm', DEFAULT_LORA_MAX_NORM)
 
         for name, param in model.named_parameters():
             if any(adapter_type in name for adapter_type in ['lora_A', 'control_A']):
@@ -186,34 +187,75 @@ class Trainer:
                     raise RuntimeError(f"Could not find corresponding B parameter '{B_name}' for A parameter '{name}'")
 
                 W = lora_scale * (B @ A)
+                W_norm = W.norm().item()
 
-                if weight_decay > 0:
+                # Save the initial norm so we can calculate the decays after the (optional) updates
+                W_norm_initial = W_norm
+
+                if weight_decay > 0 or max_norm > 0:
                     # The very tiny values end up cancelling out to zero for float16/bfloat16 and decays all stay zero...
                     assert A.dtype == torch.float32, f"A tensor ({A.dtype}) must be float32 to avoid catastrophic cancellation"
                     assert B.dtype == torch.float32, f"B tensor ({B.dtype}) must be float32 to avoid catastrophic cancellation"
 
-                    norm_before = W.norm().item()
+                    # Apply the weight decay update first
+                    if weight_decay > 0:
 
-                    # Using L = λ⋅½||W||_F²:
-                    #    ∂L/∂W = λ⋅W, as ∂(½||W||_F²)/∂W = W
-                    #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = λ⋅s⋅BᵗW
-                    #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = λ⋅s⋅WAᵗ
-                    grad_A = weight_decay * lora_scale * (B.t() @ W)
-                    grad_B = weight_decay * lora_scale * (W @ A.t())
+                        # Using L = ½||W||_F²:
+                        #    ∂L/∂W = W, as ∂(½||W||_F²)/∂W = W
+                        #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = s⋅BᵗW
+                        #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = s⋅WAᵗ
+                        grad_A = lora_scale * (B.t() @ W)
+                        grad_B = lora_scale * (W @ A.t())
 
-                    # Modify the tensors in place
-                    with torch.no_grad():
-                        A.sub_(lr * grad_A)
-                        B.sub_(lr * grad_B)
+                        # Modify the tensors in place
+                        with torch.no_grad():
+                            A.sub_(lr * weight_decay * grad_A)
+                            B.sub_(lr * weight_decay * grad_B)
 
-                    W = lora_scale * (B @ A)
-                    norm_after = W.norm().item()
+                        # Recompute gradients using updated W
+                        W = lora_scale * (B @ A)
+                        W_norm = W.norm().item()
 
-                    norms.append(norm_after)
-                    decays.append(norm_before - norm_after)
-                else:
-                    norms.append(W.norm().item())
-                    decays.append(0.0)
+                    # Apply max-norm regularisation after the weight decay update, and only if needed
+                    if max_norm > 0 and W_norm > max_norm:
+                       # Goal: Keep the LoRA weight W = s·B·A inside the Frobenius-norm ball ‖W‖_F ≤ max_norm
+
+                       # Using L = ½||W||_F²:
+                       #    ∂L/∂W = W, as ∂(½||W||_F²)/∂W = W
+                       #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = s⋅BᵗW
+                       #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = s⋅WAᵗ
+                       grad_A = lora_scale * (B.t() @ W)
+                       grad_B = lora_scale * (W @ A.t())
+
+                       # Compute the squared 2-norm of the full gradient:
+                       #    g_A = ∂F/∂A
+                       #    g_B = ∂F/∂B
+                       #    ‖g‖² = ‖g_A‖² + ‖g_B‖²
+                       grad_norm_squared = (grad_A.norm().item() ** 2) + (grad_B.norm().item() ** 2)
+
+                       # Avoid division by zero (small/zero gradients can occur at initialisation)
+                       if grad_norm_squared > 1e-6:
+                           # First-order Taylor expansion for a step of length x along –g:
+                           #     F_new ≈ F_old − x‖g‖², where ‖g‖² = ‖g_A‖² + ‖g_B‖²
+                           # We want:
+                           #     F_new = ½·max_norm², so: ½r² − x‖g‖² = ½·max_norm²
+                           # Solve for x:
+                           #     x = (r² − max_norm²) / (2‖g‖²)
+                           # NOTE: The factor 2 comes from the ½ in F(A,B) = ½‖W‖².
+                           x = (W_norm * W_norm - max_norm * max_norm) / (2 * grad_norm_squared)
+
+                           # Modify the tensors in place
+                           with torch.no_grad():
+                               A.sub_(x * grad_A)
+                               B.sub_(x * grad_B)
+
+                           # Recompute gradients using updated W
+                           W = lora_scale * (B @ A)
+                           W_norm = W.norm().item()
+
+                # Save the norms and the decays after the (optional) updates
+                norms.append(W_norm)
+                decays.append(W_norm_initial - W_norm)
 
         # Convert to tensors, handling empty case
         if len(norms) > 0:
