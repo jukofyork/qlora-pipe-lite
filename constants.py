@@ -5,6 +5,7 @@ DEFAULT_EPS = 1e-6
 
 # LoRA (and Control Adapter) specific defaults
 DEFAULT_LORA_WEIGHT_DECAY = 0.0
+DEFAULT_LORA_MAX_NORM = 0.0
 DEFAULT_LORA_DROPOUT = 0.0
 
 # Evaluation defaults
