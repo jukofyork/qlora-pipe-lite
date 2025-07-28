@@ -17,7 +17,10 @@ def tokenize_and_add_separator(batch, tokenizer, separator=None):
         result = tokenizer(batch['text'])
         # Add EOS token to the end of each text field if missing
         for i, tokens in enumerate(result['input_ids']):
-            if tokens[-1] != tokenizer.eos_token_id:
+            if len(tokens) == 0:
+                # Handle empty tokenization - just add EOS token (should not really happen)
+                result['input_ids'][i] = [tokenizer.eos_token_id]
+            elif tokens[-1] != tokenizer.eos_token_id:
                 result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
         return result
     elif separator == "":
