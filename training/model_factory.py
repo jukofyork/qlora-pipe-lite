@@ -195,6 +195,12 @@ def create_model(config, model_type, trust_remote_code=False):
             quantization_config=quantization_config,
             trust_remote_code=trust_remote_code
         )
+    elif model_type == 'qwen3':
+        model = causal_lm_models.Qwen3ForCausalLMPipe(
+            config,
+            quantization_config=quantization_config,
+            trust_remote_code=trust_remote_code
+        )
     elif model_type == 'phi3':
         model = causal_lm_models.Phi3ForCausalLMPipe(
             config,

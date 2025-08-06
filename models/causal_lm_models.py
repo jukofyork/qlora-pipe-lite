@@ -109,6 +109,10 @@ class Qwen2ForCausalLMPipe(BaseCausalLMPipe, transformers.Qwen2ForCausalLM):
     CONFIG_CLASS = transformers.Qwen2Config
     TRANSFORMERS_CLASS = transformers.Qwen2ForCausalLM
 
+class Qwen3ForCausalLMPipe(BaseCausalLMPipe, transformers.Qwen3ForCausalLM):
+    CONFIG_CLASS = transformers.Qwen3Config
+    TRANSFORMERS_CLASS = transformers.Qwen3ForCausalLM
+
 class Phi3ForCausalLMPipe(BaseCausalLMPipe, transformers.Phi3ForCausalLM):
     CONFIG_CLASS = transformers.Phi3Config
     TRANSFORMERS_CLASS = transformers.Phi3ForCausalLM
