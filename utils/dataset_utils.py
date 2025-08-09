@@ -109,26 +109,29 @@ def tokenize(batch, tokenizer, separator=None, control_class=1):
     Returns:
         Dict with 'input_ids' (lists of token IDs) and 'control_class' (scalar per document)
     """
+    encode_kwargs = dict(add_special_tokens=False, add_prefix_space=False)
+
     if separator is None:
         # Default behavior: tokenize first, then add EOS token
-        result = tokenizer(batch['text'])
-        # Add EOS token to the end of each text field if missing
-        for i, tokens in enumerate(result['input_ids']):
-            if len(tokens) == 0:
-                # Handle empty tokenization - just add EOS token (should not really happen)
-                result['input_ids'][i] = [tokenizer.eos_token_id]
-            elif tokens[-1] != tokenizer.eos_token_id:
-                result['input_ids'][i] = tokens + [tokenizer.eos_token_id]
+        result = {'input_ids': []}
+        for text in batch['text']:
+            tokens = tokenizer.encode(text, **encode_kwargs)
+            if len(tokens) > 0 and tokens[-1] != tokenizer.eos_token_id:
+                tokens = tokens + [tokenizer.eos_token_id]
+            result['input_ids'].append(tokens)
     elif separator == "":
         # Empty separator: just tokenize without adding anything
-        result = tokenizer(batch['text'])
+        result = {'input_ids': [tokenizer.encode(text, **encode_kwargs) for text in batch['text']]}
     else:
         # Custom separator: add to text before tokenizing
         modified_texts = [text + separator for text in batch['text']]
-        result = tokenizer(modified_texts)
+        result = {'input_ids': [tokenizer.encode(text, **encode_kwargs) for text in modified_texts]}
+
+    # Filter out any empty tokenizations
+    result['input_ids'] = [tokens for tokens in result['input_ids'] if len(tokens) > 0]
 
     # Add control_class field (one scalar per document)
-    result['control_class'] = [control_class] * len(batch['text'])
+    result['control_class'] = [control_class] * len(result['input_ids'])
 
     return result
 
