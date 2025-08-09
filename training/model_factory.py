@@ -67,7 +67,7 @@ def patch_decoder_layer_control_adapter(module):
     #   singular values of the BA composite, unlike naive weight decay on A and B separately.
 
     def control_adapter_forward(inputs):
-        hidden_states, attention_mask, cos, sin, control_class, labels = inputs
+        hidden_states, attention_mask, cos, sin, control_classes, labels = inputs
 
         # Save input for residual computation
         input_hidden_states = hidden_states
@@ -81,9 +81,13 @@ def patch_decoder_layer_control_adapter(module):
         # Apply Control Adapter: dropout -> A -> B -> scaling
         adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
 
+        # Zero out any with class zero, as these won't have any loss calculated due to having label = -100
+        class0_mask = (control_classes == 0).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
+        adapter_output = torch.where(class0_mask, 0.0, adapter_output)
+
         # For positive samples: Add adapter_output as normal
         # For negative samples: Apply kth-order Neumann series approximation of (I + A)^{-1}
-        negate_mask = (control_class == -1).unsqueeze(-1).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
+        negate_mask = (control_classes == -1).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
         if NEUMANN_SERIES_ORDER == 1:
             # Simple 1st-order case: (I + A)^{-1} ≈ I - A, so just negate the output
             adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
@@ -104,7 +108,7 @@ def patch_decoder_layer_control_adapter(module):
         # Cast adapter contribution back to original dtype and add to the residual stream
         result = layer_output + adapter_output.to(torch_result_dtype)
 
-        return (result, attention_mask, cos, sin, control_class, labels)
+        return (result, attention_mask, cos, sin, control_classes, labels)
 
     return control_adapter_forward
 

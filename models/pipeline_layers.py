@@ -24,12 +24,12 @@ class PrepareInputsPipe(nn.Module):
         super().__init__()
 
     def forward(self, inputs):
-        input_ids, attention_mask, control_class, labels = inputs
+        input_ids, attention_mask, control_classes, labels = inputs
         batch_size, seq_length = input_ids.shape[:2]
         device = input_ids.device
         position_ids = torch.arange(0, seq_length, dtype=torch.long, device=device)
         position_ids = position_ids.unsqueeze(0)
-        return input_ids, attention_mask, position_ids, control_class, labels
+        return input_ids, attention_mask, position_ids, control_classes, labels
 
 class EmbeddingPipe(nn.Module):
 
@@ -51,7 +51,7 @@ class EmbeddingPipe(nn.Module):
         return self._model[0]
 
     def forward(self, inputs):
-        input_ids, attention_mask, position_ids, control_class, labels = inputs
+        input_ids, attention_mask, position_ids, control_classes, labels = inputs
         # For tied weights case: only input_ids move CPU<->GPU, not the large embedding weights
         if self.orig.weight.device.type == 'cpu':
             original_device = input_ids.device
@@ -93,7 +93,7 @@ class EmbeddingPipe(nn.Module):
             if torch.is_floating_point(tensor):
                 tensor.requires_grad_(True)
 
-        return hidden_states, attention_mask, cos, sin, control_class, labels
+        return hidden_states, attention_mask, cos, sin, control_classes, labels
 
 class LlamaDecoderLayerPipe(nn.Module):
 
@@ -104,10 +104,10 @@ class LlamaDecoderLayerPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, attention_mask, cos, sin, control_class, labels = inputs
+        hidden_states, attention_mask, cos, sin, control_classes, labels = inputs
         result = (
             self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0],
-            attention_mask, cos, sin, control_class, labels
+            attention_mask, cos, sin, control_classes, labels
         )
         return result
 
