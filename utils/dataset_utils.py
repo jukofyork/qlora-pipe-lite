@@ -132,17 +132,17 @@ def slice_into_sequences(
 
     return result_dataset
 
-def tokenize(batch, tokenizer, separator=None, control_class=1):
+def tokenize(batch, tokenizer, document_suffix=None, control_class=1):
     """
     Tokenizes a batch of text and assigns control class to each document.
 
     Args:
         batch: Dict with 'text' field containing list of text strings
         tokenizer: HuggingFace tokenizer
-        separator: Optional separator - can be:
+        document_suffix: Optional suffix - can be:
                   - None: tokenize first, then add EOS token (default)
                   - "": just tokenize without adding anything
-                  - str: prepend string to text before tokenizing
+                  - str: append string to text before tokenizing
                   - int: single token ID to append after tokenizing
                   - list of ints: multiple token IDs to append after tokenizing
         control_class: Control class value to assign to each document
@@ -152,26 +152,26 @@ def tokenize(batch, tokenizer, separator=None, control_class=1):
     """
     result = {'input_ids': []}
 
-    if isinstance(separator, str) and separator != "":
-        # Non-empty string: prepend to text before tokenizing
+    if isinstance(document_suffix, str) and document_suffix != "":
+        # Non-empty string: append to text before tokenizing
         for text in batch['text']:
-            tokens = tokenizer.encode(separator + text, add_special_tokens=False)
+            tokens = tokenizer.encode(text + document_suffix, add_special_tokens=False)
             if len(tokens) > 0:
                 result['input_ids'].append(tokens)
     else:
-        if separator is None:
-            separator_tokens = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
-        elif isinstance(separator, str) and separator == "":
-            separator_tokens = []
-        elif isinstance(separator, int):
-            separator_tokens = [separator]
-        elif isinstance(separator, list):
-            separator_tokens = separator
+        if document_suffix is None:
+            suffix_tokens = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
+        elif isinstance(document_suffix, str) and document_suffix == "":
+            suffix_tokens = []
+        elif isinstance(document_suffix, int):
+            suffix_tokens = [document_suffix]
+        elif isinstance(document_suffix, list):
+            suffix_tokens = document_suffix
         else:
-            raise ValueError(f"Invalid separator type: {type(separator)}. Must be None, str, int, or list of ints.")
+            raise ValueError(f"Invalid document_suffix type: {type(document_suffix)}. Must be None, str, int, or list of ints.")
 
         for text in batch['text']:
-            tokens = tokenizer.encode(text, add_special_tokens=False) + separator_tokens
+            tokens = tokenizer.encode(text, add_special_tokens=False) + suffix_tokens
             if len(tokens) > 0:
                 result['input_ids'].append(tokens)
 
@@ -183,7 +183,7 @@ def tokenize(batch, tokenizer, separator=None, control_class=1):
 def load_single_dataset(
         dataset_path,
         tokenizer,
-        separator=None,
+        document_suffix=None,
         control_class=1
 ):
     base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
@@ -215,7 +215,7 @@ def load_single_dataset(
         raise NotImplementedError()
 
     dataset = dataset.map(
-        lambda x: tokenize(x, tokenizer, separator, control_class),
+        lambda x: tokenize(x, tokenizer, document_suffix, control_class),
         batched=True,
         batch_size=DATASET_MAP_BATCH_SIZE,
         remove_columns=dataset.column_names,
@@ -260,12 +260,12 @@ def load_datasets(config, tokenizer, run_dir):
             for dataset_config in config['datasets']:
                 control_class = dataset_config.get('control_class', 1)
                 assert control_class in [-1, 1], f"control_class must be -1 or 1, got {control_class}"
-                separator = dataset_config.get('separator', None)  # None --> tokenize first, then add EOS token
+                document_suffix = dataset_config.get('document_suffix', None)  # None --> tokenize first, then add EOS token
 
                 dataset = load_single_dataset(
                     dataset_config['dataset_path'],
                     tokenizer,
-                    separator,
+                    document_suffix,
                     control_class
                 )
                 datasets_list.append(dataset)
