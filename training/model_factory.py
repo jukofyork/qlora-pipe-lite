@@ -89,12 +89,12 @@ def patch_decoder_layer_control_adapter(module):
         adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
 
         # Zero out any with class zero, as these won't have any loss calculated due to having label = -100
-        class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
+        class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to (batch_size, seq_len, 1)
         adapter_output = torch.where(class0_mask, 0.0, adapter_output)
 
         # For positive samples: Add adapter_output as normal
         # For negative samples: Apply kth-order Neumann series approximation of (I + A)^{-1}
-        negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
+        negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to (batch_size, seq_len, 1)
         if NEUMANN_SERIES_ORDER == 1:
             # Simple 1st-order case: (I + A)^{-1} ≈ I - A, so just negate the output
             adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
