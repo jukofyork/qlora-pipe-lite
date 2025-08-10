@@ -69,6 +69,13 @@ def patch_decoder_layer_control_adapter(module):
     def control_adapter_forward(inputs):
         hidden_states, attention_mask, cos, sin, control_classes, labels = inputs
 
+        # Shift control_classes for causal LM: [control_classes[1:], 0_padding]
+        batch_size, seq_len = control_classes.shape
+        shift_control_classes = torch.cat([
+            control_classes[:, 1:],
+            torch.full((batch_size, 1), 0, device=control_classes.device, dtype=control_classes.dtype)
+        ], dim=1)
+
         # Save input for residual computation
         input_hidden_states = hidden_states
 
@@ -82,12 +89,12 @@ def patch_decoder_layer_control_adapter(module):
         adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
 
         # Zero out any with class zero, as these won't have any loss calculated due to having label = -100
-        class0_mask = (control_classes == 0).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
+        class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
         adapter_output = torch.where(class0_mask, 0.0, adapter_output)
 
         # For positive samples: Add adapter_output as normal
         # For negative samples: Apply kth-order Neumann series approximation of (I + A)^{-1}
-        negate_mask = (control_classes == -1).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
+        negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to (batch, seq_len, 1)
         if NEUMANN_SERIES_ORDER == 1:
             # Simple 1st-order case: (I + A)^{-1} ≈ I - A, so just negate the output
             adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
