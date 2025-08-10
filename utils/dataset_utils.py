@@ -113,31 +113,29 @@ def tokenize(batch, tokenizer, separator=None, control_class=1):
     Returns:
         Dict with 'input_ids' (lists of token IDs) and 'control_class' (scalar per document)
     """
-    encode_kwargs = dict(add_special_tokens=False, add_prefix_space=False)
-
     if separator is None:
         # Default behavior: tokenize first, then add EOS token if not present
         result = {'input_ids': []}
         for text in batch['text']:
-            tokens = tokenizer.encode(text, **encode_kwargs)
+            tokens = tokenizer.encode(text, add_special_tokens=False)
             if len(tokens) > 0 and tokens[-1] != tokenizer.eos_token_id:
                 tokens = tokens + [tokenizer.eos_token_id]
             result['input_ids'].append(tokens)
     elif separator == "":
         # Empty separator: just tokenize without adding anything
-        result = {'input_ids': [tokenizer.encode(text, **encode_kwargs) for text in batch['text']]}
+        result = {'input_ids': [tokenizer.encode(text, add_special_tokens=False) for text in batch['text']]}
     elif isinstance(separator, int):
         # Single token ID: tokenize first, then append token ID
         result = {'input_ids': []}
         for text in batch['text']:
-            tokens = tokenizer.encode(text, **encode_kwargs)
+            tokens = tokenizer.encode(text, add_special_tokens=False)
             tokens = tokens + [separator]
             result['input_ids'].append(tokens)
     elif isinstance(separator, list):
         # Multiple token IDs: tokenize first, then append token IDs
         result = {'input_ids': []}
         for text in batch['text']:
-            tokens = tokenizer.encode(text, **encode_kwargs)
+            tokens = tokenizer.encode(text, add_special_tokens=False)
             tokens = tokens + separator
             result['input_ids'].append(tokens)
     else:
