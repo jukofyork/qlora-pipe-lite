@@ -180,20 +180,20 @@ def slice_into_sequences(
 
     return result_dataset
 
-def tokenize(batch, tokenizer, document_suffix=None, control_class=1):
+def tokenize(batch, tokenizer, control_class=1, document_suffix=None):
     """
     Tokenizes a batch of text and assigns control class to each document.
 
     Args:
         batch: Dict with 'text' field containing list of text strings
         tokenizer: HuggingFace tokenizer
+        control_class: Control class value to assign to each document
         document_suffix: Optional suffix - can be:
                   - None: tokenize first, then add EOS token (default)
                   - "": just tokenize without adding anything
                   - str: append string to text before tokenizing
                   - int: single token ID to append after tokenizing
                   - list of ints: multiple token IDs to append after tokenizing
-        control_class: Control class value to assign to each document
 
     Returns:
         Dict with 'input_ids' (lists of token IDs) and 'control_class' (scalar per document)
@@ -231,8 +231,8 @@ def tokenize(batch, tokenizer, document_suffix=None, control_class=1):
 def load_single_dataset(
         dataset_path,
         tokenizer,
-        document_suffix=None,
-        control_class=1
+        control_class=1,
+        document_suffix=None
 ):
     """
     Load and tokenize a single dataset from file.
@@ -243,8 +243,8 @@ def load_single_dataset(
     Args:
         dataset_path: Path to dataset file (.txt, .json, .jsonl, or .parquet)
         tokenizer: HuggingFace tokenizer for text tokenization
-        document_suffix: Optional suffix to append to each document (see tokenize function)
         control_class: Control class value to assign to all documents in this dataset
+        document_suffix: Optional suffix to append to each document (see tokenize function)
 
     Returns:
         HuggingFace Dataset with 'input_ids' and 'control_class' fields
@@ -278,7 +278,7 @@ def load_single_dataset(
         raise NotImplementedError()
 
     dataset = dataset.map(
-        lambda x: tokenize(x, tokenizer, document_suffix, control_class),
+        lambda x: tokenize(x, tokenizer, control_class, document_suffix),
         batched=True,
         batch_size=DATASET_MAP_BATCH_SIZE,
         remove_columns=dataset.column_names,
@@ -300,9 +300,9 @@ def load_datasets(config, tokenizer, run_dir):
         config: Configuration dict containing:
             - sequence_len: Fixed sequence length (must be multiple of 64)
             - datasets: List of dataset configs with 'dataset_path', optional 'control_class', 'document_suffix'
-            - sequence_prefix: Optional prefix for sequences (default: None)
             - max_sequences: Optional max sequences to create (default: unlimited)
             - drop_tails: Optional flag to drop document tails (default: False)
+            - sequence_prefix: Optional prefix for sequences (default: None)
             - mask_tokens: Optional token masking config (default: None)
             - eval_fraction: Optional fraction for eval split (default: from constants)
         tokenizer: HuggingFace tokenizer
@@ -351,8 +351,8 @@ def load_datasets(config, tokenizer, run_dir):
                 dataset = load_single_dataset(
                     dataset_config['dataset_path'],
                     tokenizer,
-                    document_suffix,
-                    control_class
+                    control_class,
+                    document_suffix
                 )
                 datasets_list.append(dataset)
 
