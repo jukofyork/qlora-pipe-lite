@@ -318,9 +318,9 @@ def load_datasets(config, tokenizer, run_dir):
     # A100 wants sequence lengths to be multiples of 64, other cards are efficient with smaller, so just do 64
     assert sequence_len % 64 == 0, f"sequence_len ({sequence_len}) must be multiple of 64"
 
-    sequence_prefix = config.get('sequence_prefix', None)  # None --> initialize sequence with BOS token if it exists
     max_sequences = config.get('max_sequences', sys.maxsize)
     drop_tails = config.get('drop_tails', False)
+    sequence_prefix = config.get('sequence_prefix', None)  # None --> initialize sequence with BOS token if it exists
     mask_tokens = config.get('mask_tokens', None)  # None --> no masking
 
     eval_fraction = config.get('eval_fraction', DEFAULT_EVAL_FRACTION)
