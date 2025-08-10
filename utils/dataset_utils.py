@@ -15,10 +15,44 @@ def slice_into_sequences(
         dataset,
         tokenizer,
         sequence_len,
-        sequence_prefix,
         max_sequences=sys.maxsize,
-        drop_tails=False
+        drop_tails=False,
+        sequence_prefix=None,
+        mask_tokens=None
 ):
+    """
+    Slice a dataset of tokenized documents into fixed-length sequences.
+
+    This function takes documents of varying lengths and creates fixed-length sequences
+    by concatenating tokens across document boundaries when necessary. Each token
+    retains the control class of its source document.
+
+    Args:
+        dataset: HuggingFace dataset with 'input_ids' and 'control_class' fields
+        tokenizer: HuggingFace tokenizer for handling special tokens
+        sequence_len: Fixed length for all output sequences
+        max_sequences: Maximum number of sequences to create (default: unlimited)
+        drop_tails: If True, drop remaining tokens when starting a new sequence
+                   to ensure each sequence begins with a fresh document (default: False)
+        sequence_prefix: Prefix to add at the start of each sequence:
+            - None: add BOS token if it exists (default)
+            - "": no prefix tokens
+            - str: encode string as tokens
+            - int: single token ID
+            - list of ints: multiple token IDs
+        mask_tokens: Tokens to mask in control_classes and labels:
+            - None/False: no masking (default)
+            - True: mask all special tokens from tokenizer.all_special_ids
+            - int: mask only this specific token ID
+            - list of ints: mask all these specific token IDs
+
+    Returns:
+        HuggingFace Dataset with fields:
+            - input_ids: token sequences of length sequence_len
+            - attention_mask: all ones (length sequence_len)
+            - control_classes: control class per token (masked tokens = 0)
+            - labels: copy of input_ids (masked tokens = -100)
+    """
 
     def initialize_sequence():
         """
@@ -99,11 +133,25 @@ def slice_into_sequences(
                 attention_mask = torch.ones(sequence_len, dtype=torch.int8)
                 labels = input_ids.clone()
 
-                # Mask out the class and label for all special tokens
-                if hasattr(tokenizer, 'all_special_ids') and tokenizer.all_special_ids:
-                    special_token_mask = torch.isin(input_ids, torch.tensor(tokenizer.all_special_ids, device=input_ids.device))
-                    control_classes[special_token_mask] = 0
-                    labels[special_token_mask] = -100
+                # Handle masking based on mask_tokens parameter
+                if mask_tokens:
+                    token_mask = None
+                    if mask_tokens is True:
+                        # Mask all special tokens
+                        if hasattr(tokenizer, 'all_special_ids') and tokenizer.all_special_ids:
+                            token_mask = torch.isin(input_ids, torch.tensor(tokenizer.all_special_ids, device=input_ids.device))
+                    elif isinstance(mask_tokens, int):
+                        # Mask only this specific token ID
+                        token_mask = input_ids == mask_tokens
+                    elif isinstance(mask_tokens, list):
+                        # Mask all these specific token IDs
+                        token_mask = torch.isin(input_ids, torch.tensor(mask_tokens, device=input_ids.device))
+                    else:
+                        raise ValueError(f"Invalid mask_tokens type: {type(mask_tokens)}. Must be bool, int, or list of ints.")
+
+                    if token_mask is not None:
+                        control_classes[token_mask] = 0
+                        labels[token_mask] = -100
 
                 all_sequences.append({
                     'input_ids': input_ids,
@@ -186,6 +234,21 @@ def load_single_dataset(
         document_suffix=None,
         control_class=1
 ):
+    """
+    Load and tokenize a single dataset from file.
+
+    Supports text, JSON/JSONL, and Parquet files. The dataset is tokenized
+    with optional document suffixes and assigned a control class.
+
+    Args:
+        dataset_path: Path to dataset file (.txt, .json, .jsonl, or .parquet)
+        tokenizer: HuggingFace tokenizer for text tokenization
+        document_suffix: Optional suffix to append to each document (see tokenize function)
+        control_class: Control class value to assign to all documents in this dataset
+
+    Returns:
+        HuggingFace Dataset with 'input_ids' and 'control_class' fields
+    """
     base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
     cache_dir = os.path.join(base_dir, "hf_cache")
 
@@ -226,6 +289,28 @@ def load_single_dataset(
     return dataset
 
 def load_datasets(config, tokenizer, run_dir):
+    """
+    Load, process, and prepare training and evaluation datasets.
+
+    This function loads multiple datasets, tokenizes them, slices them into
+    fixed-length sequences, and splits them into train/eval sets. Results
+    are cached to disk for faster subsequent runs.
+
+    Args:
+        config: Configuration dict containing:
+            - sequence_len: Fixed sequence length (must be multiple of 64)
+            - datasets: List of dataset configs with 'dataset_path', optional 'control_class', 'document_suffix'
+            - sequence_prefix: Optional prefix for sequences (default: None)
+            - max_sequences: Optional max sequences to create (default: unlimited)
+            - drop_tails: Optional flag to drop document tails (default: False)
+            - mask_tokens: Optional token masking config (default: None)
+            - eval_fraction: Optional fraction for eval split (default: from constants)
+        tokenizer: HuggingFace tokenizer
+        run_dir: Directory to save/load cached datasets
+
+    Returns:
+        Tuple of (train_dataset, eval_dataset) - both HuggingFace Datasets
+    """
     if 'sequence_len' not in config:
         raise ValueError('Need to specify a sequence_len')
     sequence_len = config['sequence_len']
@@ -236,6 +321,7 @@ def load_datasets(config, tokenizer, run_dir):
     sequence_prefix = config.get('sequence_prefix', None)  # None --> initialize sequence with BOS token if it exists
     max_sequences = config.get('max_sequences', sys.maxsize)
     drop_tails = config.get('drop_tails', False)
+    mask_tokens = config.get('mask_tokens', None)  # None --> no masking
 
     eval_fraction = config.get('eval_fraction', DEFAULT_EVAL_FRACTION)
     assert 0 < eval_fraction < 1, "eval_fraction must be between 0 and 1"
@@ -280,9 +366,10 @@ def load_datasets(config, tokenizer, run_dir):
                 combined_dataset,
                 tokenizer,
                 sequence_len,
-                sequence_prefix,
                 max_sequences,
-                drop_tails
+                drop_tails,
+                sequence_prefix,
+                mask_tokens
             )
 
             split_datasets = combined_dataset.train_test_split(test_size=eval_fraction, shuffle=True, seed=42)
