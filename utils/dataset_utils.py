@@ -15,14 +15,50 @@ def slice_into_sequences(
         dataset,
         tokenizer,
         sequence_len,
+        sequence_prefix,
         max_sequences=sys.maxsize,
         drop_tails=False
 ):
+
+    def initialize_sequence():
+        """
+        Initialize sequence based on sequence_prefix parameter.
+
+        sequence_prefix can be:
+        - None: add BOS token if it exists
+        - "": no prefix tokens
+        - str: encode string as tokens
+        - int: single token ID
+        - list of ints: multiple token IDs
+
+        Returns:
+            List of (token_id, control_class) tuples for sequence prefix
+        """
+        if sequence_prefix is None:
+            # Default behavior: add BOS token if it exists
+            prefix_tokens = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
+        elif isinstance(sequence_prefix, str) and sequence_prefix == "":
+            # Empty prefix: no tokens
+            prefix_tokens = []
+        elif isinstance(sequence_prefix, str) and sequence_prefix != "":
+            # Non-empty string: encode as tokens
+            prefix_tokens = tokenizer.encode(sequence_prefix, add_special_tokens=False)
+        elif isinstance(sequence_prefix, int):
+            # Single token ID
+            prefix_tokens = [sequence_prefix]
+        elif isinstance(sequence_prefix, list):
+            # Multiple token IDs
+            prefix_tokens = sequence_prefix
+        else:
+            raise ValueError(f"Invalid sequence_prefix type: {type(sequence_prefix)}. Must be None, str, int, or list of ints.")
+
+        return [(token_id, 0) for token_id in prefix_tokens]
+
     all_sequences = []
     sequence_count = 0
 
-    # Initialize sequence with BOS token if it exists
-    sequence_tokens = [(tokenizer.bos_token_id, 0)] if tokenizer.bos_token_id is not None else []
+    # Initialize sequence with prefix
+    sequence_tokens = initialize_sequence()
 
     # Process dataset item by item (streaming)
     for item in tqdm(dataset, desc="Creating sequences"):
@@ -78,8 +114,8 @@ def slice_into_sequences(
 
                 sequence_count += 1
 
-                # Reset sequence with BOS token if it exists
-                sequence_tokens = [(tokenizer.bos_token_id, 0)] if tokenizer.bos_token_id is not None else []
+                # Reset sequence with prefix
+                sequence_tokens = initialize_sequence()
 
                 # If asked to, drop the remaining tokens of this document to ensure each sequence starts with a fresh document
                 if drop_tails:
@@ -104,8 +140,9 @@ def tokenize(batch, tokenizer, separator=None, control_class=1):
         batch: Dict with 'text' field containing list of text strings
         tokenizer: HuggingFace tokenizer
         separator: Optional separator - can be:
-                  - None: tokenize first, then add EOS token if not present
+                  - None: tokenize first, then add EOS token (default)
                   - "": just tokenize without adding anything
+                  - str: prepend string to text before tokenizing
                   - int: single token ID to append after tokenizing
                   - list of ints: multiple token IDs to append after tokenizing
         control_class: Control class value to assign to each document
@@ -113,36 +150,30 @@ def tokenize(batch, tokenizer, separator=None, control_class=1):
     Returns:
         Dict with 'input_ids' (lists of token IDs) and 'control_class' (scalar per document)
     """
-    if separator is None:
-        # Default behavior: tokenize first, then add EOS token if not present
-        result = {'input_ids': []}
-        for text in batch['text']:
-            tokens = tokenizer.encode(text, add_special_tokens=False)
-            if len(tokens) > 0 and tokens[-1] != tokenizer.eos_token_id:
-                tokens = tokens + [tokenizer.eos_token_id]
-            result['input_ids'].append(tokens)
-    elif separator == "":
-        # Empty separator: just tokenize without adding anything
-        result = {'input_ids': [tokenizer.encode(text, add_special_tokens=False) for text in batch['text']]}
-    elif isinstance(separator, int):
-        # Single token ID: tokenize first, then append token ID
-        result = {'input_ids': []}
-        for text in batch['text']:
-            tokens = tokenizer.encode(text, add_special_tokens=False)
-            tokens = tokens + [separator]
-            result['input_ids'].append(tokens)
-    elif isinstance(separator, list):
-        # Multiple token IDs: tokenize first, then append token IDs
-        result = {'input_ids': []}
-        for text in batch['text']:
-            tokens = tokenizer.encode(text, add_special_tokens=False)
-            tokens = tokens + separator
-            result['input_ids'].append(tokens)
-    else:
-        raise ValueError(f"Invalid separator type: {type(separator)}. Must be None, str, int, or list of ints.")
+    result = {'input_ids': []}
 
-    # Filter out any empty tokenizations
-    result['input_ids'] = [tokens for tokens in result['input_ids'] if len(tokens) > 0]
+    if isinstance(separator, str) and separator != "":
+        # Non-empty string: prepend to text before tokenizing
+        for text in batch['text']:
+            tokens = tokenizer.encode(separator + text, add_special_tokens=False)
+            if len(tokens) > 0:
+                result['input_ids'].append(tokens)
+    else:
+        if separator is None:
+            separator_tokens = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
+        elif isinstance(separator, str) and separator == "":
+            separator_tokens = []
+        elif isinstance(separator, int):
+            separator_tokens = [separator]
+        elif isinstance(separator, list):
+            separator_tokens = separator
+        else:
+            raise ValueError(f"Invalid separator type: {type(separator)}. Must be None, str, int, or list of ints.")
+
+        for text in batch['text']:
+            tokens = tokenizer.encode(text, add_special_tokens=False) + separator_tokens
+            if len(tokens) > 0:
+                result['input_ids'].append(tokens)
 
     # Add control_class field (one scalar per document)
     result['control_class'] = [control_class] * len(result['input_ids'])
@@ -202,6 +233,7 @@ def load_datasets(config, tokenizer, run_dir):
     # A100 wants sequence lengths to be multiples of 64, other cards are efficient with smaller, so just do 64
     assert sequence_len % 64 == 0, f"sequence_len ({sequence_len}) must be multiple of 64"
 
+    sequence_prefix = config.get('sequence_prefix', None)  # None --> initialize sequence with BOS token if it exists
     max_sequences = config.get('max_sequences', sys.maxsize)
     drop_tails = config.get('drop_tails', False)
 
@@ -248,6 +280,7 @@ def load_datasets(config, tokenizer, run_dir):
                 combined_dataset,
                 tokenizer,
                 sequence_len,
+                sequence_prefix,
                 max_sequences,
                 drop_tails
             )
