@@ -134,10 +134,10 @@ class PipelineDataLoader:
         def collate_fn(examples):
             input_ids = torch.stack([ex['input_ids'] for ex in examples])
             attention_mask = torch.stack([ex['attention_mask'] for ex in examples])
-            control_class = torch.tensor([ex['control_class'] for ex in examples], dtype=torch.int8)
+            control_classes = torch.stack([ex['control_classes'] for ex in examples])
             labels = torch.stack([ex['labels'] for ex in examples])
 
-            return ((input_ids, attention_mask, control_class, labels), None)
+            return ((input_ids, attention_mask, control_classes, labels), None)
 
         self.dataloader = DataLoader(
             self.dataset,

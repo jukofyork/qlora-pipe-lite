@@ -39,6 +39,13 @@ sequence_len = 2048
 #   2048*6*26 = ~320K tokens per step,  1000*2048*6*26 = ~320M tokens total
 gradient_accumulation_steps = 26
 
+# =======================================
+# GLOBAL SEQUENCE PROCESSING CONFIGURATION
+# =======================================
+
+max_sequences = 157573  # 78787 + 39393 + 39393 (50% + 25% + 25% split)
+drop_tails = true
+
 # =====================
 # DATASET CONFIGURATION
 # =====================
@@ -46,17 +53,11 @@ gradient_accumulation_steps = 26
 [[datasets]]
 dataset_path = '/mnt/shared/datasets/books-markdown-cleaned-fiction--filtered/*.json'
 control_class = 1
-max_sequences = 78787   # floor(0.5*156000/(1-0.01))
-drop_tails = true
 
 [[datasets]]
 dataset_path = '/mnt/shared/datasets/ajibawa-2023-Stories-Collections--filtered/*.json'
 control_class = -1
-max_sequences = 39393   # floor(0.25*156000/(1-0.01))
-drop_tails = true
 
 [[datasets]]
 dataset_path = '/mnt/shared/datasets/literotica-stories--filtered/*.json'
 control_class = -1
-max_sequences = 39393   # floor(0.25*156000/(1-0.01))
-drop_tails = true

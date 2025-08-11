@@ -24,8 +24,10 @@ parser.add_argument('--local_rank', type=int, default=-1,
                     help='local rank passed from distributed launcher')
 parser.add_argument('--resume_from_checkpoint', action='store_true', default=None,
                     help='resume training from the most recent checkpoint')
+parser.add_argument("--add-prefix-space", action="store_true", default=False,
+                    help="Add prefix space when tokenizing")
 parser.add_argument("--trust-remote-code", action="store_true",
-                   help="Allow custom code execution when loading models with non-standard architectures")
+                    help="Allow custom code execution when loading models with non-standard architectures")
 parser = deepspeed.add_config_arguments(parser)
 args = parser.parse_args()
 
@@ -75,6 +77,7 @@ if __name__ == '__main__':
         config['model_dir'],
         local_files_only=True,
         model_max_length=sys.maxsize,
+        add_prefix_space=args.add_prefix_space,
         trust_remote_code=args.trust_remote_code,
     )
 
