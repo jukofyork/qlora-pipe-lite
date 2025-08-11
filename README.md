@@ -437,7 +437,7 @@ document_suffix = ""                     # No additional tokens added
 ##### Document suffix options (per-dataset, applied during tokenization)
 
 ```toml
-document_suffix = None           # Default: tokenize first, then add tokenizer's EOS token if missing
+                                 # Default: tokenize first, then add tokenizer's EOS token if missing
 # document_suffix = ""           # Empty suffix: no additional tokens added
 # document_suffix = "<EOT>"      # String to append before tokenizing
 # document_suffix = 123          # Single token ID to append after tokenizing
@@ -530,7 +530,7 @@ drop_tails = true                # Drop partial sequences at document ends (Defa
 ##### Sequence initialization (applied at start of each sequence)
 
 ```toml
-sequence_prefix = None           # Default: add BOS token if it exists
+                                 # Default: add BOS token if it exists
 # sequence_prefix = ""           # No prefix tokens
 # sequence_prefix = "<BOS>"      # String to encode as tokens  
 # sequence_prefix = 123          # Single token ID
@@ -540,7 +540,7 @@ sequence_prefix = None           # Default: add BOS token if it exists
 ##### Token masking (sets `control_classes = 0` and `labels = -100` for specified tokens)
 
 ```toml
-mask_tokens = None               # Default: no masking
+                                 # Default: no masking
 # mask_tokens = true             # Mask all special tokens
 # mask_tokens = 123              # Mask specific token ID
 # mask_tokens = [123, 456]       # Mask multiple token IDs
