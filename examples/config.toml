@@ -22,21 +22,11 @@ load_in_4bit = true
 # LORA CONFIGURATION
 # ==================
 
-#lora_weight_dtype = bfloat16  # (default: float32)
 lora_rank = 64
-lora_alpha = 64                # (default: sqrt(lora_rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
+lora_alpha = 64                # (default: sqrt(lora_rank) for rsLoRA scaling)
 lora_dropout = 0.05            # (default: 0.0)
-lora_weight_decay = 10.0       # (default: 0.0 [for numerical reasons, allowed only if lora_weight_dtype=float32])
-
-# =================================
-# MODULE/LAYER FILTER CONFIGURATION
-# =================================
-
-# Train only specific modules (defaults to: 'all linear' modules for LoRA, or all modules for full fine-tuning)
-#target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
-
-# Train only specific layers (can be combined with target_modules and used with LoRA/Control adapters or full fine-tuning)
-#layers_to_transform = '16:31'
+lora_weight_decay = 10.0       # (default: 0.0, requires lora_weight_dtype = "float32")
+lora_weight_dtype = "float32"  # (default: "float32", use "bfloat16" to save memory but disables weight decay)
 
 # =======================
 # OPTIMIZER CONFIGURATION
@@ -49,15 +39,8 @@ beta2 = 0.99              # (default: 0.99)
 eps = 1e-6                # (default: 1e-6)
 
 # ========================
-# EVALUATION CONFIGURATION
-# ========================
-
-eval_fraction = 0.01  # (default: 0.01)
-evals_per_run = 5     # (default: 11)
-
-# ======================
 # TRAINING CONFIGURATION
-# ======================
+# ========================
 
 sequence_len = 32768
 
@@ -75,6 +58,25 @@ eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_
 # - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand
 #use_column_major_topology = true
 
+# =================================
+# MODULE/LAYER FILTER CONFIGURATION
+# =================================
+
+# Train only specific modules (defaults to: 'all linear' modules for LoRA, or all modules for full fine-tuning)
+# NOTE: Not available with Control Adapters - they operate per layer
+#target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+
+# Train only specific layers (can be combined with target_modules and used with LoRA/Control adapters or full fine-tuning)
+# Format: 'start:end' (inclusive:inclusive, with first layer = 0 / last layer = n-1)
+#layers_to_transform = '16:31'
+
+# ========================
+# EVALUATION CONFIGURATION
+# ========================
+
+eval_fraction = 0.01  # (default: 0.01)
+evals_per_run = 5     # (default: 11)
+
 # ========================
 # CHECKPOINT CONFIGURATION
 # ========================
@@ -82,14 +84,38 @@ eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_
 checkpoint_interval_hours = 1  # (default: 1)
 max_checkpoints = 3            # (default: 3)
 
+# =======================================
+# GLOBAL SEQUENCE PROCESSING CONFIGURATION
+# =======================================
+
+# Maximum number of sequences to create across all datasets (default: unlimited)
+#max_sequences = 1000000
+
+# Drop partial sequences at document ends to ensure each sequence begins with a fresh document (default: false)
+#drop_tails = true
+
+# Sequence initialization (applied at start of each sequence):
+# - None: add BOS token if it exists (default)
+# - "": no prefix tokens
+# - "<BOS>": string to encode as tokens  
+# - 123: single token ID
+# - [123, 456]: multiple token IDs
+#sequence_prefix = None
+
+# Token masking (sets control_classes = 0 and labels = -100 for specified tokens):
+# - None/false: no masking (default)
+# - true: mask all special tokens from tokenizer.all_special_ids
+# - 123: mask specific token ID
+# - [123, 456]: mask multiple token IDs
+#mask_tokens = None
+
 # =====================
 # DATASET CONFIGURATION
 # =====================
 
+# Basic datasets (for standard LoRA/QLoRA training)
 [[datasets]]
 dataset_path = 'raw_text_data/*.txt'
-# max_sequences = 10000   # Limit sequences from this dataset (default: unlimited)
-# drop_tails = false      # Drop any remaining tokens at document ends after emitting each sequence (default: false)
 
 [[datasets]]
 dataset_path = 'structured_data/*.json'
@@ -100,8 +126,31 @@ dataset_path = 'more_structured_data/*.jsonl'
 [[datasets]]
 dataset_path = 'parquet_data/*.parquet'
 
-# - Text files are read as raw training data, structured formats (json/jsonl/parquet) use their "text" fields
-# - The 'max_sequences' option limits the number of training sequences extracted from each dataset
-# - The 'drop_tails=true' setting drops any partial document "tails" to maintain clean sequence boundaries
-# - The HuggingFace dataset cache will be added below the dataset paths and is shared between nodes
-# - See the other example 'config.toml' files for how to setup Control Adapter training
+# Example Control Adapter datasets (uncomment and modify for Control Adapter training)
+# NOTE: When using Control Adapters, increase lora_weight_decay to 100-500+ for mathematical stability
+# Positive examples - enhance this behavior
+#[[datasets]]
+#dataset_path = 'data/positive_examples.json'
+#control_class = 1                  # Enhance this behavior (default)
+#document_suffix = "<EOT>"          # String to append before tokenizing
+
+# Negative examples - suppress this behavior  
+#[[datasets]]
+#dataset_path = 'data/negative_examples.json'
+#control_class = -1                 # Suppress/unlearn this behavior
+#document_suffix = ""               # No additional tokens added
+
+# Document suffix options (per-dataset, applied during tokenization):
+# - None: tokenize first, then add tokenizer's EOS token if missing (default)
+# - "": empty suffix, no additional tokens added
+# - "<EOT>": string to append before tokenizing
+# - 123: single token ID to append after tokenizing
+# - [123, 456]: multiple token IDs to append after tokenizing
+
+# Notes:
+# - Text files (.txt) are read as raw training data
+# - Structured formats (.json/.jsonl/.parquet) must have a "text" field
+# - The HuggingFace dataset cache will be created below the dataset paths and is shared between nodes
+# - For multi-node training, ensure all paths use the same mount point across nodes
+# - control_class must be -1 or 1 (only used with Control Adapters)
+# - Supported file patterns: single files or glob patterns with wildcards

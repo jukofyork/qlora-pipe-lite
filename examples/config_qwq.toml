@@ -43,6 +43,13 @@ gradient_accumulation_steps = 17
 
 use_column_major_topology = true
 
+# =======================================
+# GLOBAL SEQUENCE PROCESSING CONFIGURATION
+# =======================================
+
+max_sequences = 51513  # 25757 + 12878 + 12878 (50% + 25% + 25% split)
+drop_tails = true
+
 # =====================
 # DATASET CONFIGURATION
 # =====================
@@ -50,17 +57,11 @@ use_column_major_topology = true
 [[datasets]]
 dataset_path = '/mnt/shared/datasets/books-markdown-cleaned-fiction--filtered/*.json'
 control_class = 1
-max_sequences = 25757   # floor(0.5*51000/(1-0.01))
-drop_tails = true
 
 [[datasets]]
 dataset_path = '/mnt/shared/datasets/ajibawa-2023-Stories-Collections--filtered/*.json'
 control_class = -1
-max_sequences = 12878   # floor(0.25*51000/(1−0.01))
-drop_tails = true
 
 [[datasets]]
 dataset_path = '/mnt/shared/datasets/literotica-stories--filtered/*.json'
 control_class = -1
-max_sequences = 12878   # floor(0.25*51000/(1−0.01))
-drop_tails = true
