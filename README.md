@@ -336,10 +336,10 @@ Trains low-rank adapter matrices on top of frozen base model weights:
 
 ```toml
 lora_rank = 64
-lora_alpha = 64                # Default: sqrt(rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
-lora_dropout = 0.05            # Default: 0.0
-lora_weight_decay = 10.0       # Default: 0.0, requires float32 adapters
-lora_weight_dtype = "float32"  # Default: "float32", use "bfloat16" to save memory (disables weight decay)
+lora_alpha = 64                  # Default: sqrt(rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
+lora_dropout = 0.05              # Default: 0.0
+lora_weight_decay = 10.0         # Default: 0.0, requires float32 adapters
+lora_weight_dtype = "float32"    # Default: "float32", use "bfloat16" to save memory (disables weight decay)
 ```
 
 **NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to its default `float32`, it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below). For Control Adapters, `float32` and weight decay are essential for mathematical stability - see [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for details.
@@ -389,10 +389,10 @@ output_dir = '/path/to/output'
 
 ```toml
 lr = 5e-5
-epochs = 1                     # Default: 1
-beta1 = 0.9                    # Default: 0.9
-beta2 = 0.99                   # Default: 0.99
-eps = 1e-6                     # Default: 1e-6
+epochs = 1                       # Default: 1
+beta1 = 0.9                      # Default: 0.9
+beta2 = 0.99                     # Default: 0.99
+eps = 1e-6                       # Default: 1e-6
 ```
 
 **NOTE**: Uses the [**optimi Adam optimizer**](https://optimi.benjaminwarner.dev/optimizers/adam/) with [Kahan summation](https://en.wikipedia.org/wiki/Kahan_summation_algorithm) automatically applied for low-precision parameters.
@@ -408,24 +408,40 @@ pipeline_stages = 1                   # Must evenly divide world_size
 
 **NOTE**: Reducing `eval_gradient_accumulation_steps` can help drop fewer examples when creating equal-sized evaluation batches.
 
+#### Tokenizer Options
+
+```toml
+# Add prefix space when tokenizing (useful for some tokenizers)
+# Controlled via command line: --add-prefix-space
+```
+
 #### Dataset Configuration
 
-Multiple datasets with optional limits, class labels, and custom separators:
+Multiple datasets with optional class labels and document processing options:
 
 ```toml
 [[datasets]]
 dataset_path = 'raw_text_data/*.txt'
-max_sequences = 10000                 # Optional limit
-separator = "<|endoftext|>"           # Custom separator added to text before tokenizing
-drop_tails = true                     # Drop partial sequences at document ends
 
 [[datasets]]
 dataset_path = 'structured_data/*.json'
-separator = ""                        # Empty separator: no additional tokens added
+control_class = 1                        # Default: enhance behavior
+document_suffix = "<EOT>"                # String to append before tokenizing
 
 [[datasets]]
-dataset_path = 'more_data/*.json'
-# separator not specified = default behavior (tokenize first, then add tokenizer's EOS token if missing)
+dataset_path = 'negative_examples/*.json'
+control_class = -1                       # Suppress/unlearn behavior
+document_suffix = ""                     # No additional tokens added
+```
+
+##### Document suffix options (per-dataset, applied during tokenization)
+
+```toml
+document_suffix = None           # Default: tokenize first, then add tokenizer's EOS token if missing
+# document_suffix = ""           # Empty suffix: no additional tokens added
+# document_suffix = "<EOT>"      # String to append before tokenizing
+# document_suffix = 123          # Single token ID to append after tokenizing
+# document_suffix = [123, 456]   # Multiple token IDs to append after tokenizing
 ```
 
 **Supported formats**: `.txt` (raw text), `.json`, `.jsonl`, `.parquet` (structured with "text" field)
@@ -439,7 +455,7 @@ dataset_path = 'more_data/*.json'
 Splits the model across multiple GPUs vertically (by layers):
 
 ```toml
-pipeline_stages = 2            # Divide model across 2 GPUs
+pipeline_stages = 2              # Divide model across 2 GPUs
 ```
 
 #### Data Parallelism
@@ -477,8 +493,8 @@ layers_to_transform = '16:31'  # Layers 16-31 (inclusive:inclusive, with first l
 #### Checkpointing
 
 ```toml
-checkpoint_interval_hours = 1  # Default: 1
-max_checkpoints = 3            # Default: 3
+checkpoint_interval_hours = 1    # Default: 1
+max_checkpoints = 3              # Default: 3
 ```
 
 Use the `--resume_from_checkpoint` flag to continue training from the most recent checkpoint:
@@ -492,17 +508,43 @@ python train.py --config config.toml --resume_from_checkpoint
 #### Evaluation
 
 ```toml
-eval_fraction = 0.01           # Default: 0.01
-evals_per_run = 5              # Default: 11 (eg: 1 at start, 1 at end, and 9 more evenly spaced)
+eval_fraction = 0.01             # Default: 0.01
+evals_per_run = 5                # Default: 11 (eg: 1 at start, 1 at end, and 9 more evenly spaced)
 ```
 
 #### LoRA Weight Decay Implementation
 
 ```toml
-lora_weight_decay = 10.0       # Default: 0.0
+lora_weight_decay = 10.0         # Default: 0.0
 ```
 
 See the [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) section below.
+
+#### Global sequence processing options (applied to all datasets)
+
+```toml
+max_sequences = 1000000          # Default: unlimited
+drop_tails = true                # Drop partial sequences at document ends (Default: false)
+```
+
+##### Sequence initialization (applied at start of each sequence)
+
+```toml
+sequence_prefix = None           # Default: add BOS token if it exists
+# sequence_prefix = ""           # No prefix tokens
+# sequence_prefix = "<BOS>"      # String to encode as tokens  
+# sequence_prefix = 123          # Single token ID
+# sequence_prefix = [123, 456]   # Multiple token IDs
+```
+
+##### Token masking (sets `control_classes = 0` and `labels = -100` for specified tokens)
+
+```toml
+mask_tokens = None               # Default: no masking
+# mask_tokens = true             # Mask all special tokens
+# mask_tokens = 123              # Mask specific token ID
+# mask_tokens = [123, 456]       # Mask multiple token IDs
+```
 
 ### Example Training Commands
 
@@ -512,7 +554,7 @@ python train.py --config examples/config.toml --num_gpus 1
 ```
 
 ```bash
-# Multi-GPU Pipeline Parallel Training
+# Multi-GPU Pipeline Parallel Training  
 python train.py --config examples/config_qwq.toml --num_gpus 4
 ```
 
@@ -521,11 +563,22 @@ python train.py --config examples/config_qwq.toml --num_gpus 4
 python train.py --config config.toml --num_gpus 8 --master_addr node0.example.com
 ```
 
+```bash
+# Training with prefix space tokenization
+python train.py --config config.toml --add-prefix-space
+```
+
+```bash
+# Resume from checkpoint
+python train.py --config config.toml --resume_from_checkpoint
+```
+
 **NOTES**:
 
 - The `--num_gpus` option may not be required depending on your setup
 - RTX 4000 series GPUs may need `NCCL_P2P_DISABLE="1" NCCL_IB_DISABLE="1"` environment variables setting
 - For multi-node training guidance, see the [Stanford DeepSpeed tutorial](https://nlp.stanford.edu/mistral/tutorials/deepspeed.html) and how to setup [passwordless SSH](https://wiki.debian.org/Setup%20SSH%20Passwordless%20Login)
+- Use `--add-prefix-space` for tokenizers that require prefix spaces (check your tokenizer documentation)
 
 ### Monitoring Training
 
