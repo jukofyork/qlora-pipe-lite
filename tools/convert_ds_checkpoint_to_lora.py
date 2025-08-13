@@ -13,9 +13,9 @@ def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, lora_output_dir):
     for path in layer_checkpoint_files:
         match = re.fullmatch('layer_(.+)-model_states.pt', os.path.basename(path))
         layer_idx = int(match.group(1)) - 2
-        state_dict = torch.load(path)
+        state_dict = torch.load(path, weights_only=True)
         for name, weight in state_dict.items():
-            converted_name = name.replace('orig', f'base_model.model.model.layers.{layer_idx}').replace('.default', '')
+            converted_name = f'base_model.model.model.layers.{layer_idx}.{name}'
             combined_state_dict[converted_name] = weight
     os.makedirs(lora_output_dir, exist_ok=True)
     torch.save(combined_state_dict, os.path.join(lora_output_dir, 'adapter_model.bin'))
