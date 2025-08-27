@@ -4,7 +4,8 @@ Shared utilities for control adapter conversion scripts.
 """
 
 from pathlib import Path
-from typing import Dict, List, Tuple
+from tqdm import tqdm
+from typing import Dict, List, Tuple, Any
 import argparse
 import json
 import re
@@ -17,14 +18,38 @@ def add_model_args(parser: argparse.ArgumentParser) -> None:
     model_group.add_argument("--cohere", action="store_true", help="Also target o_proj for Cohere models")
     model_group.add_argument("--mixtral", type=int, metavar="N", help="Target experts.{0..N-1}.w2 for Mixtral models")
 
-def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args) -> int:
-    """Copy adapter config, patch target_modules based on model type, and return rank."""
+def load_adapter_config(adapter_path: Path) -> Dict[str, Any]:
+    """Load adapter configuration."""
+    config_path = adapter_path / 'adapter_config.json'
+    if not config_path.exists():
+        raise FileNotFoundError(f"adapter_config.json not found in {adapter_path}")
+
+    with open(config_path, 'r') as f:
+        return json.load(f)
+
+def save_adapter_config(config: Dict[str, Any], output_path: Path) -> None:
+    """Save adapter configuration to output path."""
+    output_path.mkdir(parents=True, exist_ok=True)
+    with open(output_path / 'adapter_config.json', 'w') as f:
+        json.dump(config, f, indent=2)
+    print("Saved adapter_config.json")
+
+def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args):
+    """Copy adapter config, patch target_modules based on model type, and optionally patch rank/alpha."""
     config_file = input_path / 'adapter_config.json'
     if not config_file.exists():
         raise FileNotFoundError(f"adapter_config.json not found in {input_path}")
 
     with open(config_file, 'r') as f:
         config = json.load(f)
+
+    # Compute scale factor from original config before modifying
+    original_rank = config['r']
+    original_alpha = config.get('lora_alpha', original_rank)
+    scale_factor = original_alpha / original_rank
+
+    # Determine target rank (clip to original rank max if specified)
+    target_rank = min(args.rank, original_rank) if args.rank is not None else original_rank
 
     # Set target modules based on model type
     if args.mixtral:
@@ -34,11 +59,17 @@ def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args) -> 
     else:
         config['target_modules'] = ["down_proj"]
 
+    # Update rank if different from original
+    config['r'] = target_rank
+
+    # Always set alpha = rank since scale factor is baked into tensors
+    config['lora_alpha'] = config['r']
+
     with open(output_path / 'adapter_config.json', 'w') as f:
         json.dump(config, f, indent=2)
     print("Updated and copied adapter_config.json")
 
-    return config['r']
+    return scale_factor, target_rank, original_rank
 
 def load_control_adapter_weights(adapter_path: Path) -> Tuple[List[Tuple[str, torch.Tensor]], Dict[str, torch.Tensor]]:
     """Load control adapter weights and return (sorted key-value pairs, full state dict)."""
@@ -120,6 +151,20 @@ def generate_lora_key(layer_idx: int, target_key: str, adapter_type: str, args) 
         lora_base = f"{base_key}.mlp.down_proj"
 
     return f"{lora_base}.lora_{adapter_type}.weight"
+
+def load_model_weights(model_path: Path) -> Dict[str, torch.Tensor]:
+    """Load model weights from safetensors shards."""
+    model_weights = {}
+    model_shards = list(model_path.glob('model*.safetensors'))
+    if not model_shards:
+        raise FileNotFoundError("No model*.safetensors files found in model directory")
+
+    for shard in tqdm(model_shards, desc="Loading model shards"):
+        with safetensors.safe_open(shard, framework='pt', device='cpu') as f:
+            for key in f.keys():
+                model_weights[key] = f.get_tensor(key)
+
+    return model_weights
 
 def save_adapter_weights(new_state_dict: Dict, output_path: Path) -> None:
     output_file = output_path / 'adapter_model.safetensors'

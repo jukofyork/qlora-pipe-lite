@@ -8,34 +8,17 @@ Usage: python control_adapter_to_additive_lora.py base_model_path control_adapte
 """
 
 from pathlib import Path
-from tqdm import tqdm
 import argparse
-import json
-import re
-import safetensors
 import torch
 
 from control_adapter_utils import *
-
-def load_model_weights(model_path: Path) -> Dict[str, torch.Tensor]:
-    """Load model weights from safetensors shards."""
-    model_weights = {}
-    model_shards = list(model_path.glob('model*.safetensors'))
-    if not model_shards:
-        raise FileNotFoundError("No model*.safetensors files found in model directory")
-
-    for shard in tqdm(model_shards, desc="Loading model shards"):
-        with safetensors.safe_open(shard, framework='pt', device='cpu') as f:
-            for key in f.keys():
-                model_weights[key] = f.get_tensor(key)
-
-    return model_weights
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert Control Adapters to Additive LoRA format via SVD")
     parser.add_argument("base_model_path", type=str, help="Path to the base model directory")
     parser.add_argument("control_adapter_path", type=str, help="Path to the Control Adapter directory")
     parser.add_argument("output_path", type=str, help="Path to the output LoRA directory")
+    parser.add_argument("--rank", type=int, help="Override rank for SVD truncation (default: use original rank)")
     parser.add_argument("--no-gpu", action="store_true", help="Use CPU for SVD computation")
     add_model_args(parser)
 
@@ -46,8 +29,7 @@ if __name__ == "__main__":
     output_path = Path(args.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Copy the config file and patch any fields required to turn it into a LoRA
-    lora_rank = copy_and_patch_adapter_config(control_adapter_path, output_path, args)
+    scale_factor, target_rank, _ = copy_and_patch_adapter_config(control_adapter_path, output_path, args)
 
     control_keys, control_state_dict = load_control_adapter_weights(control_adapter_path)
 
@@ -57,7 +39,8 @@ if __name__ == "__main__":
 
     layer_data = parse_control_adapter_keys(control_state_dict)
 
-    print(f"Converting {len(control_keys)} control adapter tensors (device='{svd_device}'):")
+    print(f"Converting {len(control_keys)} control adapter tensors (device='{svd_device}', scale={scale_factor:.4f}):")
+
     for layer_idx in sorted(layer_data.keys()):
         if 'A' not in layer_data[layer_idx] or 'B' not in layer_data[layer_idx]:
             continue
@@ -66,7 +49,8 @@ if __name__ == "__main__":
         B = layer_data[layer_idx]['B']
         old_type = A.dtype
 
-        lora_delta = B.to(torch.float32) @ A.to(torch.float32)
+        # Apply the original alpha/rank scaling factor
+        lora_delta = scale_factor * (B.to(torch.float32) @ A.to(torch.float32))
 
         target_keys = generate_model_weight_keys(layer_idx, args)
 
@@ -81,10 +65,12 @@ if __name__ == "__main__":
             U, S, Vt = torch.linalg.svd(effect_gpu, full_matrices=False)
             U, S, Vt = U.cpu(), S.cpu(), Vt.cpu()
 
-            rank = min(lora_rank, len(S))
-            sqrt_S = torch.sqrt(S[:rank])
-            A_approx = torch.diag(sqrt_S) @ Vt[:rank,:]
-            B_approx = U[:,:rank] @ torch.diag(sqrt_S)
+            # Truncate to target rank
+            if target_rank > len(S):
+                raise ValueError(f"Requested rank {target_rank} exceeds maximum available rank {len(S)} from SVD")
+            sqrt_S = torch.sqrt(S[:target_rank])
+            A_approx = torch.diag(sqrt_S) @ Vt[:target_rank,:]
+            B_approx = U[:,:target_rank] @ torch.diag(sqrt_S)
 
             A_approx = A_approx.to(old_type)
             B_approx = B_approx.to(old_type)
@@ -95,7 +81,8 @@ if __name__ == "__main__":
             lora_state_dict[b_key] = B_approx
 
             base_key = f"base_model.model.model.layers.{layer_idx}"
-            print(f"- SVD rank {rank}/{len(S)}, {100*torch.sum(S[:rank]**2)/torch.sum(S**2):.1f}% of variance explained:")
+            print(f"- Layer {layer_idx}, SVD rank {target_rank}/{len(S)}, "
+                  f"{100*torch.sum(S[:target_rank]**2)/torch.sum(S**2):.4f}% of variance explained:")
             print(f"-- '{base_key}.control_A.weight' -> '{a_key}'")
             print(f"-- '{base_key}.control_B.weight' -> '{b_key}'")
 
