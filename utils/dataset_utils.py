@@ -286,6 +286,9 @@ def load_single_dataset(
         num_proc=min(os.cpu_count(), len(dataset)),
     )
 
+    # Shuffle this individual dataset's documents before concatenation
+    dataset = dataset.shuffle(seed=42)
+
     return dataset
 
 def load_datasets(config, tokenizer, run_dir):
@@ -320,6 +323,7 @@ def load_datasets(config, tokenizer, run_dir):
 
     max_sequences = config.get('max_sequences', sys.maxsize)
     drop_tails = config.get('drop_tails', False)
+    mix_datasets = config.get('mix_datasets', False)
     sequence_prefix = config.get('sequence_prefix', None)  # None --> initialize sequence with BOS token if it exists
     mask_tokens = config.get('mask_tokens', None)  # None --> no masking
 
@@ -358,7 +362,9 @@ def load_datasets(config, tokenizer, run_dir):
 
             combined_dataset = datasets.concatenate_datasets(datasets_list)
 
-            combined_dataset = combined_dataset.shuffle(seed=42)
+            # Only mix the concatenated datasets' documents if asked to
+            if mix_datasets:
+                combined_dataset = combined_dataset.shuffle(seed=42)
 
             combined_dataset.set_format(type='torch')
 

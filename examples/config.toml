@@ -94,6 +94,9 @@ max_checkpoints = 3            # (default: 3)
 # Drop partial sequences at document ends to ensure each sequence begins with a fresh document (default: false)
 #drop_tails = true
 
+# Allow sequences to mix tokens from multiple datasets (default: false)
+#mix_datasets = true
+
 # Sequence initialization (applied at start of each sequence):
 # - None: add BOS token if it exists (default)
 # - "": no prefix tokens

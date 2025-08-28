@@ -525,6 +525,7 @@ See the [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) section belo
 ```toml
 max_sequences = 1000000          # Default: unlimited
 drop_tails = true                # Drop partial sequences at document ends (Default: false)
+mix_datasets = true              # Allow sequences to mix tokens from multiple datasets (Default: false)
 ```
 
 ##### Sequence initialization (applied at start of each sequence)
