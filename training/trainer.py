@@ -5,8 +5,6 @@ import time
 import torch
 
 from constants import (
-    DEFAULT_LORA_WEIGHT_DECAY,
-    DEFAULT_LORA_MAX_NORM,
     DEFAULT_CHECKPOINT_INTERVAL_HOURS,
     DEFAULT_MAX_CHECKPOINTS,
     DEFAULT_EVALS_PER_RUN
@@ -49,7 +47,6 @@ class Trainer:
         self.eval_gradient_accumulation_steps = eval_gradient_accumulation_steps
         self.checkpoint_interval_hours = config.get('checkpoint_interval_hours', DEFAULT_CHECKPOINT_INTERVAL_HOURS)
         self.max_checkpoints = config.get('max_checkpoints', DEFAULT_MAX_CHECKPOINTS)
-        self.use_control_adapters = config.get('use_control_adapters', False)
 
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
@@ -102,7 +99,7 @@ class Trainer:
                 if self.lora_config is not None:
                     self.tb_writer.add_scalar('train/norm_avg', norm_avg, step)
                     self.tb_writer.add_scalar('train/norm_max', norm_max, step)
-                    if self.config.get('lora_weight_decay', DEFAULT_LORA_WEIGHT_DECAY) > 0:
+                    if self.config.get('lora_weight_decay', 0.0) > 0:
                         self.tb_writer.add_scalar('train/weight_decay_avg', weight_decay_avg, step)
                         self.tb_writer.add_scalar('train/weight_decay_max', weight_decay_max, step)
 
@@ -174,8 +171,8 @@ class Trainer:
         decays = []
 
         lora_scale = config['lora_alpha'] / config['lora_rank']
-        weight_decay = config.get('lora_weight_decay', DEFAULT_LORA_WEIGHT_DECAY)
-        max_norm = config.get('lora_max_norm', DEFAULT_LORA_MAX_NORM)
+        weight_decay = config.get('lora_weight_decay', 0.0)
+        max_norm = config.get('lora_max_norm', 0.0)
 
         for name, param in model.named_parameters():
             if any(adapter_type in name for adapter_type in ['lora_A', 'control_A']):
@@ -201,58 +198,64 @@ class Trainer:
                     # Apply the weight decay update first
                     if weight_decay > 0:
 
-                        # Using L = ½||W||_F²:
+                        # Nuclear-norm regularisation using convex relaxation L = s·(||A||_F² + ||B||_F²) as proxy for 2·||W||_*:
+                        #    ∂L/∂A = 2s·A
+                        #    ∂L/∂B = 2s·B
+                        if config.get('lora_weight_decay_type', "nuclear").lower() == "nuclear":
+                            grad_A = 2 * lora_scale * A
+                            grad_B = 2 * lora_scale * B
+                            # Modify the tensors in place
+                            with torch.no_grad():
+                                A.sub_(lr * weight_decay * grad_A)
+                                B.sub_(lr * weight_decay * grad_B)
+
+                        # L2-norm regularisation using L = ½||W||_F²:
                         #    ∂L/∂W = W, as ∂(½||W||_F²)/∂W = W
                         #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = s⋅BᵗW
                         #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = s⋅WAᵗ
-                        grad_A = lora_scale * (B.t() @ W)
-                        grad_B = lora_scale * (W @ A.t())
+                        elif config.get('lora_weight_decay_type', "nuclear").lower() == "l2":
+                            grad_A = lora_scale * (B.t() @ W)
+                            grad_B = lora_scale * (W @ A.t())
+                            # Modify the tensors in place
+                            with torch.no_grad():
+                                A.sub_(lr * weight_decay * grad_A)
+                                B.sub_(lr * weight_decay * grad_B)
 
-                        # Modify the tensors in place
-                        with torch.no_grad():
-                            A.sub_(lr * weight_decay * grad_A)
-                            B.sub_(lr * weight_decay * grad_B)
+                        # L1-norm regularisation using L = ||W||_F:
+                        #    ∂L/∂W = W/||W||_F (unit matrix in direction of W)
+                        #    ∂L/∂A = s⋅B^T⋅(W/||W||_F)
+                        #    ∂L/∂B = s⋅(W/||W||_F)⋅A^T
+                        elif config.get('lora_weight_decay_type', "nuclear").lower() == "l1":
+                            if W_norm > 1e-8:  # Avoid division by zero
+                                W_unit = W / W_norm
+                                grad_A = lora_scale * (B.t() @ W_unit)
+                                grad_B = lora_scale * (W_unit @ A.t())
+                                # Modify the tensors in place with soft thresholding
+                                step_size = min(lr * weight_decay, W_norm)
+                                with torch.no_grad():
+                                    A.sub_(step_size * grad_A)
+                                    B.sub_(step_size * grad_B)
 
-                        # Recompute gradients using updated W
+                        # Recompute W and its norm using updated A and B
                         W = lora_scale * (B @ A)
                         W_norm = W.norm().item()
 
                     # Apply max-norm regularisation after the weight decay update, and only if needed
                     if max_norm > 0 and W_norm > max_norm:
-                       # Goal: Keep the LoRA weight W = s·B·A inside the Frobenius-norm ball ‖W‖_F ≤ max_norm
+                        # Goal: Keep the LoRA weight W = s·B·A inside the Frobenius-norm ball ‖W‖_F ≤ max_norm
 
-                       # Using L = ½||W||_F²:
-                       #    ∂L/∂W = W, as ∂(½||W||_F²)/∂W = W
-                       #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = s⋅BᵗW
-                       #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = s⋅WAᵗ
-                       grad_A = lora_scale * (B.t() @ W)
-                       grad_B = lora_scale * (W @ A.t())
+                        # Direct projection: scale both A and B by sqrt(max_norm/||W||_F)
+                        ratio = max_norm / W_norm
+                        sqrt_ratio = ratio ** 0.5
 
-                       # Compute the squared 2-norm of the full gradient:
-                       #    g_A = ∂F/∂A
-                       #    g_B = ∂F/∂B
-                       #    ‖g‖² = ‖g_A‖² + ‖g_B‖²
-                       grad_norm_squared = (grad_A.norm().item() ** 2) + (grad_B.norm().item() ** 2)
+                        # Modify the tensors in place
+                        with torch.no_grad():
+                            A.mul_(sqrt_ratio)
+                            B.mul_(sqrt_ratio)
 
-                       # Avoid division by zero (small/zero gradients can occur at initialisation)
-                       if grad_norm_squared > 1e-6:
-                           # First-order Taylor expansion for a step of length x along –g:
-                           #     F_new ≈ F_old − x‖g‖², where ‖g‖² = ‖g_A‖² + ‖g_B‖²
-                           # We want:
-                           #     F_new = ½·max_norm², so: ½r² − x‖g‖² = ½·max_norm²
-                           # Solve for x:
-                           #     x = (r² − max_norm²) / (2‖g‖²)
-                           # NOTE: The factor 2 comes from the ½ in F(A,B) = ½‖W‖².
-                           x = (W_norm * W_norm - max_norm * max_norm) / (2 * grad_norm_squared)
-
-                           # Modify the tensors in place
-                           with torch.no_grad():
-                               A.sub_(x * grad_A)
-                               B.sub_(x * grad_B)
-
-                           # Recompute gradients using updated W
-                           W = lora_scale * (B @ A)
-                           W_norm = W.norm().item()
+                        # Recompute W and its norm after scaling
+                        W = lora_scale * (B @ A)
+                        W_norm = W.norm().item()
 
                 # Save the norms and the decays after the (optional) updates
                 norms.append(W_norm)

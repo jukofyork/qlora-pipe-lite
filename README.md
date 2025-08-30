@@ -33,7 +33,7 @@ Control Adapters are a new Parameter-Efficient Fine-Tuning ([PEFT](https://githu
 - [What are Control Adapters?](#what-are-control-adapters)
   - [Relationship to Control Vectors](#relationship-to-control-vectors)
   - [Mathematical Foundation](#mathematical-foundation)
-  - [Convergence Requirements and the need for Weight Decay](#convergence-requirements-and-the-need-for-weight-decay)
+  - [Weight Decay: Helpful but Optional](#weight-decay-helpful-but-optional)
   - [Conversion and Compatibility](#conversion-and-compatibility)
   - [Why Use Control Adapters?](#why-use-control-adapters)
 - [Training](#training)
@@ -83,7 +83,7 @@ layers_to_transform = '0:29'       # Train layers 0-29 (30 layers total)
 
 # Training parameters
 lr = 2e-5
-lora_weight_decay = 500.0
+lora_weight_decay = 10.0
 sequence_len = 4096
 gradient_accumulation_steps = 64   # ie: ~250k tokens per step
 
@@ -173,7 +173,7 @@ load_in_4bit = true
 
 - See [Training](#training) for detailed configuration options
 - Check [example configs](examples/) for model-specific settings
-- Read about [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for Control Adapters
+- Read about [What are Control Adapters?](#what-are-control-adapters)
 - Learn about [LoRA Weight Decay](#a-note-on-lora-weight-decay) implementation
 
 ## What are Control Adapters?
@@ -182,9 +182,10 @@ Control Adapters are a new form of PEFT adapter that simultaneously applies mult
 
 **Key Characteristics:**
 - **Residual-based**: Applied to the delta/change produced by each decoder block rather than absolute hidden state values
-- **Multiplicative**: Uses `h' = (I + scale * B @ A) @ h` transformations instead of additive `h' = h + (scale * B @ A) @ h` transformations like normal LoRA adapters
+- **Multiplicative**: Uses `h' = (I + W) @ h` transformations instead of additive `h' = h + (scale * B @ A) @ h` transformations like normal LoRA adapters
 - **Layer-wide**: Affects the entire residual stream rather than individual weight matrices
-- **Class-aware**: Supports positive (ie: `class 1`) and negative (ie: `class -1`, aka "unlearning") training examples, with negative examples using inverse transformations of the same adapter `h' = (I + scale * B @ A)^{-1} @ h` to suppress rather than enhance behaviors
+- **Class-aware**: Supports positive (ie: `class 1`) and negative (ie: `class -1`, aka "unlearning") training examples, with negative examples using simple negation `h' = (I - W) @ h` to suppress rather than enhance behaviors
+- **Matrix structure control**: Optional symmetrization or antisymmetrization of the learned transformation matrix
 
 ### Relationship to Control Vectors
 
@@ -194,6 +195,8 @@ Control Adapters are conceptually similar to [Control Vectors](https://github.co
 
 - **Control Adapters**: Learn steering transformations through gradient-based training, making them more forgiving and suitable for "fuzzy" criteria like writing style rather than requiring carefully selected behavioral "axes". They can be thought of as having two components: the `A` vectors act as "signed direction detectors" (via dot product), whilst the `B` vectors provide the steering effect. Due to the very high dimensionality of the hidden states, multiple Control Adapters are less likely to interfere when combined.
 
+- **Enhanced expressiveness**: With the new `control_adapter_type` options, Control Adapters can learn constrained matrix structures (symmetric, antisymmetric) that naturally correspond to different types of transformations, making them even more complementary to Control Vectors for achieving full affine transformations.
+
 ### Mathematical Foundation
 
 Control Adapters apply multiplicative transformations to the residual stream using a (scaled) rank-decomposed matrix:
@@ -202,89 +205,59 @@ Control Adapters apply multiplicative transformations to the residual stream usi
 W = scale * B @ A, where scale = alpha / rank
 ```
 
+The transformation matrix `W` can optionally be constrained using the `control_adapter_type` setting:
+- **"full"** (default): `W` remains unconstrained 
+- **"symmetrise"**: `W' = (W + W^T) / 2` forces symmetric structure
+- **"antisymmetrise"**: `W' = (W - W^T) / 2` forces antisymmetric structure
+
 #### For positive examples (`class +1`):
 
 ```
-h' = (I + W) @ h
+h' = (I + W') @ h
 ```
 
 #### For negative examples (`class -1`):
 
 ```
-h' = (I + W)^{-1} @ h ≈ (I - W + higher_order_terms) @ h
+h' = (I - W') @ h
 ```
 
-The inverse transformation uses a [Neumann series approximation](https://en.wikipedia.org/wiki/Neumann_series), allowing the same adapter parameters to both enhance desired behaviors (positive) and suppress undesired behaviors (negative) during training.
+The negative transformation uses simple matrix subtraction rather than matrix inversion. This is mathematically an approximation to the [Neumann series](https://en.wikipedia.org/wiki/Neumann_series) `(I + W)^{-1} ≈ I - W + O(W^2)` when `ρ(A) << 1`, but in practice it is often the case that `ρ(A) > 1` so the link to matrix inversion is quite weak.
 
-#### Classical Transformations as Special Cases
+### Classical Transformations as Special Cases
 
-Control Adapters can represent several classical transformations, including:
+Control Adapters can represent several classical transformations, with the new matrix structure options making them much more accessible:
 
-- [Orthogonal projection onto the null space](https://en.wikipedia.org/wiki/Projection_(linear_algebra)) (aka: 
-["Abliteration"](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction)):
+#### Symmetric transformations (using `control_adapter_type = "symmetrise"`):
 
+- **Orthogonal projection onto the null space** (aka: ["Abliteration"](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction)):
 ```
-I - u u^T, when B = -A
-```
-
-- [Householder transformations](https://en.wikipedia.org/wiki/Householder_transformation):
-
-```
-I - 2 * u u^T, when B = -2A
+I - u u^T, when the symmetric part of B @ A ≈ u u^T
 ```
 
-When combined with Control Vectors, they enable full [affine transformations](https://en.wikipedia.org/wiki/Affine_transformation) of the decoder layer outputs.
-
-### Convergence Requirements and the need for Weight Decay
-
-As mentioned above, Control Adapters rely on the [Neumann series approximation](https://en.wikipedia.org/wiki/Neumann_series) for computing matrix inverses during negative example training. For mathematical stability and convergence, the composite matrix `W = scale * B @ A` must satisfy specific norm constraints.
-
-#### Convergence Condition
-
-The Neumann series `(I + W)^{-1} = I - W + W^2 - W^3 + ...` converges when the [spectral radius](https://en.wikipedia.org/wiki/Spectral_radius) `ρ(W) < 1`.
-
-A sufficient condition (ie: a stricter but easier-to-check requirement that guarantees convergence) is that the [spectral norm](https://en.wikipedia.org/wiki/Matrix_norm#Spectral_norm) `‖W‖₂ < 1`.
-
-For rank-`r` matrices, the relationship between norms is:
-
+- **Householder transformations**:
 ```
-‖W‖₂ ≤ ‖W‖_F ≤ √r · ‖W‖₂
+I - 2 * u u^T, when the symmetric part of B @ A ≈ 2 * u u^T
 ```
 
-Where `‖W‖_F` is the [Frobenius norm](https://en.wikipedia.org/wiki/Frobenius_norm).
+#### Antisymmetric transformations (using `control_adapter_type = "antisymmetrise"`):
 
-Since the Frobenius norm is much cheaper to compute than the spectral norm (which requires SVD or power iteration per step), we monitor it instead.
+- **Rotational transformations**: Antisymmetric matrices generate rotations in high-dimensional space
+- **Skew-symmetric projections**: Useful for creating orthogonal steering directions
 
-#### Scalar Intuition
+#### Combined with Control Vectors:
 
-To understand why norm constraints matter, consider the simple scalar case: computing `1/(1 + δ)` using the series `1 - δ + δ² - δ³ + ...`. When `δ = 0.1`, the true value is `1/1.1 ≈ 0.9091`. The first-order approximation `1 - δ = 0.9000` has \~1% error, while the second-order `1 - δ + δ² = 0.9100` has \~0.1% error. However, if `δ = 2`, the series diverges completely since `|δ| ≥ 1`. The same principle applies to matrices: keeping `‖W‖₂ < 1` ensures the matrix inverse series converges, and smaller norms give better approximations with fewer terms.
+When used together with Control Vectors, Control Adapters can provide the linear transformation component of full [affine transformations](https://en.wikipedia.org/wiki/Affine_transformation), while Control Vectors provide the translation component.
 
-#### Practical Guidelines
+### Weight Decay: Helpful but Optional
 
-To ensure convergence with acceptable approximation error:
+Unlike the original mathematical formulation that tried to apply strict norm constraints to keep `ρ(A) << 1`, the simplified negation approach makes weight decay **helpful but not essential**:
 
-- **Target**: Keep `‖W‖_F ≲ 0.25 · √r` (approximately 0.2-0.3 times `√rank`)
-- **Assumption**: This guidance assumes relatively balanced singular values in `W`
-- **Result**: Under this assumption, `‖W‖₂ ≈ ‖W‖_F / √r ≲ 0.25`, giving truncation errors ≤ 1-2%
-- **Worst-case**: Without balanced singular values, `‖W‖₂` could be as high as `‖W‖_F` (ie: `0.25 · √r`)
-- **Monitoring**: The training logs show `norm_avg` and `norm_max` values for `‖W‖_F`
+- **Still beneficial**: Proper regularization helps control the magnitude of transformations and improves training stability
+- **No longer critical**: The simple negation approach doesn't require convergence guarantees or strict norm bounds
+- **Flexible precision**: Both `float32` (recommended) and `bfloat16` adapter weights are allowed
 
-#### Why Weight Decay is Essential
-
-Unlike traditional LoRA where weight decay is optional, Control Adapters **require** proper regularization to maintain norm constraints:
-
-1. **Prevents divergence**: Without regularization, norms can grow beyond convergence limits
-2. **Uniform scaling**: Decoupled weight decay on the composite matrix `W` properly scales all singular values, unlike naive decay on `A` and `B` separately
-3. **Stability**: Maintains the mathematical guarantees needed for reliable inverse approximations
-
-**Recommendation**: Always use `lora_weight_dtype = "float32"` with `lora_weight_decay > 0` for Control Adapters. The `bfloat16` option should only be used when memory constraints are severe, as it disables the essential weight decay regularization.
-
-For typical setups:
-- **Rank 16**: Target `‖W‖_F < 1.0`, and use `lora_weight_decay` of `100-500`
-- **Rank 64**: Target `‖W‖_F < 2.0`, and use `lora_weight_decay` of `500` or more
-- **Higher ranks**: Monitor `‖W‖_F / √r` and keep < 0.3 (assuming relatively balanced singular values)
-
-Monitor the `norm_max` values in TensorBoard to ensure they stay well below these thresholds throughout training.
+For typical setups, moderate weight decay values (10-100) can help with training stability, but the system remains robust without it.
 
 ### Conversion and Compatibility
 
@@ -301,13 +274,14 @@ See the [tools](tools) folder for the conversion scripts. Note that the Cohere a
 
 Control Adapters excel in scenarios where you need:
 - **Precise behavioral steering** with "fuzzy" criteria (eg: writing style, tone) rather than requiring carefully crafted behavioral axes like Control Vectors
+- **Structured transformations** using symmetric/antisymmetric constraints to learn specific types of mathematical operations
 - **Compositional control** - multiple Control Adapters can be combined with minimal interference due to high-dimensional space and the A/B decomposition
 - **Bidirectional training** with positive and negative examples to both enhance and suppress behaviors using the same parameters
 - **Smaller datasets** - more forgiving than traditional methods and are effective with less well-structured data
 - **Mathematical expressiveness** - can easily learn classical transformations like "abliteration" or Householder transforms
 - **Complementary to Control Vectors** - work together to enable full affine transformations of decoder outputs
 
-**Best used for**: Behavioral modification, style transfer, and "unlearning" specific behaviors.
+**Best used for**: Behavioral modification, style transfer, "unlearning" specific behaviors, and learning structured transformations.
 
 **NOTE**: For general fine-tuning tasks like instruction following or domain adaptation, traditional LoRA or QLoRA may be more appropriate. Control Adapters are specifically designed for behavioral steering applications.
 
@@ -339,10 +313,12 @@ lora_rank = 64
 lora_alpha = 64                  # Default: sqrt(rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
 lora_dropout = 0.05              # Default: 0.0
 lora_weight_decay = 10.0         # Default: 0.0, requires float32 adapters
+lora_weight_decay_type = "l2"    # Default: "nuclear", options: "nuclear", "l2", "l1"
+lora_max_norm = 1.0              # Default: 0.0, Frobenius norm constraint on LoRA weights
 lora_weight_dtype = "float32"    # Default: "float32", use "bfloat16" to save memory (disables weight decay)
 ```
 
-**NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to its default `float32`, it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below). For Control Adapters, `float32` and weight decay are essential for mathematical stability - see [Convergence Requirements](#convergence-requirements-and-the-need-for-weight-decay) for details.
+**NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to its default `float32`, it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below).
 
 #### QLoRA (Quantized LoRA)
 
@@ -516,6 +492,8 @@ evals_per_run = 5                # Default: 11 (eg: 1 at start, 1 at end, and 9 
 
 ```toml
 lora_weight_decay = 10.0         # Default: 0.0
+lora_weight_decay_type = "l2"    # Default: "nuclear", options: "nuclear", "l2", "l1"
+lora_max_norm = 1.0              # Default: 0.0, Frobenius norm constraint on LoRA weights
 ```
 
 See the [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) section below.
@@ -603,10 +581,25 @@ Traditional weight decay applied directly to LoRA parameters (`lora_A` and `lora
 
 ### Solution: Custom 'composite' decoupled weight decay + use `float32` adapters only
 
-Instead of regularizing `A` and `B` independently, we apply decoupled weight decay to the composite matrix `W = scale * B @ A` using manually calculated gradients. This directly penalizes the composite transformation that actually affects model behavior:
+#### `lora_weight_decay_type = "nuclear"` (default):
+
+Minimizing the ℓ2-regularized problem in A and B is mathematically equivalent to minimizing the nuclear-norm regularized loss in the product `X = AB^T` subject to a rank constraint (see [this paper](https://arxiv.org/abs/0706.4138) for details):
 
 ```
-L' = L + λ · ½||W||²_F
+L' = L + λ · (||A||_F² + ||B||_F²)
+```
+
+```
+∂L'/∂A = 2 · λ · scale · A
+∂L'/∂B = 2 · λ · scale · B
+```
+
+#### `lora_weight_decay_type = "l2"`:
+
+Instead of regularizing `A` and `B` independently, we can also apply decoupled weight decay to the composite matrix `W = scale * B @ A`. This directly penalizes the composite transformation that actually affects model behavior:
+
+```
+L' = L + λ · ½||W||_F²
 ```
 
 ```
@@ -614,10 +607,26 @@ L' = L + λ · ½||W||²_F
 ∂L'/∂B = λ · scale · W A^T
 ```
 
+#### `lora_weight_decay_type = "l1"`:
+
+For completeness, we can also apply something akin to ℓ1-regularization:
+
+```
+L' = L + λ · ||W||_F
+```
+
+```
+∂L'/∂A = λ · scale · B^T (W/||W||_F)
+∂L'/∂B = λ · scale · (W/||W||_F) A^T
+```
+
+and then using [soft thresholding](https://en.wikipedia.org/wiki/Proximal_gradient_methods_for_learning#Solving_for_L1_proximity_operator).
+
 - Use `Adam` (**NOT** `AdamW`) with the primary loss `L`
 - Use SGD (without momentum) for the regularization term using the same learning rate (ie: decoupled, pseudo-`AdamW`)
 - Always use `float32` precision for `A` and `B` matrices to avoid catastrophic cancellation
 - Use the `lora_weight_decay` parameter in your `config.toml` file to control the regularization strength
+- Use the `lora_weight_decay_type` parameter in your `config.toml` file to control the regularization type
 
 ## Credits
 
