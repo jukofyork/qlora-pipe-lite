@@ -23,10 +23,19 @@ load_in_4bit = true
 # ==================
 
 lora_rank = 64
-lora_alpha = 64                # (default: sqrt(lora_rank) for rsLoRA scaling)
-lora_dropout = 0.05            # (default: 0.0)
-lora_weight_decay = 10.0       # (default: 0.0, requires lora_weight_dtype = "float32")
-lora_weight_dtype = "float32"  # (default: "float32", use "bfloat16" to save memory but disables weight decay)
+lora_alpha = 64                  # (default: sqrt(lora_rank) for rsLoRA scaling)
+lora_dropout = 0.05              # (default: 0.0)
+lora_weight_decay = 10.0         # (default: 0.0, requires lora_weight_dtype = "float32")  
+#lora_weight_decay_type = "l2"   # (default: "nuclear", options: "nuclear", "l2", "l1")
+#lora_max_norm = 1.0             # (default: 0.0, Frobenius norm constraint on LoRA weights)
+#lora_weight_dtype = "bfloat16"  # (default: "float32", use "bfloat16" to save memory but disables weight decay)
+
+# ===========================
+# CONTROL ADAPTER CONFIGURATION
+# ===========================
+
+# Control adapter matrix transformation type (only used with Control Adapters)
+#control_adapter_type = "full"   # (default: "full", options: "full", "symmetrise", "antisymmetrise")
 
 # =======================
 # OPTIMIZER CONFIGURATION

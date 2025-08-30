@@ -12,8 +12,7 @@ import transformers
 from constants import (
     DEFAULT_BETA1,
     DEFAULT_BETA2,
-    DEFAULT_EPS,
-    DEFAULT_LORA_DROPOUT
+    DEFAULT_EPS
 )
 from models import causal_lm_models
 from pipeline import engine
@@ -35,36 +34,11 @@ def patch_bitsandbytes_cuda():
 
     bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
 
-def patch_decoder_layer_control_adapter(module):
+def patch_decoder_layer_control_adapter(module, config):
     """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
 
-    # When ‖A‖₂ ≲ 0.2–0.3 (see monitoring ‖W‖_F below), the 1-st order truncation error O(‖A‖₂²) ≤ 1–2%.
-    # - Going to order 2 halves the error (O(‖A‖₂³)) but doubles the extra matmul cost.
-    # - Order 3+ are looking at less than 0.1% gains in the intended ‖A‖₂ norm range.
-    NEUMANN_SERIES_ORDER = 1
-
-    # The Neumann series approximation for matrix inverse: (I + A)^(-1) = I - A + A^2 - A^3 + ...
-    # converges when ρ(A) < 1, where ρ(A) is the spectral radius (max |eigenvalue|).
-    # NOTE: Requiring the spectral norm ‖A‖₂ < 1 is a sufficient condition because ρ(A) ≤ ‖A‖₂.
-    #
-    # Scalar intuition: For 1/(1 + δ) where |δ| < 1:
-    #   True value: 1/(1 + δ)
-    #   1st order:  1 - δ                    (error ≈ δ^2)
-    #   2nd order:  1 - δ + δ^2              (error ≈ δ^3)
-    #
-    # Example with δ = 0.1:
-    #   True:     1/1.1 ≈ 0.9091
-    #   1st:      1 - 0.1 = 0.9000          (error ≈ 1.0%)
-    #   2nd:      1 - 0.1 + 0.01 = 0.9100   (error ≈ 0.1%)
-    #
-    # For Control Adapters (W = scale * B @ A):
-    # - Computing ‖W‖₂ is expensive, so we monitor ‖W‖_F instead (via `norm_avg` and `norm_max` metrics)
-    # - For rank-r matrices: ‖W‖₂ ≤ ‖W‖_F ≤ √r · ‖W‖₂ (depending on the "balancedness" of the singular values)
-    # - Keeping ‖W‖_F ≲ 0.25 √r:
-    #   • With balanced singular values: ‖W‖₂ ≈ 0.25
-    #   • Worst-case: ‖W‖₂ ≤ 0.25 √r
-    # - Using `_apply_lora_weight_decay_local()` helps maintain this by properly scaling all
-    #   singular values of the BA composite, unlike naive weight decay on A and B separately.
+    # Extract control adapter type: "full" (default), "symmetrise", or "antisymmetrise"
+    control_adapter_type = config.get('control_adapter_type', 'full')
 
     def control_adapter_forward(inputs):
         hidden_states, attention_mask, cos, sin, control_classes, labels = inputs
@@ -88,29 +62,22 @@ def patch_decoder_layer_control_adapter(module):
         # Apply Control Adapter: dropout -> A -> B -> scaling
         adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
 
+        # Optionally symmetrise the adapter output: C' = (C^T + C) / 2
+        if control_adapter_type == "symmetrise":
+            adapter_output = (adapter_output + adapter_output.transpose(-2, -1)) / 2
+
+        # Optionally anti-symmetrise the adapter output: C' = (C^T - C) / 2
+        elif control_adapter_type == "antisymmetrise":
+            adapter_output = (adapter_output - adapter_output.transpose(-2, -1)) / 2
+
         # Zero out any with class zero, as these won't have any loss calculated due to having label = -100
         class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to (batch_size, seq_len, 1)
         adapter_output = torch.where(class0_mask, 0.0, adapter_output)
 
-        # For positive samples: Add adapter_output as normal
-        # For negative samples: Apply kth-order Neumann series approximation of (I + A)^{-1}
+        # For class +1 samples: add adapter_output as normal, For class -1 samples: add the negation of adapter_output.
+        # NOTE: This approximates the 1st order Neumann series approximation to the inverse when ρ(A) << 1.
         negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to (batch_size, seq_len, 1)
-        if NEUMANN_SERIES_ORDER == 1:
-            # Simple 1st-order case: (I + A)^{-1} ≈ I - A, so just negate the output
-            adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
-        else:
-            # Higher order: compute Neumann series for negative samples
-            neumann_sum = adapter_output  # Start with A^1 term
-            current_power = adapter_output
-
-            for k in range(1, NEUMANN_SERIES_ORDER):
-                # Compute next power: A^(k+1) (no dropout on higher order terms)
-                current_power = module.control_B(module.control_A(current_power)) * module.control_scaling
-
-                # Add (-1)^k * A^(k+1) to the series
-                neumann_sum = neumann_sum + ((-1.0) ** k) * current_power
-
-            adapter_output = torch.where(negate_mask, -neumann_sum, adapter_output)
+        adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
 
         # Cast adapter contribution back to original dtype and add to the residual stream
         result = layer_output + adapter_output.to(torch_result_dtype)
@@ -273,7 +240,7 @@ def create_lora_config(config, target_modules, layers_to_transform):
     lora_config = LoraConfig(
         r=config['lora_rank'],
         lora_alpha=config['lora_alpha'],
-        lora_dropout=config.get('lora_dropout', DEFAULT_LORA_DROPOUT),
+        lora_dropout=config.get('lora_dropout', 0.0),
         target_modules=actual_target_modules,
         layers_to_transform=layers_to_transform if layers_to_transform else None,
         task_type='CAUSAL_LM'
@@ -343,7 +310,7 @@ def apply_control_adapters(model, config, lora_config):
 
                 # Store original forward method and replace with Control Adapter version
                 module._original_forward = module.forward
-                module.forward = patch_decoder_layer_control_adapter(module)
+                module.forward = patch_decoder_layer_control_adapter(module, config)
 
                 applied_count += 1
             # else:
