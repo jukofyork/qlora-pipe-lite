@@ -620,7 +620,9 @@ L' = L + λ · ||W||_F
 ∂L'/∂B = λ · scale · (W/||W||_F) A^T
 ```
 
-and then using [soft thresholding](https://en.wikipedia.org/wiki/Proximal_gradient_methods_for_learning#Solving_for_L1_proximity_operator).
+and then update using [soft thresholding](https://en.wikipedia.org/wiki/Proximal_gradient_methods_for_learning#Solving_for_L1_proximity_operator).
+
+#### General Guidelines:
 
 - Use `Adam` (**NOT** `AdamW`) with the primary loss `L`
 - Use SGD (without momentum) for the regularization term using the same learning rate (ie: decoupled, pseudo-`AdamW`)
