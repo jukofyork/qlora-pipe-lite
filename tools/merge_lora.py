@@ -15,21 +15,19 @@ parser.add_argument("input_path", type=str, help="The path to the input director
 parser.add_argument("lora_path", type=str, help="The path to the LoRA directory.")
 parser.add_argument("output_path", type=str, help="The path to the output directory.")
 parser.add_argument("--scale", type=float, default=1.0, help="Scale factor for LoRA merging (default: 1.0).")
-parser.add_argument("--multiplicative", action="store_true", help="Merge a multiplicative LoRA instead of an additive LoRA.")
-parser.add_argument("--inverse", action="store_true", help="Merge additive/multiplicative inverse of the LoRA.")
 parser.add_argument("--no-gpu", action="store_true", help="Use CPU for merging.")
 args = parser.parse_args()
 
-if not (0 < args.scale < 2):
-    parser.error("--scale must be in the range (0, 2)")
+if not (-2 < args.scale < 2):
+    parser.error("--scale must be in the range (-2, 2)")
 
 input_path, lora_path, output_path = Path(args.input_path), Path(args.lora_path), Path(args.output_path)
 os.makedirs(output_path, exist_ok=True)
 
 lora_config = peft.LoraConfig.from_json_file(lora_path / 'adapter_config.json')
-scale = (lora_config['lora_alpha'] / lora_config['r']) * args.scale
+scale = (lora_config.lora_alpha / lora_config.r) * args.scale
 
-device = "cpu" if args.no_gpu else "cuda"
+device = "cuda" if (not args.no_gpu and torch.cuda.is_available()) else "cpu"
 
 print('Loading LoRA model...')
 
@@ -90,24 +88,9 @@ for shard in (pbar := tqdm(shards)):
                 old_type = tensor.dtype
                 tensor = tensor.to(torch.float32)
                 lora_delta = scale * lora_B.to(torch.float32) @ lora_A.to(torch.float32)
-                if args.multiplicative:
-                    assert lora_delta.shape[0] == lora_delta.shape[1], \
-                        f"Multiplicative LoRA requires square delta matrix for {key}: got shape {lora_delta.shape}"
-                    assert lora_delta.shape[-1] == tensor.shape[-2], \
-                        f"Multiplicative LoRA dimension mismatch for {key}: {lora_delta.shape} vs {tensor.shape}"
-                    if args.inverse:
-                        identity = torch.eye(lora_delta.shape[0], device=lora_delta.device, dtype=torch.float32)
-                        inverse_matrix = torch.linalg.inv(identity + lora_delta)
-                        tensor = inverse_matrix @ tensor  # ie: tensor = (I + s * B @ A)^{-1} @ tensor
-                    else:
-                        tensor += lora_delta @ tensor  # same as: tensor = (I + s * B @ A) @ tensor
-                else:
-                    assert lora_delta.shape == tensor.shape, \
-                        f"Additive LoRA dimension mismatch for {key}: {lora_delta.shape} vs {tensor.shape}"
-                    if args.inverse:
-                        tensor -= lora_delta
-                    else:
-                        tensor += lora_delta
+                assert lora_delta.shape == tensor.shape, \
+                    f"LoRA dimension mismatch for {key}: {lora_delta.shape} vs {tensor.shape}"
+                tensor += lora_delta
                 tensor = tensor.to(old_type)
             tensors[key] = tensor
         safetensors.torch.save_file(tensors, output_path / shard.name, metadata=metadata)

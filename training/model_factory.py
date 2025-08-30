@@ -34,11 +34,15 @@ def patch_bitsandbytes_cuda():
 
     bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
 
-def patch_decoder_layer_control_adapter(module, config):
+def patch_decoder_layer_control_adapter(module, lora_config):
     """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
 
-    # Extract control adapter type: "full" (default), "symmetrise", or "antisymmetrise"
-    control_adapter_type = config.get('control_adapter_type', 'full')
+    control_adapter_type = getattr(lora_config, "control_adapter_type", "full")
+
+    # Validate control adapter type from LoRA config
+    allowed_types = {"full", "symmetrise", "antisymmetrise"}
+    if control_adapter_type not in allowed_types:
+        raise ValueError(f"Invalid control_adapter_type: {control_adapter_type}. Must be one of {sorted(allowed_types)}")
 
     def control_adapter_forward(inputs):
         hidden_states, attention_mask, cos, sin, control_classes, labels = inputs
@@ -56,27 +60,37 @@ def patch_decoder_layer_control_adapter(module, config):
         layer_output = module.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0]
         torch_result_dtype = layer_output.dtype
 
-        # Calculate the delta and cast to the adpater's dtype
-        layer_delta = (layer_output - input_hidden_states).to(module.control_A.weight.dtype)
+        # Compute residual delta, apply optional dropout, then cast to adapter dtype
+        layer_delta = layer_output - input_hidden_states
+        x = module.control_dropout(layer_delta).to(module.control_A.weight.dtype)
 
-        # Apply Control Adapter: dropout -> A -> B -> scaling
-        adapter_output = module.control_B(module.control_A(module.control_dropout(layer_delta))) * module.control_scaling
+        # Compute adapter output
+        if control_adapter_type == "full":
+            # Standard low-rank path: x -> A -> B -> scale
+            adapter_output = module.control_B(module.control_A(x)) * module.control_scaling
+        else:
+            # Use low-rank paths with weights to support symmetric variants efficiently
+            A_w = module.control_A.weight  # [r, H]
+            B_w = module.control_B.weight  # [H, r]
 
-        # Optionally symmetrise the adapter output: C' = (C^T + C) / 2
-        if control_adapter_type == "symmetrise":
-            adapter_output = (adapter_output + adapter_output.transpose(-2, -1)) / 2
+            # y_full = s * (x @ (B @ A)^T) = s * ((x @ A^T) @ B^T)
+            y_full = module.control_scaling * ((x @ A_w.transpose(-2, -1)) @ B_w.transpose(-2, -1))
 
-        # Optionally anti-symmetrise the adapter output: C' = (C^T - C) / 2
-        elif control_adapter_type == "antisymmetrise":
-            adapter_output = (adapter_output - adapter_output.transpose(-2, -1)) / 2
+            # y_swap = s * (x @ (B @ A)) = s * ((x @ B) @ A)
+            y_swap = module.control_scaling * ((x @ B_w) @ A_w)
 
-        # Zero out any with class zero, as these won't have any loss calculated due to having label = -100
-        class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to (batch_size, seq_len, 1)
-        adapter_output = torch.where(class0_mask, 0.0, adapter_output)
+            if control_adapter_type == "symmetrise":
+                adapter_output = 0.5 * (y_full + y_swap)
+            elif control_adapter_type == "antisymmetrise":
+                adapter_output = 0.5 * (y_full - y_swap)
+
+        # Zero out any with class 0, as these won't have any loss calculated due to having label = -100
+        class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to [B, S, 1]
+        adapter_output = torch.where(class0_mask, torch.zeros_like(adapter_output), adapter_output)
 
         # For class +1 samples: add adapter_output as normal, For class -1 samples: add the negation of adapter_output.
         # NOTE: This approximates the 1st order Neumann series approximation to the inverse when ρ(A) << 1.
-        negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to (batch_size, seq_len, 1)
+        negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to [B, S, 1]
         adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
 
         # Cast adapter contribution back to original dtype and add to the residual stream
@@ -231,6 +245,7 @@ def create_pipeline_model(model, config):
     return pipeline_model
 
 # Training configuration functions
+
 def create_lora_config(config, target_modules, layers_to_transform):
     """Create LoRA configuration."""
     # Handle empty list case for Control Adapters
@@ -249,6 +264,10 @@ def create_lora_config(config, target_modules, layers_to_transform):
     # Reset target_modules to empty list if we used dummy value
     if use_dummy_target:
         lora_config.target_modules = []
+
+    # Add control adapter type for Control Adapters
+    if config.get('use_control_adapters', False):
+        lora_config.control_adapter_type = config.get('control_adapter_type', 'full')
 
     return lora_config
 
@@ -310,7 +329,7 @@ def apply_control_adapters(model, config, lora_config):
 
                 # Store original forward method and replace with Control Adapter version
                 module._original_forward = module.forward
-                module.forward = patch_decoder_layer_control_adapter(module, config)
+                module.forward = patch_decoder_layer_control_adapter(module, lora_config)
 
                 applied_count += 1
             # else:
@@ -357,7 +376,10 @@ def setup_model_and_engine(config, args):
     # Create model and pipeline
     model_type = get_model_type(config)
     model = create_model(config, model_type, trust_remote_code=args.trust_remote_code)
-    pipeline_model = create_pipeline_model(model, config)
+
+    # Disable KV cache for all training modes
+    if hasattr(model, "config"):
+        model.config.use_cache = False
 
     # Setup training adapters
     target_modules = config.get('target_modules', None)
@@ -365,14 +387,17 @@ def setup_model_and_engine(config, args):
 
     if config.get('full_fine_tune', False):
         lora_config = None
-        configure_full_fine_tuning(model, config, target_modules, layers_to_transform)
+        pipeline_model = create_pipeline_model(model, config)
+        configure_full_fine_tuning(pipeline_model, config, target_modules, layers_to_transform)  # Apply to pipeline_model
     elif config.get('use_control_adapters', False):
         assert not target_modules, "Control Adapters don't use target_modules - they apply to entire decoder layers"
         lora_config = create_lora_config(config, [], layers_to_transform)
+        pipeline_model = create_pipeline_model(model, config)
         apply_control_adapters(pipeline_model, config, lora_config)  # Apply to pipeline_model
     else:
         lora_config = create_lora_config(config, target_modules, layers_to_transform)
-        apply_lora_adapters(model, config, lora_config)  # Apply to base model
+        apply_lora_adapters(model, config, lora_config)  # Apply to base model (PEFT wraps HF modules)
+        pipeline_model = create_pipeline_model(model, config)  # Build the pipeline AFTER PEFT wrapping
 
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 

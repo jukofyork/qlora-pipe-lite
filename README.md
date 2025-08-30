@@ -130,11 +130,7 @@ tensorboard --host 0.0.0.0 --logdir="./my_control_adapter"
 After training completes, you can convert your Control Adapter to standard PEFT-compatible LoRA format:
 
 ```bash
-# Multiplicative LoRA conversion (lossless, very fast, and preserves multiplicative behavior)
-./tools/control_adapter_to_multiplicative_lora.py ./my_control_adapter/epoch1 ./my_multiplicative_lora
-
-# Additive LoRA approximation (compatible with standard LoRA tools, but slow due to SVD decomposition)
-./tools/control_adapter_to_additive_lora.py ./Llama-3.1-8B ./my_control_adapter/epoch1 ./my_lora
+./tools/control_adapter_to_lora.py ./Llama-3.1-8B ./my_control_adapter/epoch1 ./my_lora
 ```
 
 6. **Merge with base model**:
@@ -142,10 +138,7 @@ After training completes, you can convert your Control Adapter to standard PEFT-
 To create a standalone merged model, use the included merge tool:
 
 ```bash
-# Merge multiplicative LoRA
-./tools/merge_lora.py ./Llama-3.1-8B ./my_multiplicative_lora ./my_merged_model --multiplicative
-
-# Merge additive LoRA
+# Merge LoRA
 ./tools/merge_lora.py ./Llama-3.1-8B ./my_lora ./my_merged_model
 ```
 
@@ -210,6 +203,8 @@ The transformation matrix `W` can optionally be constrained using the `control_a
 - **"symmetrise"**: `W' = (W + W^T) / 2` forces symmetric structure
 - **"antisymmetrise"**: `W' = (W - W^T) / 2` forces antisymmetric structure
 
+See [here](https://en.wikipedia.org/wiki/Skew-symmetric_matrix#Vector_space_structure) for more details.
+
 #### For positive examples (`class +1`):
 
 ```
@@ -261,14 +256,11 @@ For typical setups, moderate weight decay values (10-100) can help with training
 
 ### Conversion and Compatibility
 
-Control Adapters can be converted to standard [PEFT](https://github.com/huggingface/peft) compatible LoRAs easily:
-
-1. **Multiplicative LoRA**: Lossless conversion that preserves the multiplicative nature by distributing the matrix products to specific linear layers that write to the residual stream (eg: `down_proj`, but also `o_proj` or `w2` for some models...)
-2. **Additive LoRA**: SVD-based approximation that converts the multiplicative effect into standard (additive) LoRA format
+Control Adapters can be converted to standard [PEFT](https://github.com/huggingface/peft) compatible LoRAs easily via a SVD-based approximation that converts the multiplicative effect into standard (additive) LoRA format.
 
 This flexibility allows Control Adapters to be used with existing LoRA-compatible inference frameworks while maintaining their unique training advantages.
 
-See the [tools](tools) folder for the conversion scripts. Note that the Cohere and Mixtral models require the `--cohere` and `--mixtral` command line options respectively, due to their different residual stream writing mechanisms (ie: via `o_proj` and `w2`).
+See the [control_adapter_to_lora.py](tools/control_adapter_to_lora.py) for the conversion script. Note that the Cohere and Mixtral models require the `--cohere` and `--mixtral` command line options respectively, due to their different residual stream writing mechanisms (ie: via `o_proj` and `w2`).
 
 ### Why Use Control Adapters?
 

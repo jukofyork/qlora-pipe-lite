@@ -12,12 +12,6 @@ import re
 import safetensors.torch
 import torch
 
-def add_model_args(parser: argparse.ArgumentParser) -> None:
-    """Add model-specific argument group to parser."""
-    model_group = parser.add_mutually_exclusive_group()
-    model_group.add_argument("--cohere", action="store_true", help="Also target o_proj for Cohere models")
-    model_group.add_argument("--mixtral", type=int, metavar="N", help="Target experts.{0..N-1}.w2 for Mixtral models")
-
 def load_adapter_config(adapter_path: Path) -> Dict[str, Any]:
     """Load adapter configuration."""
     config_path = adapter_path / 'adapter_config.json'
@@ -27,49 +21,31 @@ def load_adapter_config(adapter_path: Path) -> Dict[str, Any]:
     with open(config_path, 'r') as f:
         return json.load(f)
 
-def save_adapter_config(config: Dict[str, Any], output_path: Path) -> None:
-    """Save adapter configuration to output path."""
-    output_path.mkdir(parents=True, exist_ok=True)
-    with open(output_path / 'adapter_config.json', 'w') as f:
-        json.dump(config, f, indent=2)
-    print("Saved adapter_config.json")
+def get_control_adapter_type(config):
+    """Validate and return control_adapter_type from config."""
+    control_adapter_type = config.get('control_adapter_type', 'full')
+    allowed_types = ['full', 'symmetrise', 'antisymmetrise']
+    if control_adapter_type not in allowed_types:
+        raise ValueError(f"Invalid control_adapter_type '{control_adapter_type}'. Must be one of: {allowed_types}")
+    return control_adapter_type
 
-def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args):
-    """Copy adapter config, patch target_modules based on model type, and optionally patch rank/alpha."""
-    config_file = input_path / 'adapter_config.json'
-    if not config_file.exists():
-        raise FileNotFoundError(f"adapter_config.json not found in {input_path}")
+def apply_control_adapter_transform(A, B, scale_factor, control_adapter_type, device=None):
+    """Apply Control Adapter transformation with scaling and symmetry operations."""
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    with open(config_file, 'r') as f:
-        config = json.load(f)
+    # Move to specified device and compute scaled composite matrix
+    A_gpu = A.to(device=device, dtype=torch.float32)
+    B_gpu = B.to(device=device, dtype=torch.float32)
+    result = scale_factor * (B_gpu @ A_gpu)
 
-    # Compute scale factor from original config before modifying
-    original_rank = config['r']
-    original_alpha = config.get('lora_alpha', original_rank)
-    scale_factor = original_alpha / original_rank
+    # Apply transformation based on control_adapter_type
+    if control_adapter_type == "symmetrise":
+        result = 0.5 * (result + result.transpose(-2, -1))
+    elif control_adapter_type == "antisymmetrise":
+        result = 0.5 * (result - result.transpose(-2, -1))
 
-    # Determine target rank (clip to original rank max if specified)
-    target_rank = min(args.rank, original_rank) if args.rank is not None else original_rank
-
-    # Set target modules based on model type
-    if args.mixtral:
-        config['target_modules'] = ["w2"]
-    elif args.cohere:
-        config['target_modules'] = ["down_proj", "o_proj"]
-    else:
-        config['target_modules'] = ["down_proj"]
-
-    # Update rank if different from original
-    config['r'] = target_rank
-
-    # Always set alpha = rank since scale factor is baked into tensors
-    config['lora_alpha'] = config['r']
-
-    with open(output_path / 'adapter_config.json', 'w') as f:
-        json.dump(config, f, indent=2)
-    print("Updated and copied adapter_config.json")
-
-    return scale_factor, target_rank, original_rank
+    return result
 
 def load_control_adapter_weights(adapter_path: Path) -> Tuple[List[Tuple[str, torch.Tensor]], Dict[str, torch.Tensor]]:
     """Load control adapter weights and return (sorted key-value pairs, full state dict)."""
@@ -117,56 +93,3 @@ def parse_control_adapter_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[int,
             raise ValueError(f"Could not parse control adapter key: {key}")
 
     return control_adapters
-
-def generate_model_weight_keys(layer_idx: int, args) -> List[str]:
-    """Generate model weight keys for a given layer based on model type."""
-    base_key = f"model.layers.{layer_idx}"
-    target_keys = []
-
-    if args.mixtral:
-        for expert_idx in range(args.mixtral):
-            target_keys.append(f"{base_key}.block_sparse_moe.experts.{expert_idx}.w2.weight")
-    else:
-        target_keys.append(f"{base_key}.mlp.down_proj.weight")
-        if args.cohere:
-            target_keys.append(f"{base_key}.self_attn.o_proj.weight")
-
-    return target_keys
-
-def generate_lora_key(layer_idx: int, target_key: str, adapter_type: str, args) -> str:
-    """Generate LoRA A or B key for multiplicative LoRA format."""
-    base_key = f"base_model.model.model.layers.{layer_idx}"
-
-    if args.mixtral:
-        # Extract expert index from target_key
-        expert_match = re.search(r'experts\.(\d+)\.w2\.weight', target_key)
-        if expert_match:
-            expert_idx = expert_match.group(1)
-            lora_base = f"{base_key}.block_sparse_moe.experts.{expert_idx}.w2"
-        else:
-            raise ValueError(f"Could not parse expert index from {target_key}")
-    elif "o_proj" in target_key:
-        lora_base = f"{base_key}.self_attn.o_proj"
-    else:
-        lora_base = f"{base_key}.mlp.down_proj"
-
-    return f"{lora_base}.lora_{adapter_type}.weight"
-
-def load_model_weights(model_path: Path) -> Dict[str, torch.Tensor]:
-    """Load model weights from safetensors shards."""
-    model_weights = {}
-    model_shards = list(model_path.glob('model*.safetensors'))
-    if not model_shards:
-        raise FileNotFoundError("No model*.safetensors files found in model directory")
-
-    for shard in tqdm(model_shards, desc="Loading model shards"):
-        with safetensors.safe_open(shard, framework='pt', device='cpu') as f:
-            for key in f.keys():
-                model_weights[key] = f.get_tensor(key)
-
-    return model_weights
-
-def save_adapter_weights(new_state_dict: Dict, output_path: Path) -> None:
-    output_file = output_path / 'adapter_model.safetensors'
-    safetensors.torch.save_file(new_state_dict, output_file)
-    print(f"Converted LoRA adapter saved to: '{output_path}'")
