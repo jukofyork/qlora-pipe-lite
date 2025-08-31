@@ -93,7 +93,7 @@ class EmbeddingPipe(nn.Module):
             if torch.is_floating_point(tensor):
                 tensor.requires_grad_(True)
 
-        return hidden_states, attention_mask, cos, sin, control_classes, labels
+        return hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels
 
 class LlamaDecoderLayerPipe(nn.Module):
 
@@ -104,10 +104,10 @@ class LlamaDecoderLayerPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, attention_mask, cos, sin, control_classes, labels = inputs
+        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels = inputs
         result = (
-            self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0],
-            attention_mask, cos, sin, control_classes, labels
+            self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin), cache_position=cache_position)[0],
+            attention_mask, cos, sin, cache_position, control_classes, labels
         )
         return result
 
@@ -119,7 +119,7 @@ class LlamaRMSNormPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, _, _, _, _, labels = inputs
+        hidden_states, _, _, _, _, _, labels = inputs
         return self.orig(hidden_states), labels
 
 class LmHeadPipe(nn.Module):
