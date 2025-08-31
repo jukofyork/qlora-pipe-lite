@@ -14,6 +14,7 @@ import argparse
 import json
 import re
 import safetensors
+import safetensors.torch
 import torch
 
 from control_adapter_utils import *
@@ -48,9 +49,6 @@ def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args):
 
     # Always set alpha = rank since scale factor is baked into tensors
     config['lora_alpha'] = target_rank
-
-    # Remove Control Adapter-specific fields since we're converting to standard LoRA
-    config.pop('control_adapter_type', None)
 
     with open(output_path / 'adapter_config.json', 'w') as f:
         json.dump(config, f, indent=2)
@@ -127,12 +125,6 @@ if __name__ == "__main__":
     output_path = Path(args.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Load and validate adapter config
-    adapter_config = load_adapter_config(control_adapter_path)
-
-    # Validate and get the control_adapter_type
-    control_adapter_type = get_control_adapter_type(adapter_config)
-
     scale_factor, target_rank = copy_and_patch_adapter_config(control_adapter_path, output_path, args)
 
     control_keys, control_state_dict = load_control_adapter_weights(control_adapter_path)
@@ -143,16 +135,17 @@ if __name__ == "__main__":
 
     layer_data = parse_control_adapter_keys(control_state_dict)
 
-    print(f"Converting {len(control_keys)} control adapter tensors (device='{device}', scale={scale_factor:.4f}):")
+    print(f"Converting {len(control_keys)//2} layers ({len(control_keys)} tensors) (device='{device}', scale={scale_factor:.4f}):")
 
     for layer_idx in sorted(layer_data.keys()):
-        if 'A' not in layer_data[layer_idx] or 'B' not in layer_data[layer_idx]:
+        if 'Q' not in layer_data[layer_idx] or 'lambda' not in layer_data[layer_idx]:
             continue
 
-        A = layer_data[layer_idx]['A']
-        B = layer_data[layer_idx]['B']
-        old_type = A.dtype
-        lora_delta = apply_control_adapter_transform(A, B, scale_factor, control_adapter_type, device)
+        Q = layer_data[layer_idx]['Q']
+        lambda_vec = layer_data[layer_idx]['lambda']
+        old_type = Q.dtype
+
+        lora_delta = apply_control_adapter_transform(Q, lambda_vec, scale_factor, device)
 
         target_keys = generate_model_weight_keys(layer_idx, args)
 
@@ -184,8 +177,7 @@ if __name__ == "__main__":
             base_key = f"base_model.model.model.layers.{layer_idx}"
             print(f"- Layer {layer_idx}, SVD rank {target_rank}/{len(S)}, "
                   f"{100*torch.sum(S[:target_rank]**2)/torch.sum(S**2):.4f}% of variance explained:")
-            print(f"-- '{base_key}.control_A.weight' -> '{a_key}'")
-            print(f"-- '{base_key}.control_B.weight' -> '{b_key}'")
+            print(f"-- '{base_key}.control_Q' + '{base_key}.control_lambda' -> '{a_key}' + '{b_key}'")
 
     print(f"Done (total tensors: {len(control_state_dict)} -> {len(lora_state_dict)})")
 
