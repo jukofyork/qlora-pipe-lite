@@ -37,7 +37,7 @@ def patch_decoder_layer_control_adapter(module):
     """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
 
     def control_adapter_forward(inputs):
-        hidden_states, attention_mask, cos, sin, control_classes, labels = inputs
+        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels = inputs
 
         # Shift control_classes for causal LM: [control_classes[1:], 0_padding]
         batch_size, seq_len = control_classes.shape
@@ -49,7 +49,12 @@ def patch_decoder_layer_control_adapter(module):
         # Save input for residual computation
         input_hidden_states = hidden_states
 
-        layer_output = module.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0]
+        layer_output = module.orig(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_embeddings=(cos, sin),
+            cache_position=cache_position
+        )[0]
         torch_result_dtype = layer_output.dtype
 
         # Compute residual delta, apply optional dropout, then cast to adapter dtype
@@ -71,7 +76,7 @@ def patch_decoder_layer_control_adapter(module):
         # Cast adapter contribution back to original dtype and add to the residual stream
         result = layer_output + adapter_output.to(torch_result_dtype)
 
-        return (result, attention_mask, cos, sin, control_classes, labels)
+        return (result, attention_mask, cos, sin, cache_position, control_classes, labels)
 
     return control_adapter_forward
 
