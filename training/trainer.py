@@ -100,8 +100,8 @@ class Trainer:
                 if self.lora_config is not None:
                     self.tb_writer.add_scalar('train/norm_avg', norm_avg, step)
                     self.tb_writer.add_scalar('train/norm_max', norm_max, step)
-                    self.tb_writer.add_scalar('train/decay_avg', decay_avg, step)
-                    self.tb_writer.add_scalar('train/decay_max', decay_max, step)
+                    self.tb_writer.add_scalar('train/weight_decay_avg', decay_avg, step)
+                    self.tb_writer.add_scalar('train/weight_decay_max', decay_max, step)
 
             # Periodic evaluation
             if step in self.eval_step_indices:
