@@ -18,24 +18,25 @@ output_dir = '/data/training_runs/llama3_8b_example'
 # Set to train a LoRA/Control adapter on top of a 4-bit quantised model (ie: a "QLoRA")
 load_in_4bit = true
 
-# ==================
-# LORA CONFIGURATION
-# ==================
+# ==================================================
+# LORA CONFIGURATION & CONTROL ADAPTER CONFIGURATION
+# ==================================================
+
+# ** These options (apart from lora_weight_decay_composite) apply to both LoRAs and Control Adapters ***
+
+lora_weight_dtype = "bfloat16"            # (default: "float32", use "bfloat16" to save memory but will disable weight decay!!!)
 
 lora_rank = 64
-lora_alpha = 64                  # (default: sqrt(lora_rank) for rsLoRA scaling)
-lora_dropout = 0.05              # (default: 0.0)
-lora_weight_decay = 10.0         # (default: 0.0, requires lora_weight_dtype = "float32")  
-#lora_weight_decay_type = "l2"   # (default: "nuclear", options: "nuclear", "l2", "l1")
-#lora_max_norm = 1.0             # (default: 0.0, Frobenius norm constraint on LoRA weights)
-#lora_weight_dtype = "bfloat16"  # (default: "float32", use "bfloat16" to save memory but disables weight decay)
+#lora_alpha = 64                          # (default: sqrt(lora_rank) for rsLoRA-style scaling)
+#lora_dropout = 0.05                      # (default: 0.0)
+#lora_weight_decay = 10.0                 # (default: 0.0, requires lora_weight_dtype = "float32")
+#lora_weight_decay_composite = 10.0       # (default: 0.0, requires lora_weight_dtype = "float32")
+#lora_max_norm = 1.0                      # (default: 0.0, Frobenius norm constraint on weights)
 
-# ===========================
-# CONTROL ADAPTER CONFIGURATION
-# ===========================
+# *** These options apply only to Control Adapters ***
 
-# Control adapter matrix transformation type (only used with Control Adapters)
-#control_adapter_type = "full"   # (default: "full", options: "full", "symmetrise", "antisymmetrise")
+#control_adapter_gamma = 0.05             # (default: 0.1, must be > 0 and <= 0.25)
+#control_adapter_max_spectral_norm = 0.3  # (default: 0.0, Spectral norm constraint on Eigenvalues)
 
 # =======================
 # OPTIMIZER CONFIGURATION
