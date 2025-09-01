@@ -274,7 +274,7 @@ class Trainer:
 
         gamma = config.get('control_adapter_gamma', DEFAULT_CONTROL_ADAPTER_GAMMA)
         assert gamma > 0, f"control_adapter_gamma ({gamma}) must be > 0 to maintain semi-orthogonality"
-        assert gamma <= 0.25, f"control_adapter_gamma ({gamma}) must be <= 0.25 to avoid overshooting"
+        assert gamma <= 0.5, f"control_adapter_gamma ({gamma}) must be <= 0.5 to avoid overshooting"
 
         weight_decay = config.get('lora_weight_decay', 0.0)
         assert config.get('lora_weight_decay_composite', 0.0) == 0.0, "Control adapters do not support composite weight decay"
@@ -287,7 +287,19 @@ class Trainer:
             if 'control_Q' in name:
                 Q = param
 
-                # Orthogonality regularizer on Q (Q ∈ ℝ^{H×r}):
+                # *** Newton method for orthogonalization has optimal step size of 0.5 ***
+                #
+                # For solving Q^T Q = I, the Newton update rule is:
+                #   Q_{k+1} = Q_k - (1/2) * Q_k * (Q_k^T Q_k - I)
+                #
+                # The factor 1/2 is derived from Newton's method for F(Q) = Q^T Q - I = 0
+                # and provides quadratic convergence. Step sizes > 0.5 can cause divergence,
+                # while step sizes < 0.5 converge slower but more stably.
+                #
+                # Therefore gamma should be clamped to [0, 0.5].
+                #
+                # *** Orthogonality regularizer on Q (Q ∈ ℝ^{H×r}) ***
+                #
                 #   F(Q) = ||QᵀQ − I_r||_F²
                 # Gradient:
                 #   ∂F/∂Q = 4·Q·(QᵀQ − I_r)    [since (QᵀQ − I_r) is symmetric]
