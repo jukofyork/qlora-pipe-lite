@@ -25,7 +25,7 @@ input_path, lora_path, output_path = Path(args.input_path), Path(args.lora_path)
 os.makedirs(output_path, exist_ok=True)
 
 lora_config = peft.LoraConfig.from_json_file(lora_path / 'adapter_config.json')
-scale = (lora_config.lora_alpha / lora_config.r) * args.scale
+scale = (lora_config['lora_alpha'] / lora_config['r']) * args.scale
 
 device = "cuda" if (not args.no_gpu and torch.cuda.is_available()) else "cpu"
 
