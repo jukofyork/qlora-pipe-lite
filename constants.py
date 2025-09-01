@@ -4,7 +4,7 @@ DEFAULT_BETA2 = 0.99
 DEFAULT_EPS = 1e-6
 
 # NOTE: This must be > 0 to maintain semi-orthogonality, and <= 0.5 to avoid overshooting (see code comment).
-DEFAULT_CONTROL_ADAPTER_GAMMA = 0.1
+DEFAULT_CONTROL_ADAPTER_GAMMA = 0.5
 
 # Evaluation defaults
 DEFAULT_EVALS_PER_RUN = 11
