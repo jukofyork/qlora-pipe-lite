@@ -198,21 +198,21 @@ if __name__ == "__main__":
         layer_count_digits = len(str(len(results)))
         print(f"Summary statistics for {len(results)} layers (mean [min, max]):")
         print("=" * (49 + layer_count_digits))
-        print(f"Orthogonality (‖QᵀQ-Iᵣ‖_F²)  : {sum(orthogonality_errors)/len(orthogonality_errors):.3f} "
+        print(f"Orthogonality (‖QᵀQ-Iᵣ‖_F²) : {sum(orthogonality_errors)/len(orthogonality_errors):.3f} "
               f"[{min(orthogonality_errors):.3f}, {max(orthogonality_errors):.3f}]")
-        print(f"True Frobenius norm (‖W‖_F)  : {sum(frobenius_norms)/len(frobenius_norms):.3f} "
+        print(f"True Frobenius norm (‖W‖_F) : {sum(frobenius_norms)/len(frobenius_norms):.3f} "
               f"[{min(frobenius_norms):.3f}, {max(frobenius_norms):.3f}]")
-        print(f"True spectral norm (‖W‖_2)   : {sum(spectral_norms)/len(spectral_norms):.3f} "
+        print(f"True spectral norm (‖W‖_2)  : {sum(spectral_norms)/len(spectral_norms):.3f} "
               f"[{min(spectral_norms):.3f}, {max(spectral_norms):.3f}]")
-        print(f"True nuclear norm (‖W‖_*)    : {sum(nuclear_norms)/len(nuclear_norms):.3f} "
+        print(f"True nuclear norm (‖W‖_*)   : {sum(nuclear_norms)/len(nuclear_norms):.3f} "
               f"[{min(nuclear_norms):.3f}, {max(nuclear_norms):.3f}]")
-        print(f"Effective rank (erank(W))    : {sum(effective_ranks)/len(effective_ranks):.1f} "
+        print(f"Effective rank (erank(W))   : {sum(effective_ranks)/len(effective_ranks):.1f} "
               f"[{min(effective_ranks):.1f}, {max(effective_ranks):.1f}]")
-        print(f"Condition number (κ(W))      : {sum(condition_numbers)/len(condition_numbers):.1f} "
+        print(f"Condition number (κ(W))     : {sum(condition_numbers)/len(condition_numbers):.1f} "
               f"[{min(condition_numbers):.1f}, {max(condition_numbers):.1f}]")
-        print(f"Neumann inv error (ε_inv)    : {sum(neumann_errors)/len(neumann_errors):.1%} "
+        print(f"Neumann inv error (ε_inv)   : {sum(neumann_errors)/len(neumann_errors):.1%} "
               f"[{min(neumann_errors):.1%}, {max(neumann_errors):.1%}]")
-        print(f"Spectral norm error (ε_2)    : {sum(spectral_error_ratios)/len(spectral_error_ratios):.1%} "
+        print(f"Spectral norm error (ε_2)   : {sum(spectral_error_ratios)/len(spectral_error_ratios):.1%} "
               f"[{min(spectral_error_ratios):.1%}, {max(spectral_error_ratios):.1%}]")
-        print(f"Nuclear norm error (ε_*)     : {sum(nuclear_error_ratios)/len(nuclear_error_ratios):.1%} "
+        print(f"Nuclear norm error (ε_*)    : {sum(nuclear_error_ratios)/len(nuclear_error_ratios):.1%} "
               f"[{min(nuclear_error_ratios):.1%}, {max(nuclear_error_ratios):.1%}]")
