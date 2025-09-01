@@ -18,32 +18,36 @@ output_dir = '/data/training_runs/llama3_8b_example'
 # Set to train a LoRA/Control adapter on top of a 4-bit quantised model (ie: a "QLoRA")
 load_in_4bit = true
 
+# By default uses float32 and can change this to bfloat16 to save memory if not using lora_weight_decay.
+lora_weight_dtype = "bfloat16"
+
 # ==================================================
 # LORA CONFIGURATION & CONTROL ADAPTER CONFIGURATION
 # ==================================================
 
-# ** These options (apart from lora_weight_decay_composite) apply to both LoRAs and Control Adapters ***
-
-lora_weight_dtype = "bfloat16"            # (default: "float32", use "bfloat16" to save memory but will disable weight decay!!!)
-
 lora_rank = 64
-#lora_alpha = 64                          # (default: sqrt(lora_rank) for rsLoRA-style scaling)
-#lora_dropout = 0.05                      # (default: 0.0)
-#lora_weight_decay = 10.0                 # (default: 0.0, requires lora_weight_dtype = "float32")
-#lora_weight_decay_composite = 10.0       # (default: 0.0, requires lora_weight_dtype = "float32")
-#lora_max_norm = 1.0                      # (default: 0.0, Frobenius norm constraint on weights)
+#lora_alpha = 64               # (default: sqrt(lora_rank) for rsLoRA-style scaling)
 
-# *** These options apply only to Control Adapters ***
+#lora_dropout = 0.05           # (default: 0.0)
 
-#control_adapter_gamma = 0.05             # (default: 0.1, must be > 0 and <= 0.25)
-#control_adapter_max_spectral_norm = 0.3  # (default: 0.0, Spectral norm constraint on Eigenvalues)
+#lora_weight_decay = 10.0      # (default: 0.0, requires lora_weight_dtype = "float32")
+                               # - LoRAs: L2 regularization on composite matrix W = s·B·A  
+                               # - Control Adapters: L2 regularization on spectral norm of W
+                                          
+#lora_max_norm = 1.0           # (default: 0.0)
+                               # - LoRAs: Frobenius norm constraint ||W||_F ≤ max_norm
+                               # - Control Adapters: Spectral norm constraint ||W||_2 ≤ max_norm
+
+#control_adapter_gamma = 0.05  # (default: 0.1, orthogonality regularization step size, must be > 0 and <= 0.5)
 
 # =======================
 # OPTIMIZER CONFIGURATION
 # =======================
 
 lr = 5e-5
+
 epochs = 1                # (default: 1)
+
 beta1 = 0.9               # (default: 0.9)
 beta2 = 0.99              # (default: 0.99)
 eps = 1e-6                # (default: 1e-6)
