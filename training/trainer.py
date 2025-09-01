@@ -5,6 +5,7 @@ import time
 import torch
 
 from constants import (
+    DEFAULT_CONTROL_ADAPTER_GAMMA,
     DEFAULT_CHECKPOINT_INTERVAL_HOURS,
     DEFAULT_MAX_CHECKPOINTS,
     DEFAULT_EVALS_PER_RUN
@@ -84,9 +85,9 @@ class Trainer:
             metrics = self.model_engine.train_batch()
             self.train_dataloader.sync_epoch()
 
-            # Apply LoRA-specific decoupled weight decay and get the norm stats
+            # Apply adapter-specific (decoupled) regularization weight decay and get the norm/decay stats
             if self.lora_config is not None:
-                norm_avg, norm_max, weight_decay_avg, weight_decay_max = self._apply_lora_weight_decay(
+                norm_avg, norm_max, decay_avg, decay_max = self._apply_regularization(
                     self.pipeline_model,
                     self.config,
                     self.optimizer.param_groups[0]['lr']
@@ -99,9 +100,8 @@ class Trainer:
                 if self.lora_config is not None:
                     self.tb_writer.add_scalar('train/norm_avg', norm_avg, step)
                     self.tb_writer.add_scalar('train/norm_max', norm_max, step)
-                    if self.config.get('lora_weight_decay', 0.0) > 0:
-                        self.tb_writer.add_scalar('train/weight_decay_avg', weight_decay_avg, step)
-                        self.tb_writer.add_scalar('train/weight_decay_max', weight_decay_max, step)
+                    self.tb_writer.add_scalar('train/weight_decay_avg', decay_avg, step)
+                    self.tb_writer.add_scalar('train/weight_decay_max', decay_max, step)
 
             # Periodic evaluation
             if step in self.eval_step_indices:
@@ -165,97 +165,91 @@ class Trainer:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def _apply_lora_weight_decay_local(self, model, config, lr):
+    def _apply_lora_regularization_local(self, model, config, lr):
         """Apply decoupled weight decay and/or max-norm regularisation to LoRA parameters and collect local norms."""
         norms = []
         decays = []
 
-        lora_scale = config['lora_alpha'] / config['lora_rank']
+        scale_factor = config['lora_alpha'] / config['lora_rank']
+
         weight_decay = config.get('lora_weight_decay', 0.0)
+        weight_decay_composite = config.get('lora_weight_decay_composite', 0.0)
+
         max_norm = config.get('lora_max_norm', 0.0)
 
         for name, param in model.named_parameters():
-            if any(adapter_type in name for adapter_type in ['lora_A', 'control_A']):
+            if 'lora_A' in name:
                 A = param
-                B_name = name.replace('lora_A', 'lora_B').replace('control_A', 'control_B')
+                B_name = name.replace('lora_A', 'lora_B')
 
                 try:
                     B = next(p for n, p in model.named_parameters() if n == B_name)
                 except StopIteration:
                     raise RuntimeError(f"Could not find corresponding B parameter '{B_name}' for A parameter '{name}'")
 
-                W = lora_scale * (B @ A)
+                W = scale_factor * (B @ A)
                 W_norm = W.norm().item()
 
                 # Save the initial norm so we can calculate the decays after the (optional) updates
                 W_norm_initial = W_norm
 
-                if weight_decay > 0 or max_norm > 0:
+                # Convex proxy for the Nuclear norm using relaxation L = s·(||A||_F² + ||B||_F²) as proxy for 2·||W||_*:
+                if weight_decay > 0:
                     # The very tiny values end up cancelling out to zero for float16/bfloat16 and decays all stay zero...
-                    assert A.dtype == torch.float32, f"A tensor ({A.dtype}) must be float32 to avoid catastrophic cancellation"
-                    assert B.dtype == torch.float32, f"B tensor ({B.dtype}) must be float32 to avoid catastrophic cancellation"
+                    assert A.dtype == torch.float32, f"LoRA A ({A.dtype}) must be float32"
+                    assert B.dtype == torch.float32, f"LoRA B ({B.dtype}) must be float32"
 
-                    # Apply the weight decay update first
-                    if weight_decay > 0:
+                    # ∂L/∂A = 2s·A
+                    # ∂L/∂B = 2s·B
+                    grad_A = 2 * scale_factor * A
+                    grad_B = 2 * scale_factor * B
 
-                        # Nuclear-norm regularisation using convex relaxation L = s·(||A||_F² + ||B||_F²) as proxy for 2·||W||_*:
-                        #    ∂L/∂A = 2s·A
-                        #    ∂L/∂B = 2s·B
-                        if config.get('lora_weight_decay_type', "nuclear").lower() == "nuclear":
-                            grad_A = 2 * lora_scale * A
-                            grad_B = 2 * lora_scale * B
-                            # Modify the tensors in place
-                            with torch.no_grad():
-                                A.sub_(lr * weight_decay * grad_A)
-                                B.sub_(lr * weight_decay * grad_B)
+                    # Modify the tensors in place
+                    with torch.no_grad():
+                        A.sub_(lr * weight_decay * grad_A)
+                        B.sub_(lr * weight_decay * grad_B)
 
-                        # L2-norm regularisation using L = ½||W||_F²:
-                        #    ∂L/∂W = W, as ∂(½||W||_F²)/∂W = W
-                        #    ∂L/∂A = s⋅Bᵗ(∂L/∂W) = s⋅BᵗW
-                        #    ∂L/∂B = s⋅(∂L/∂W)Aᵗ = s⋅WAᵗ
-                        elif config.get('lora_weight_decay_type', "nuclear").lower() == "l2":
-                            grad_A = lora_scale * (B.t() @ W)
-                            grad_B = lora_scale * (W @ A.t())
-                            # Modify the tensors in place
-                            with torch.no_grad():
-                                A.sub_(lr * weight_decay * grad_A)
-                                B.sub_(lr * weight_decay * grad_B)
+                    # Recompute W and its norm using updated A and B
+                    W = scale_factor * (B @ A)
+                    W_norm = W.norm().item()
 
-                        # L1-norm regularisation using L = ||W||_F:
-                        #    ∂L/∂W = W/||W||_F (unit matrix in direction of W)
-                        #    ∂L/∂A = s⋅B^T⋅(W/||W||_F)
-                        #    ∂L/∂B = s⋅(W/||W||_F)⋅A^T
-                        elif config.get('lora_weight_decay_type', "nuclear").lower() == "l1":
-                            if W_norm > 1e-8:  # Avoid division by zero
-                                W_unit = W / W_norm
-                                grad_A = lora_scale * (B.t() @ W_unit)
-                                grad_B = lora_scale * (W_unit @ A.t())
-                                # Modify the tensors in place with soft thresholding
-                                step_size = min(lr * weight_decay, W_norm)
-                                with torch.no_grad():
-                                    A.sub_(step_size * grad_A)
-                                    B.sub_(step_size * grad_B)
+                # L2-norm regularisation of the composite matrix using L = ½||W||_F²:
+                if weight_decay_composite > 0:
+                    # The very tiny values end up cancelling out to zero for float16/bfloat16 and decays all stay zero...
+                    assert A.dtype == torch.float32, f"LoRA A ({A.dtype}) must be float32"
+                    assert B.dtype == torch.float32, f"LoRA B ({B.dtype}) must be float32"
 
-                        # Recompute W and its norm using updated A and B
-                        W = lora_scale * (B @ A)
-                        W_norm = W.norm().item()
+                    # ∂L/∂W = W, as ∂(½||W||_F²)/∂W = W
+                    # ∂L/∂A = s⋅Bᵗ(∂L/∂W) = s⋅BᵗW
+                    # ∂L/∂B = s⋅(∂L/∂W)Aᵗ = s⋅WAᵗ
+                    grad_A = scale_factor * (B.t() @ W)
+                    grad_B = scale_factor * (W @ A.t())
 
-                    # Apply max-norm regularisation after the weight decay update, and only if needed
-                    if max_norm > 0 and W_norm > max_norm:
-                        # Goal: Keep the LoRA weight W = s·B·A inside the Frobenius-norm ball ‖W‖_F ≤ max_norm
+                    # Modify the tensors in place
+                    with torch.no_grad():
+                        A.sub_(lr * weight_decay_composite * grad_A)
+                        B.sub_(lr * weight_decay_composite * grad_B)
 
-                        # Direct projection: scale both A and B by sqrt(max_norm/||W||_F)
-                        ratio = max_norm / W_norm
-                        sqrt_ratio = ratio ** 0.5
+                    # Recompute W and its norm using updated A and B
+                    W = scale_factor * (B @ A)
+                    W_norm = W.norm().item()
 
-                        # Modify the tensors in place
-                        with torch.no_grad():
-                            A.mul_(sqrt_ratio)
-                            B.mul_(sqrt_ratio)
+                # Apply (hard) max-norm regularisation after the weight decay update, and only if needed
+                if max_norm > 0 and W_norm > max_norm:
+                    # Goal: Keep the LoRA weight W = s·B·A inside the Frobenius-norm ball ‖W‖_F ≤ max_norm
 
-                        # Recompute W and its norm after scaling
-                        W = lora_scale * (B @ A)
-                        W_norm = W.norm().item()
+                    # Direct projection: scale both A and B by sqrt(max_norm/||W||_F)
+                    ratio = max_norm / W_norm
+                    sqrt_ratio = ratio ** 0.5
+
+                    # Modify the tensors in place
+                    with torch.no_grad():
+                        A.mul_(sqrt_ratio)
+                        B.mul_(sqrt_ratio)
+
+                    # Recompute W and its norm after scaling
+                    W = scale_factor * (B @ A)
+                    W_norm = W.norm().item()
 
                 # Save the norms and the decays after the (optional) updates
                 norms.append(W_norm)
@@ -271,8 +265,123 @@ class Trainer:
 
         return norms_tensor, decays_tensor
 
-    def _aggregate_lora_norms(self, local_norms, local_decays):
-        """Aggregate LoRA norms across pipeline stages and compute statistics."""
+    def _apply_control_adapter_regularization_local(self, model, config, lr):
+        """Apply decoupled weight decay and/or max-norm regularisation to Control Adapter parameters and collect local norms."""
+        norms = []
+        decays = []
+
+        scale_factor = config['lora_alpha'] / config['lora_rank']
+
+        gamma = config.get('control_adapter_gamma', DEFAULT_CONTROL_ADAPTER_GAMMA)
+        assert gamma > 0, f"control_adapter_gamma ({gamma}) must be > 0 to maintain semi-orthogonality"
+        assert gamma <= 0.5, f"control_adapter_gamma ({gamma}) must be <= 0.5 to avoid overshooting"
+
+        weight_decay = config.get('lora_weight_decay', 0.0)
+        assert config.get('lora_weight_decay_composite', 0.0) == 0.0, "Control adapters do not support composite weight decay"
+
+        max_norm = config.get('lora_max_norm', 0.0)
+
+        max_spectral_norm = config.get('control_adapter_max_spectral_norm', 0.0)
+
+        for name, param in model.named_parameters():
+            if 'control_Q' in name:
+                Q = param
+
+                # *** Newton method for orthogonalization has optimal step size of 0.5 ***
+                #
+                # For solving Q^T Q = I, the Newton update rule is:
+                #   Q_{k+1} = Q_k - (1/2) * Q_k * (Q_k^T Q_k - I)
+                #
+                # The factor 1/2 is derived from Newton's method for F(Q) = Q^T Q - I = 0
+                # and provides quadratic convergence. Step sizes > 0.5 can cause divergence,
+                # while step sizes < 0.5 converge slower but more stably.
+                #
+                # Therefore gamma should be clamped to [0, 0.5].
+                #
+                # *** Orthogonality regularizer on Q (Q ∈ ℝ^{H×r}) ***
+                #
+                #   F(Q) = ||QᵀQ − I_r||_F²
+                # Gradient:
+                #   ∂F/∂Q = 4·Q·(QᵀQ − I_r)    [since (QᵀQ − I_r) is symmetric]
+                # Gradient step with step size γ:
+                #   Q ← Q − γ·Q·(QᵀQ − I_r)
+                # Implementation detail:
+                #   grad_Q = 4·Q·(QᵀQ − I_r); Q ← Q − (γ/4)·grad_Q  (equivalent to the above)
+                grad_Q = 4.0 * Q @ (Q.t() @ Q - torch.eye(Q.size(1), device=Q.device, dtype=Q.dtype))
+
+                # Modify the tensor in place
+                with torch.no_grad():
+                    Q.sub_((gamma / 4.0) * grad_Q)
+
+            if 'control_lambda' in name:
+                lambda_param = param
+
+                # For control adapters with orthogonal Q: ||W||_F = scale_factor * ||λ||₂
+                W_norm = scale_factor * lambda_param.norm().item()
+
+                # Save the initial norm so we can calculate the decays after the (optional) updates
+                effective_norm_initial = W_norm
+
+                # L2-norm regularisation using L = ½·s²·||λ||₂² = ½·s²·Σ|λᵢ²|
+                if weight_decay > 0:
+                    # The very tiny values end up cancelling out to zero for float16/bfloat16 and decays all stay zero...
+                    assert lambda_param.dtype == torch.float32, f"control_lambda ({lambda_param.dtype}) must be float32"
+
+                    # ∂L/∂λ = s²·λ
+                    grad_lambda = (scale_factor ** 2) * lambda_param
+
+                    # Modify the tensor in place
+                    with torch.no_grad():
+                        lambda_param.sub_(lr * weight_decay * grad_lambda)
+
+                    # Recompute norms using updated lambda
+                    W_norm = scale_factor * lambda_param.norm().item()
+
+                # Apply (hard) max-norm regularisation after the weight decay update, and only if needed
+                if max_norm > 0 and W_norm > max_norm:
+                    # Goal: Keep the effective weight ||W||_F = s·||λ||₂ ≤ max_norm
+
+                    # Scale λ by (max_norm / W_norm)
+                    ratio = max_norm / W_norm
+
+                    # Modify the tensor in place
+                    with torch.no_grad():
+                        lambda_param.mul_(ratio)
+
+                    # Recompute norm after scaling
+                    W_norm = scale_factor * lambda_param.norm().item()
+
+                # Apply (hard) spectral norm regularisation after the weight decay update, and only if needed
+                # NOTE: Spectral clamping alone is robust in bfloat16/float16 so no need to assert float32 for this...
+                if max_spectral_norm > 0:
+                    # Goal: Keep the spectral norm ||W||₂ = s·max|λᵢ| ≤ max_spectral_norm
+
+                    # Clamp all individual eigenvalues to [-max_allowed, max_allowed]
+                    max_eigenvalue = max_spectral_norm / scale_factor
+
+                    # Modify the tensor in place
+                    with torch.no_grad():
+                        lambda_param.clamp_(min=-max_eigenvalue, max=max_eigenvalue)
+
+                    # Recompute norm after scaling
+                    W_norm = scale_factor * lambda_param.norm().item()
+
+                # Save the norms and the decays after the (optional) updates
+                norms.append(W_norm)
+                decays.append(effective_norm_initial - W_norm)
+
+        # Convert to tensors, handling empty case
+        if len(norms) > 0:
+            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.model_engine.device)
+            decays_tensor = torch.tensor(decays, dtype=torch.float32, device=self.model_engine.device)
+        else:
+            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+            decays_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+
+        return norms_tensor, decays_tensor
+
+    def _aggregate_norms_and_decays(self, local_norms, local_decays):
+        """Aggregate LoRA and Control Adapter norms/decays across pipeline stages and compute statistics."""
         if local_norms.numel() > 0:
             norm_count = torch.tensor(local_norms.numel(), dtype=torch.float32, device=self.model_engine.device)
             norm_sum = torch.sum(local_norms)
@@ -308,10 +417,13 @@ class Trainer:
 
         return global_norm_avg, global_norm_max, global_decay_avg, global_decay_max
 
-    def _apply_lora_weight_decay(self, model, config, lr):
-        """Apply decoupled weight decay to LoRA parameters and return aggregated statistics."""
-        local_norms, local_decays = self._apply_lora_weight_decay_local(model, config, lr)
-        return self._aggregate_lora_norms(local_norms, local_decays)
+    def _apply_regularization(self, model, config, lr):
+        """Apply decoupled weight decay to LoRA or Control Adapter parameters and return aggregated statistics."""
+        if config.get('use_control_adapters', False):
+            local_norms, local_decays = self._apply_control_adapter_regularization_local(model, config, lr)
+        else:
+            local_norms, local_decays = self._apply_lora_regularization_local(model, config, lr)
+        return self._aggregate_norms_and_decays(local_norms, local_decays)
 
     def _extract_loss(self, metrics):
         """Extract loss (first metric) as a scalar value."""
@@ -320,7 +432,7 @@ class Trainer:
     def _write_metrics(self, prefix, metrics, step):
         """Write all metrics to tensorboard."""
         self.tb_writer.add_scalar(f'{prefix}/loss', metrics[0].mean().item(), step)
-        self.tb_writer.add_scalar(f'{prefix}/top1_accuracy', metrics[1].mean().item(), step)
+        self.tb_writer.add_scalar(f'{prefix}/accuracy_top1', metrics[1].mean().item(), step)
 
     def _print_eval_progress(self, step, current_loss, last_loss=None):
         """Print evaluation progress with optional percentage change."""

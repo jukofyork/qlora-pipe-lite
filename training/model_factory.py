@@ -2,7 +2,6 @@ from deepspeed.runtime.pipe.module import LayerSpec
 from peft import LoraConfig, get_peft_model
 import bitsandbytes
 import json
-import math
 import optimi
 import os
 import torch
@@ -34,18 +33,11 @@ def patch_bitsandbytes_cuda():
 
     bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
 
-def patch_decoder_layer_control_adapter(module, lora_config):
+def patch_decoder_layer_control_adapter(module):
     """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
 
-    control_adapter_type = getattr(lora_config, "control_adapter_type", "full")
-
-    # Validate control adapter type from LoRA config
-    allowed_types = {"full", "symmetrise", "antisymmetrise"}
-    if control_adapter_type not in allowed_types:
-        raise ValueError(f"Invalid control_adapter_type: {control_adapter_type}. Must be one of {sorted(allowed_types)}")
-
     def control_adapter_forward(inputs):
-        hidden_states, attention_mask, cos, sin, control_classes, labels = inputs
+        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels = inputs
 
         # Shift control_classes for causal LM: [control_classes[1:], 0_padding]
         batch_size, seq_len = control_classes.shape
@@ -57,46 +49,34 @@ def patch_decoder_layer_control_adapter(module, lora_config):
         # Save input for residual computation
         input_hidden_states = hidden_states
 
-        layer_output = module.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin))[0]
+        layer_output = module.orig(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_embeddings=(cos, sin),
+            cache_position=cache_position
+        )[0]
         torch_result_dtype = layer_output.dtype
 
         # Compute residual delta, apply optional dropout, then cast to adapter dtype
         layer_delta = layer_output - input_hidden_states
-        x = module.control_dropout(layer_delta).to(module.control_A.weight.dtype)
+        x = module.control_dropout(layer_delta).to(module.control_Q.dtype)
 
-        # Compute adapter output
-        if control_adapter_type == "full":
-            # Standard low-rank path: x -> A -> B -> scale
-            adapter_output = module.control_B(module.control_A(x)) * module.control_scaling
-        else:
-            # Use low-rank paths with weights to support symmetric variants efficiently
-            A_w = module.control_A.weight  # [r, H]
-            B_w = module.control_B.weight  # [H, r]
-
-            # y_full = s * (x @ (B @ A)^T) = s * ((x @ A^T) @ B^T)
-            y_full = module.control_scaling * ((x @ A_w.transpose(-2, -1)) @ B_w.transpose(-2, -1))
-
-            # y_swap = s * (x @ (B @ A)) = s * ((x @ B) @ A)
-            y_swap = module.control_scaling * ((x @ B_w) @ A_w)
-
-            if control_adapter_type == "symmetrise":
-                adapter_output = 0.5 * (y_full + y_swap)
-            elif control_adapter_type == "antisymmetrise":
-                adapter_output = 0.5 * (y_full - y_swap)
+        # Compute adapter output: control_scaling * control_Q @ control_lambda @ control_Q^T @ x
+        adapter_output = module.control_scaling * (((x @ module.control_Q) * module.control_lambda) @ module.control_Q.T)
 
         # Zero out any with class 0, as these won't have any loss calculated due to having label = -100
-        class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to [B, S, 1]
+        class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to [batch_size, seq_len, 1]
         adapter_output = torch.where(class0_mask, torch.zeros_like(adapter_output), adapter_output)
 
         # For class +1 samples: add adapter_output as normal, For class -1 samples: add the negation of adapter_output.
         # NOTE: This approximates the 1st order Neumann series approximation to the inverse when ρ(A) << 1.
-        negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to [B, S, 1]
+        negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to [batch_size, seq_len, 1]
         adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
 
         # Cast adapter contribution back to original dtype and add to the residual stream
         result = layer_output + adapter_output.to(torch_result_dtype)
 
-        return (result, attention_mask, cos, sin, control_classes, labels)
+        return (result, attention_mask, cos, sin, cache_position, control_classes, labels)
 
     return control_adapter_forward
 
@@ -265,10 +245,6 @@ def create_lora_config(config, target_modules, layers_to_transform):
     if use_dummy_target:
         lora_config.target_modules = []
 
-    # Add control adapter type for Control Adapters
-    if config.get('use_control_adapters', False):
-        lora_config.control_adapter_type = config.get('control_adapter_type', 'full')
-
     return lora_config
 
 def apply_lora_adapters(model, config, lora_config):
@@ -307,29 +283,29 @@ def apply_control_adapters(model, config, lora_config):
                 module.control_dropout = torch.nn.Dropout(p=adapter_dropout_p) if adapter_dropout_p > 0 else torch.nn.Identity()
                 module.control_dropout = module.control_dropout.to(device)
 
-                # Create Control Adapter layers (following PEFT pattern)
-                module.control_A = torch.nn.Linear(hidden_size, adapter_rank, bias=False).to(device)
-                module.control_B = torch.nn.Linear(adapter_rank, hidden_size, bias=False).to(device)
+                # Create Control Adapter parameters
+                module.control_Q = torch.nn.Parameter(torch.empty(hidden_size, adapter_rank, device=device))
+                module.control_lambda = torch.nn.Parameter(torch.empty(adapter_rank, device=device))
 
                 # Store scaling as attribute (needed in forward)
                 module.control_scaling = adapter_alpha / adapter_rank
 
                 # Add original_name for saving compatibility
-                module.control_A.weight.original_name = f"base_model.model.model.layers.{layer_idx}.control_A.weight"
-                module.control_B.weight.original_name = f"base_model.model.model.layers.{layer_idx}.control_B.weight"
+                module.control_Q.original_name = f"base_model.model.model.layers.{layer_idx}.control_Q"
+                module.control_lambda.original_name = f"base_model.model.model.layers.{layer_idx}.control_lambda"
 
                 # Initialize
-                torch.nn.init.kaiming_uniform_(module.control_A.weight, a=math.sqrt(5))
-                torch.nn.init.zeros_(module.control_B.weight)
+                torch.nn.init.orthogonal_(module.control_Q)
+                torch.nn.init.zeros_(module.control_lambda)
 
                 # Cast to the desired dtype
                 lora_weight_dtype = DTYPE_MAP[config.get('lora_weight_dtype', 'float32')]
-                module.control_A.weight.data = module.control_A.weight.data.to(lora_weight_dtype)
-                module.control_B.weight.data = module.control_B.weight.data.to(lora_weight_dtype)
+                module.control_Q.data = module.control_Q.data.to(lora_weight_dtype)
+                module.control_lambda.data = module.control_lambda.data.to(lora_weight_dtype)
 
                 # Store original forward method and replace with Control Adapter version
                 module._original_forward = module.forward
-                module.forward = patch_decoder_layer_control_adapter(module, lora_config)
+                module.forward = patch_decoder_layer_control_adapter(module)
 
                 applied_count += 1
             # else:
@@ -344,7 +320,7 @@ def apply_control_adapters(model, config, lora_config):
 
     # Disable gradients for all base model parameters, enable only for Control Adapters
     for name, p in model.named_parameters():
-        if 'control_A' in name or 'control_B' in name:
+        if 'control_Q' in name or 'control_lambda' in name:
             p.requires_grad = True
         else:
             p.requires_grad = False
