@@ -351,11 +351,13 @@ def load_datasets(config, tokenizer, run_dir):
     Args:
         config: Configuration dict containing:
             - sequence_len: Fixed sequence length (must be multiple of 64)
-            - datasets: List of dataset configs with 'dataset_path', optional 'control_class', 'document_suffix', 'max_tokens'
+            - datasets: List of dataset configs with 'dataset_path', optional 'control_class', 'max_tokens'
             - max_sequences: Optional max sequences to create (default: unlimited)
             - drop_tails: Optional flag to drop document tails (default: False)
+            - mix_datasets: Optional flag to mix datasets (default: False)
             - sequence_prefix: Optional prefix for sequences (default: None)
             - mask_tokens: Optional token masking config (default: None)
+            - document_suffix: Optional suffix for documents (default: None)
             - eval_fraction: Optional fraction for eval split (default: from constants)
         tokenizer: HuggingFace tokenizer
         run_dir: Directory to save/load cached datasets
@@ -375,6 +377,7 @@ def load_datasets(config, tokenizer, run_dir):
     mix_datasets = config.get('mix_datasets', False)
     sequence_prefix = config.get('sequence_prefix', None)  # None --> initialize sequence with BOS token if it exists
     mask_tokens = config.get('mask_tokens', None)  # None --> no masking
+    document_suffix = config.get('document_suffix', None)  # None --> tokenize first, then add EOS token
 
     eval_fraction = config.get('eval_fraction', DEFAULT_EVAL_FRACTION)
     assert 0 < eval_fraction < 1, "eval_fraction must be between 0 and 1"
@@ -399,7 +402,6 @@ def load_datasets(config, tokenizer, run_dir):
             for dataset_config in config['datasets']:
                 control_class = dataset_config.get('control_class', 1)
                 assert control_class in [-1, 0, 1], f"control_class must be -1, 0, or 1, got {control_class}"
-                document_suffix = dataset_config.get('document_suffix', None)  # None --> tokenize first, then add EOS token
                 max_tokens = dataset_config.get('max_tokens', sys.maxsize)
 
                 dataset = load_single_dataset(

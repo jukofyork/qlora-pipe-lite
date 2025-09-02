@@ -126,6 +126,14 @@ max_checkpoints = 3            # (default: 3)
 # - [123, 456]: mask multiple token IDs
 #mask_tokens = None
 
+# Document suffix (applied during tokenization to all datasets):
+# - None: tokenize first, then add tokenizer's EOS token if missing (default)
+# - "": empty suffix, no additional tokens added
+# - "<EOT>": string to append before tokenizing
+# - 123: single token ID to append after tokenizing
+# - [123, 456]: multiple token IDs to append after tokenizing
+#document_suffix = None
+
 # =====================
 # DATASET CONFIGURATION
 # =====================
@@ -151,24 +159,16 @@ dataset_path = 'parquet_data/*.parquet'
 #[[datasets]]
 #dataset_path = 'data/positive_examples.json'
 #control_class = 1                  # Enhance this behavior (default)
-#document_suffix = "<EOT>"          # String to append before tokenizing
 #max_tokens = 2000000               # Limit positive examples to 2M tokens
 
 # Negative examples - suppress this behavior  
 #[[datasets]]
 #dataset_path = 'data/negative_examples.json'
 #control_class = -1                 # Suppress/unlearn this behavior
-#document_suffix = ""               # No additional tokens added
 #max_tokens = 1000000               # Limit negative examples to 1M tokens
 
 # Per-dataset configuration options:
 # - max_tokens: Maximum number of tokens to keep from this dataset after shuffling (default: unlimited)
-# - document_suffix: Suffix applied during tokenization:
-#   - None: tokenize first, then add tokenizer's EOS token if missing (default)
-#   - "": empty suffix, no additional tokens added
-#   - "<EOT>": string to append before tokenizing
-#   - 123: single token ID to append after tokenizing
-#   - [123, 456]: multiple token IDs to append after tokenizing
 
 # Notes:
 # - Text files (.txt) are read as raw training data
