@@ -257,7 +257,8 @@ def load_single_dataset(
         dataset_path,
         tokenizer,
         control_class=1,
-        document_suffix=None
+        document_suffix=None,
+        max_tokens=sys.maxsize
 ):
     """
     Load and tokenize a single dataset from file.
@@ -273,6 +274,7 @@ def load_single_dataset(
             - -1: assign negative control class
             - 0: randomly assign each document to -1 or +1 (deterministic based on document order)
         document_suffix: Optional suffix to append to each document (see tokenize function)
+        max_tokens: Maximum number of tokens to keep from this dataset (default: unlimited)
 
     Returns:
         HuggingFace Dataset with 'input_ids' and 'control_class' fields
@@ -321,6 +323,21 @@ def load_single_dataset(
     # Shuffle this individual dataset's documents before concatenation
     dataset = dataset.shuffle(seed=42)
 
+    # Prune dataset to max_tokens if specified
+    if max_tokens < sys.maxsize:
+        total_tokens = 0
+        indices_to_keep = []
+
+        for i in range(len(dataset)):
+            doc_tokens = len(dataset[i]['input_ids'])
+            if total_tokens + doc_tokens <= max_tokens:
+                total_tokens += doc_tokens
+                indices_to_keep.append(i)
+            else:
+                break
+
+        dataset = dataset.select(indices_to_keep)
+
     return dataset
 
 def load_datasets(config, tokenizer, run_dir):
@@ -334,7 +351,7 @@ def load_datasets(config, tokenizer, run_dir):
     Args:
         config: Configuration dict containing:
             - sequence_len: Fixed sequence length (must be multiple of 64)
-            - datasets: List of dataset configs with 'dataset_path', optional 'control_class', 'document_suffix'
+            - datasets: List of dataset configs with 'dataset_path', optional 'control_class', 'document_suffix', 'max_tokens'
             - max_sequences: Optional max sequences to create (default: unlimited)
             - drop_tails: Optional flag to drop document tails (default: False)
             - sequence_prefix: Optional prefix for sequences (default: None)
@@ -383,12 +400,14 @@ def load_datasets(config, tokenizer, run_dir):
                 control_class = dataset_config.get('control_class', 1)
                 assert control_class in [-1, 0, 1], f"control_class must be -1, 0, or 1, got {control_class}"
                 document_suffix = dataset_config.get('document_suffix', None)  # None --> tokenize first, then add EOS token
+                max_tokens = dataset_config.get('max_tokens', sys.maxsize)
 
                 dataset = load_single_dataset(
                     dataset_config['dataset_path'],
                     tokenizer,
                     control_class,
-                    document_suffix
+                    document_suffix,
+                    max_tokens
                 )
                 datasets_list.append(dataset)
 

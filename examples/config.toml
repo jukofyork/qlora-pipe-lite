@@ -38,7 +38,7 @@ lora_rank = 64
                                # - LoRAs: Frobenius norm constraint ||W||_F ≤ max_norm
                                # - Control Adapters: Spectral norm constraint ||W||_2 ≤ max_norm
 
-#control_adapter_gamma = 0.05  # (default: 0.1, orthogonality regularization step size, must be > 0 and <= 0.5)
+#control_adapter_gamma = 0.1   # (default: 0.5, orthogonality regularization step size, must be > 0 and <= 0.5)
 
 # =======================
 # OPTIMIZER CONFIGURATION
@@ -136,9 +136,11 @@ dataset_path = 'raw_text_data/*.txt'
 
 [[datasets]]
 dataset_path = 'structured_data/*.json'
+max_tokens = 10000000              # Limit this dataset to 10M tokens
 
 [[datasets]]
 dataset_path = 'more_structured_data/*.jsonl'
+max_tokens = 5000000               # Limit this dataset to 5M tokens
 
 [[datasets]]
 dataset_path = 'parquet_data/*.parquet'
@@ -150,19 +152,23 @@ dataset_path = 'parquet_data/*.parquet'
 #dataset_path = 'data/positive_examples.json'
 #control_class = 1                  # Enhance this behavior (default)
 #document_suffix = "<EOT>"          # String to append before tokenizing
+#max_tokens = 2000000               # Limit positive examples to 2M tokens
 
 # Negative examples - suppress this behavior  
 #[[datasets]]
 #dataset_path = 'data/negative_examples.json'
 #control_class = -1                 # Suppress/unlearn this behavior
 #document_suffix = ""               # No additional tokens added
+#max_tokens = 1000000               # Limit negative examples to 1M tokens
 
-# Document suffix options (per-dataset, applied during tokenization):
-# - None: tokenize first, then add tokenizer's EOS token if missing (default)
-# - "": empty suffix, no additional tokens added
-# - "<EOT>": string to append before tokenizing
-# - 123: single token ID to append after tokenizing
-# - [123, 456]: multiple token IDs to append after tokenizing
+# Per-dataset configuration options:
+# - max_tokens: Maximum number of tokens to keep from this dataset after shuffling (default: unlimited)
+# - document_suffix: Suffix applied during tokenization:
+#   - None: tokenize first, then add tokenizer's EOS token if missing (default)
+#   - "": empty suffix, no additional tokens added
+#   - "<EOT>": string to append before tokenizing
+#   - 123: single token ID to append after tokenizing
+#   - [123, 456]: multiple token IDs to append after tokenizing
 
 # Notes:
 # - Text files (.txt) are read as raw training data
@@ -170,4 +176,5 @@ dataset_path = 'parquet_data/*.parquet'
 # - The HuggingFace dataset cache will be created below the dataset paths and is shared between nodes
 # - For multi-node training, ensure all paths use the same mount point across nodes
 # - control_class must be -1 or 1 (only used with Control Adapters)
+# - max_tokens pruning happens after shuffling but before dataset concatenation
 # - Supported file patterns: single files or glob patterns with wildcards
