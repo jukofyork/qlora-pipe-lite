@@ -6,7 +6,7 @@ import torch
 from utils.utils import is_main_process, log, safe_rmtree
 
 def load_checkpoint(model_engine, train_dataloader, run_dir):
-    """Load checkpoint and return the step and last eval loss to resume from."""
+    """Load checkpoint and return the last eval loss to resume from."""
     load_path, client_state = model_engine.load_checkpoint(
         run_dir,
         load_module_strict=False,
@@ -14,24 +14,22 @@ def load_checkpoint(model_engine, train_dataloader, run_dir):
     )
 
     if load_path is None:
-        return None, None
+        return None
 
     train_dataloader.load_state_dict(client_state['custom_loader'])
-    step = client_state['step']
     last_eval_loss = client_state.get('last_eval_loss')
 
-    log(f'Resuming training from checkpoint. Resuming at epoch: {train_dataloader.epoch}, step: {step}')
+    log(f'Resuming training from checkpoint. Resuming at epoch: {train_dataloader.epoch}, step: {model_engine.global_steps}')
 
-    return step, last_eval_loss
+    return last_eval_loss
 
-def save_checkpoint(model_engine, train_dataloader, run_dir, step, last_eval_loss):
+def save_checkpoint(model_engine, train_dataloader, run_dir, last_eval_loss):
     """Save training checkpoint with current state."""
     save_root = run_dir + '/' if run_dir[-1] != '/' else run_dir
     model_engine.save_checkpoint(
         save_root,
         client_state={
             'custom_loader': train_dataloader.state_dict(),
-            'step': step,
             'last_eval_loss': last_eval_loss
         },
         save_latest=True,

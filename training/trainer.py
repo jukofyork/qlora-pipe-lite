@@ -64,19 +64,17 @@ class Trainer:
     def train(self):
         """Main training loop."""
 
-        step = None
         last_eval_loss = None
 
         # Attempt to resume from checkpoint if requested
         if self.resume_from_checkpoint:
-            step, last_eval_loss = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
+            last_eval_loss = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
 
         # Fresh run or no checkpoint found, so run initial evaluation
-        if step is None or last_eval_loss is None:
-            step = 1
-            last_eval_loss = self.evaluate(0)
+        if last_eval_loss is None:
+            last_eval_loss = self.evaluate()
             if is_main_process():
-                self._print_eval_progress(0, last_eval_loss)
+                self._print_eval_progress(last_eval_loss)
 
         # Main training loop
         current_epoch = self.train_dataloader.epoch
@@ -87,44 +85,39 @@ class Trainer:
             metrics = self.model_engine.train_batch()
             self.train_dataloader.sync_epoch()
 
-            # Apply adapter-specific (decoupled) regularization weight decay and get the norm/decay stats
+            # Apply adapter-specific regularization and log statistics
             if self.lora_config is not None:
                 stats = self._apply_regularization(
                     self.pipeline_model,
                     self.config,
                     self.optimizer.param_groups[0]['lr']
                 )
+                for key, value in stats.items():
+                    self._write_scalar_metric(f'train/{key}', value)
 
             # Log training metrics
-            if is_main_process():
-                self._write_metrics('train', metrics, step)
-                self.tb_writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], step)
-                if self.lora_config is not None:
-                    for key, value in stats.items():
-                        self.tb_writer.add_scalar(f'train/{key}', value, step)
+            self._write_metrics('train', metrics)
+            self._write_scalar_metric('train/lr', self.optimizer.param_groups[0]['lr'])
 
             # Periodic evaluation
-            if step in self.eval_step_indices:
-                loss = self.evaluate(step)
+            if self.model_engine.global_steps in self.eval_step_indices:
+                loss = self.evaluate()
                 if is_main_process():
-                    self._print_eval_progress(step, loss, last_eval_loss)
+                    self._print_eval_progress(loss, last_eval_loss)
                 last_eval_loss = loss
 
-            # Increment step before saving checkpoint, so we save “next step to run”
-            step += 1
-
-            # Check for epoch change and save model + checkpoint
             if self.train_dataloader.epoch > current_epoch:
-                self._checkpoint_if_needed(step, last_eval_loss, True)
+                # Always save a checkpoint at the start of each epoch
+                self._checkpoint_if_needed(last_eval_loss, True)
                 self._save_model(f'epoch{current_epoch}')
                 current_epoch = self.train_dataloader.epoch
             else:
                 # Time-based checkpointing
-                self._checkpoint_if_needed(step, last_eval_loss)
+                self._checkpoint_if_needed(last_eval_loss)
 
         log('TRAINING COMPLETE!')
 
-    def evaluate(self, step):
+    def evaluate(self):
         """Run evaluation on the eval dataset and return average loss."""
         orig_micro_batches = self.model_engine.micro_batches
         self.model_engine.micro_batches = self.eval_gradient_accumulation_steps
@@ -148,8 +141,7 @@ class Trainer:
         eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
 
         # Log evaluation metrics
-        if is_main_process():
-            self._write_metrics('eval', eval_metrics, step)
+        self._write_metrics('eval', eval_metrics)
 
         return self._extract_loss(eval_metrics)
 
@@ -493,13 +485,19 @@ class Trainer:
         """Extract loss (first metric) as a scalar value."""
         return metrics[0].mean().item()
 
-    def _write_metrics(self, prefix, metrics, step):
+    def _write_metrics(self, prefix, metrics):
         """Write all metrics to tensorboard."""
-        self.tb_writer.add_scalar(f'{prefix}/loss', metrics[0].mean().item(), step)
-        self.tb_writer.add_scalar(f'{prefix}/accuracy_top1', metrics[1].mean().item(), step)
+        self._write_scalar_metric(f'{prefix}/loss', metrics[0].mean().item())
+        self._write_scalar_metric(f'{prefix}/accuracy_top1', metrics[1].mean().item())
 
-    def _print_eval_progress(self, step, current_loss, last_loss=None):
+    def _write_scalar_metric(self, name, value):
+        """Log scalar value to tensorboard using current global step."""
+        if is_main_process():
+            self.tb_writer.add_scalar(name, value, self.model_engine.global_steps)
+
+    def _print_eval_progress(self, current_loss, last_loss=None):
         """Print evaluation progress with optional percentage change."""
+        step = self.model_engine.global_steps
         if step == 0:  # Initial evaluation
             log(f'Initial evaluation loss: {current_loss:.4f}')
         elif last_loss is None:
@@ -519,7 +517,7 @@ class Trainer:
             return True
         return False
 
-    def _checkpoint_if_needed(self, step, last_eval_loss, force=False):
+    def _checkpoint_if_needed(self, last_eval_loss, force=False):
         """Save checkpoint and broadcast decision to all processes."""
         do_checkpoint = force or self._should_checkpoint()
 
@@ -529,7 +527,7 @@ class Trainer:
         do_checkpoint = result[0]
 
         if do_checkpoint:
-            save_checkpoint(self.model_engine, self.train_dataloader, self.run_dir, step, last_eval_loss)
+            save_checkpoint(self.model_engine, self.train_dataloader, self.run_dir, last_eval_loss)
             if is_main_process():
                 prune_checkpoints(self.run_dir, self.max_checkpoints)
 
