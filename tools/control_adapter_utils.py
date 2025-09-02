@@ -20,7 +20,11 @@ def load_adapter_config(adapter_path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 def apply_control_adapter_transform(Q, lambda_vec, scale_factor, device=None):
-    """Apply Control Adapter transformation: scale_factor * (Q @ diag(λ) @ Q^T)."""
+    """Apply forward delta: Q diag(w) Q^T with w = s·λ (s = scale_factor).
+
+    Returns:
+        Tensor: Q diag(w) Q^T on the specified device (float32)
+    """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -28,11 +32,32 @@ def apply_control_adapter_transform(Q, lambda_vec, scale_factor, device=None):
     Q_gpu = Q.to(device=device, dtype=torch.float32)
     lambda_gpu = lambda_vec.to(device=device, dtype=torch.float32)
 
-    # Compute Q @ diag(λ) @ Q^T
-    # This is equivalent to: Q @ torch.diag(lambda_gpu) @ Q.T
-    # But more memory efficient as: (Q * lambda_gpu.unsqueeze(0)) @ Q.T
+    # Compute delta: Q diag(λ) Q^T, then scale by s outside
+    # Memory-efficient implementation: (Q * λ.unsqueeze(0)) @ Q.T
     result = scale_factor * ((Q_gpu * lambda_gpu.unsqueeze(0)) @ Q_gpu.T)
 
+    return result
+
+def apply_control_adapter_inverse_transform(Q, lambda_vec, scale_factor, device=None):
+    """Apply exact inverse delta: (I + Q diag(w) Q^T)^{-1} - I, with w = s·λ.
+
+    Returns:
+        Tensor: -Q diag(w/(1+w)) Q^T on the specified device (float32)
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Move to specified device and compute
+    Q_gpu = Q.to(device=device, dtype=torch.float32)
+    lambda_gpu = lambda_vec.to(device=device, dtype=torch.float32)
+
+    # Compute per-rank scaled eigenvalues and inverse scaling term
+    w = scale_factor * lambda_gpu
+    denom = torch.ones_like(w) + w
+    diag = -w / denom  # elementwise
+
+    # Memory-efficient construct: (Q * diag.unsqueeze(0)) @ Q.T
+    result = (Q_gpu * diag.unsqueeze(0)) @ Q_gpu.T
     return result
 
 def load_control_adapter_weights(adapter_path: Path) -> Tuple[List[Tuple[str, torch.Tensor]], Dict[str, torch.Tensor]]:

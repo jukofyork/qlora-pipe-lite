@@ -111,6 +111,7 @@ if __name__ == "__main__":
     parser.add_argument("output_path", type=str, help="Path to the output LoRA directory")
     parser.add_argument("--rank", type=int, help="Override rank for SVD truncation (default: use original rank)")
     parser.add_argument("--no-gpu", action="store_true", help="Use CPU for SVD computation")
+    parser.add_argument("--inverse", action="store_true", help="Use exact inverse delta: (I + W)^{-1} - I")
     model_group = parser.add_mutually_exclusive_group()
     model_group.add_argument("--cohere", action="store_true", help="Also target o_proj for Cohere models")
     model_group.add_argument("--mixtral", type=int, metavar="N", help="Target experts.{0..N-1}.w2 for Mixtral models")
@@ -147,7 +148,11 @@ if __name__ == "__main__":
         lambda_vec = layer_data[layer_idx]['lambda']
         old_type = Q.dtype
 
-        lora_delta = apply_control_adapter_transform(Q, lambda_vec, scale_factor, device)
+        # Choose forward or exact inverse delta
+        if args.inverse:
+            lora_delta = apply_control_adapter_inverse_transform(Q, lambda_vec, scale_factor, device)
+        else:
+            lora_delta = apply_control_adapter_transform(Q, lambda_vec, scale_factor, device)
 
         target_keys = generate_model_weight_keys(layer_idx, args)
 

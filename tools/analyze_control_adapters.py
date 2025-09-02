@@ -20,7 +20,6 @@ OUTPUT COLUMNS:
                           • Good: < 1.0, Excellent: < 0.5, Poor: > 2.0
 
     ‖W‖_F, ‖W‖_2, ‖W‖_* : True matrix norms from SVD (truncated to rank r)
-                          • ‖W‖_2 should be << 1 for stable Neumann approximation
 
     erank(W)            : Effective rank = (‖W‖_*)²/(‖W‖_F)² ∈ [1, r]
                           • Measures singular value distribution flatness
