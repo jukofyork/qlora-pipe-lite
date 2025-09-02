@@ -251,7 +251,7 @@ def randomize_control_classes(dataset):
         batch['control_class'] = [1 if ((idx * 1664525 + 1013904223) & 0xFFFFFFFF) >> 31 else -1 for idx in indices]
         return batch
 
-    return dataset.map(assign_random_classes, batched=True, with_indices=True)
+    return dataset.map(assign_random_classes, batched=True, with_indices=True, desc='class0 randomization')
 
 def load_single_dataset(
         dataset_path,

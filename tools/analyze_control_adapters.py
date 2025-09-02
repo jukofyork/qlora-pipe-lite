@@ -4,7 +4,7 @@ Script to analyze Control Adapter matrix norms and statistical properties.
 
 OVERVIEW:
     Analyzes Control Adapter matrices W = scale * Q @ diag(λ) @ Q^T where:
-    • Q ∈ ℝ^{H×r} should have orthonormal columns (enforced by training regularizer)
+    • Q ∈ ℝ^{H×r} should have semi-orthogonal columns (enforced by training regularizer)
     • λ ∈ ℝ^r contains per-direction eigenvalues
     • scale = lora_alpha / r
 
