@@ -8,7 +8,7 @@ from constants import (
     DEFAULT_CONTROL_ADAPTER_GAMMA,
     DEFAULT_CHECKPOINT_INTERVAL_HOURS,
     DEFAULT_MAX_CHECKPOINTS,
-    DEFAULT_EVALS_PER_RUN
+    DEFAULT_EVALS_PER_EPOCH
 )
 from training.checkpoint_manager import load_checkpoint, save_checkpoint, prune_checkpoints
 from training.model_saver import save_lora, save_full_model
@@ -57,24 +57,26 @@ class Trainer:
         steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
         model_engine.total_steps = steps_per_epoch * self.epochs
 
-        # Calculate evaluation step indices to use across the entire run
-        evals_per_run = config.get('evals_per_run', DEFAULT_EVALS_PER_RUN)
-        self.eval_step_indices = self._calculate_eval_steps(model_engine.total_steps, evals_per_run)
+        # Calculate evaluation step indices per epoch
+        evals_per_epoch = config.get('evals_per_epoch', DEFAULT_EVALS_PER_EPOCH)
+        self.eval_step_indices = self._calculate_eval_steps(steps_per_epoch, evals_per_epoch)
 
     def train(self):
         """Main training loop."""
-        step = 1
 
-        # Resume from checkpoint if requested
+        step = None
+        last_eval_loss = None
+
+        # Attempt to resume from checkpoint if requested
         if self.resume_from_checkpoint:
-            resumed_step = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
-            if resumed_step is not None:
-                step = resumed_step
+            step, last_eval_loss = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
 
-        # Initial evaluation
-        last_eval_loss = self.evaluate(step - 1)
-        if is_main_process():
-            self._print_eval_progress(step - 1, last_eval_loss)
+        # Fresh run or no checkpoint found, so run initial evaluation
+        if step is None or last_eval_loss is None:
+            step = 1
+            last_eval_loss = self.evaluate(0)
+            if is_main_process():
+                self._print_eval_progress(0, last_eval_loss)
 
         # Main training loop
         current_epoch = self.train_dataloader.epoch
@@ -108,15 +110,17 @@ class Trainer:
                     self._print_eval_progress(step, loss, last_eval_loss)
                 last_eval_loss = loss
 
-            # Time-based checkpointing
-            self._save_checkpoint(step)
+            # Increment step before saving checkpoint, so we save “next step to run”
+            step += 1
 
-            # Check for epoch change and save model
+            # Check for epoch change and save model + checkpoint
             if self.train_dataloader.epoch > current_epoch:
+                self._checkpoint_if_needed(step, last_eval_loss, True)
                 self._save_model(f'epoch{current_epoch}')
                 current_epoch = self.train_dataloader.epoch
-
-            step += 1
+            else:
+                # Time-based checkpointing
+                self._checkpoint_if_needed(step, last_eval_loss)
 
         log('TRAINING COMPLETE!')
 
@@ -150,12 +154,16 @@ class Trainer:
         return self._extract_loss(eval_metrics)
 
     # Private helper methods
-    def _calculate_eval_steps(self, total_steps, evals_per_run):
+    def _calculate_eval_steps(self, steps_per_epoch, evals_per_epoch):
         """Calculate which steps to run evaluation on."""
+        # Avoid requesting more evals than steps and avoid step 0
+        evals = max(1, min(evals_per_epoch, steps_per_epoch))
         eval_steps = set()
-        for i in range(1, evals_per_run):
-            step_in_run = round(i * total_steps / (evals_per_run - 1))
-            eval_steps.add(step_in_run)
+        for epoch in range(self.epochs):
+            for i in range(1, evals + 1):
+                step_in_epoch = max(1, round(i * steps_per_epoch / evals))
+                actual_step = epoch * steps_per_epoch + step_in_epoch
+                eval_steps.add(actual_step)
         return eval_steps
 
     def _cleanup_memory(self):
@@ -511,9 +519,9 @@ class Trainer:
             return True
         return False
 
-    def _save_checkpoint(self, step):
+    def _checkpoint_if_needed(self, step, last_eval_loss, force=False):
         """Save checkpoint and broadcast decision to all processes."""
-        do_checkpoint = self._should_checkpoint()
+        do_checkpoint = force or self._should_checkpoint()
 
         # Broadcast decision to ensure all processes checkpoint together
         result = [do_checkpoint]
@@ -521,7 +529,7 @@ class Trainer:
         do_checkpoint = result[0]
 
         if do_checkpoint:
-            save_checkpoint(self.model_engine, self.train_dataloader, self.run_dir, step)
+            save_checkpoint(self.model_engine, self.train_dataloader, self.run_dir, step, last_eval_loss)
             if is_main_process():
                 prune_checkpoints(self.run_dir, self.max_checkpoints)
 

@@ -89,7 +89,7 @@ eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_
 # ========================
 
 eval_fraction = 0.01  # (default: 0.01)
-evals_per_run = 5     # (default: 11)
+evals_per_epoch = 5   # (default: 10)
 
 # ========================
 # CHECKPOINT CONFIGURATION
