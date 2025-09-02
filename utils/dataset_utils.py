@@ -187,7 +187,10 @@ def tokenize(batch, tokenizer, control_class=1, document_suffix=None):
     Args:
         batch: Dict with 'text' field containing list of text strings
         tokenizer: HuggingFace tokenizer
-        control_class: Control class value to assign to each document
+        control_class: Control class value to assign to each document:
+            - 1: assign positive control class (default)
+            - -1: assign negative control class
+            - 0: assign neutral class (randomized to -1 or +1 downstream)
         document_suffix: Optional suffix - can be:
                   - None: tokenize first, then add EOS token (default)
                   - "": just tokenize without adding anything
@@ -228,6 +231,28 @@ def tokenize(batch, tokenizer, control_class=1, document_suffix=None):
 
     return result
 
+def randomize_control_classes(dataset):
+    """
+    Randomly assign control classes (-1 or +1) to documents in a dataset.
+
+    Uses a linear congruential generator with Numerical Recipes constants
+    for deterministic pseudorandom assignment based on document indices.
+
+    Args:
+        dataset: HuggingFace dataset with 'control_class' field
+
+    Returns:
+        Dataset with control_class values randomly assigned to -1 or +1
+    """
+
+    def assign_random_classes(batch, indices):
+        # Use Numerical Recipes' "Linear Congruential Generator" constants: a=1664525, c=1013904223
+        # NOTE: Extract the highest bit for better randomness (lower bits have poor properties in LCGs)
+        batch['control_class'] = [1 if ((idx * 1664525 + 1013904223) & 0xFFFFFFFF) >> 31 else -1 for idx in indices]
+        return batch
+
+    return dataset.map(assign_random_classes, batched=True, with_indices=True)
+
 def load_single_dataset(
         dataset_path,
         tokenizer,
@@ -243,7 +268,10 @@ def load_single_dataset(
     Args:
         dataset_path: Path to dataset file (.txt, .json, .jsonl, or .parquet)
         tokenizer: HuggingFace tokenizer for text tokenization
-        control_class: Control class value to assign to all documents in this dataset
+        control_class: Control class value to assign to all documents in this dataset:
+            - 1: assign positive control class (default)
+            - -1: assign negative control class
+            - 0: randomly assign each document to -1 or +1 (deterministic based on document order)
         document_suffix: Optional suffix to append to each document (see tokenize function)
 
     Returns:
@@ -285,6 +313,10 @@ def load_single_dataset(
         desc='tokenizing',
         num_proc=min(os.cpu_count(), len(dataset)),
     )
+
+    # If control_class=0 was specified, randomly assign each document to -1 or +1
+    if (control_class == 0):
+        dataset = randomize_control_classes(dataset)
 
     # Shuffle this individual dataset's documents before concatenation
     dataset = dataset.shuffle(seed=42)
@@ -349,7 +381,7 @@ def load_datasets(config, tokenizer, run_dir):
             datasets_list = []
             for dataset_config in config['datasets']:
                 control_class = dataset_config.get('control_class', 1)
-                assert control_class in [-1, 1], f"control_class must be -1 or 1, got {control_class}"
+                assert control_class in [-1, 0, 1], f"control_class must be -1, 0, or 1, got {control_class}"
                 document_suffix = dataset_config.get('document_suffix', None)  # None --> tokenize first, then add EOS token
 
                 dataset = load_single_dataset(
