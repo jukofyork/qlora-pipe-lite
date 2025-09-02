@@ -61,17 +61,30 @@ def patch_decoder_layer_control_adapter(module):
         layer_delta = layer_output - input_hidden_states
         x = module.control_dropout(layer_delta).to(module.control_Q.dtype)
 
-        # Compute adapter output: control_scaling * control_Q @ control_lambda @ control_Q^T @ x
-        adapter_output = module.control_scaling * (((x @ module.control_Q) * module.control_lambda) @ module.control_Q.T)
+        # Project to adapter subspace via Q (semi-orthogonal columns: Q^T Q ≈ I_r)
+        x_q = x @ module.control_Q  # [batch_size, seq_len, adapter_rank]
 
-        # Zero out any with class 0, as these won't have any loss calculated due to having label = -100
+        # Per-rank eigenvalue offsets in the Q-subspace: w = s·lambda
+        # Forward operator on span(Q): I + diag(w)
+        w = module.control_scaling * module.control_lambda  # [adapter_rank]
+
+        # Exact inverse scaling term for the -1 branch:
+        # (I + Q diag(w) Q^T)^{-1} - I = -Q diag(w/(1+w)) Q^T
+        w_inv = w / (torch.ones_like(w) + w)  # [adapter_rank]
+
+        # +1 class delta: Q diag(w) Q^T x
+        out_pos = ((x_q * w) @ module.control_Q.T)  # [batch_size, seq_len, hidden_size]
+
+        # -1 class delta (exact inverse): -Q diag(w/(1+w)) Q^T x
+        out_neg = -((x_q * w_inv) @ module.control_Q.T)  # [batch_size, seq_len, hidden_size]
+
+        # Select +1 branch where class==1; otherwise use inverse branch (class -1)
+        class1_mask = (shift_control_classes == 1).unsqueeze(-1)  # broadcast to [batch_size, seq_len, 1]
+        adapter_output = torch.where(class1_mask, out_pos, out_neg)  # [batch_size, seq_len, hidden_size]
+
+        # 0 class: zero-out (no loss; labels = -100)
         class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to [batch_size, seq_len, 1]
-        adapter_output = torch.where(class0_mask, torch.zeros_like(adapter_output), adapter_output)
-
-        # For class +1 samples: add adapter_output as normal, For class -1 samples: add the negation of adapter_output.
-        # NOTE: This approximates the 1st order Neumann series approximation to the inverse when ρ(A) << 1.
-        negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to [batch_size, seq_len, 1]
-        adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
+        adapter_output = torch.where(class0_mask, torch.zeros_like(adapter_output), adapter_output)  # [batch_size, seq_len, hidden_size]
 
         # Cast adapter contribution back to original dtype and add to the residual stream
         result = layer_output + adapter_output.to(torch_result_dtype)

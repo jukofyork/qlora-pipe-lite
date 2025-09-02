@@ -26,19 +26,17 @@ lora_weight_dtype = "bfloat16"
 # ==================================================
 
 lora_rank = 64
-#lora_alpha = 64               # (default: sqrt(lora_rank) for rsLoRA-style scaling)
+#lora_alpha = 64              # (default: sqrt(lora_rank) for rsLoRA-style scaling)
 
-#lora_dropout = 0.05           # (default: 0.0)
+#lora_dropout = 0.05          # (default: 0.0)
 
-#lora_weight_decay = 10.0      # (default: 0.0, requires lora_weight_dtype = "float32")
-                               # - LoRAs: L2 regularization on composite matrix W = s·B·A  
-                               # - Control Adapters: L2 regularization on spectral norm of W
+#lora_weight_decay = 10.0     # (default: 0.0, requires lora_weight_dtype = "float32")
+                              # - LoRAs: L2 regularization on composite matrix W = s·B·A  
+                              # - Control Adapters: L2 regularization on spectral norm of W
                                           
-#lora_max_norm = 1.0           # (default: 0.0)
-                               # - LoRAs: Frobenius norm constraint ||W||_F ≤ max_norm
-                               # - Control Adapters: Spectral norm constraint ||W||_2 ≤ max_norm
+#control_adapter_gamma = 0.1  # (default: 0.5, soft orthogonality regularization step size, must be > 0 and <= 0.5)
 
-#control_adapter_gamma = 0.1   # (default: 0.5, orthogonality regularization step size, must be > 0 and <= 0.5)
+#control_adapter_sigma = 1.5  # (default: 2.0, hard symmetric scaling clamp, must be > 1.0 and <= 2.0)
 
 # =======================
 # OPTIMIZER CONFIGURATION
