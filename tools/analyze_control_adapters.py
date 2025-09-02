@@ -29,12 +29,6 @@ OUTPUT COLUMNS:
     κ(W)                : Condition number = σ_max/σ_min
                           • Good: < 100, Poor: > 1000, ∞ = rank deficient
 
-    ε_inv               : Neumann inverse error bound = ‖W‖_2²/(1-‖W‖_2) for ‖W‖_2 < 1
-                          • Error in (I+W)^(-1) ≈ I-W approximation used for class -1 samples
-                          • Good: < 1-5%, ∞ when ‖W‖_2 ≥ 1 (approximation invalid)
-                          • Ideally maintain ‖W‖_2 < 0.2-0.3 for good inverse approximation
-
-
     ‖Ŵ‖_2, ‖Ŵ‖_*        : λ-based approximations assuming perfect orthogonality:
                           • ‖Ŵ‖_2 = scale * max(|λ|), ‖Ŵ‖_* = scale * sum(|λ|)
 
@@ -49,7 +43,6 @@ DIAGNOSTIC GUIDE:
     High orthogonality error   → Increase control_adapter_gamma (≤ 0.5)
     Low effective rank         → Check for rank collapse, review training dynamics
     High condition number      → Reduce learning rate or rank
-    High Neumann error         → ‖W‖_2 too large, improve orthogonality or reduce scale
     Large approximation errors → Use SVD values instead of λ-based estimates
 """
 
@@ -98,9 +91,9 @@ if __name__ == "__main__":
     # Analyze each layer
     results = []
     print(f"{'Layer':<6} {'‖QᵀQ-Iᵣ‖_F²':<12} {'‖W‖_F':<8} {'‖W‖_2':<8} {'‖W‖_*':<8} "
-          f"{'erank(W)':<10} {'κ(W)':<8} {'ε_inv':<8} "
+          f"{'erank(W)':<10} {'κ(W)':<8} "
           f"{'‖Ŵ‖_2':<8} {'‖Ŵ‖_*':<8} {'ε_‖Ŵ‖_2':<10} {'ε_‖Ŵ‖_*':<10}")
-    print("-" * 112)
+    print("-" * 104)
 
     for layer_idx in sorted(layer_data.keys()):
         # Check that both Q and lambda exist for this layer
@@ -134,13 +127,6 @@ if __name__ == "__main__":
         # Condition number
         condition_number = spectral_norm / min_singular_value if min_singular_value > 1e-10 else float('inf')
 
-        # Neumann inverse approximation error bound:
-        #   ε = ‖W‖₂² / (1 − ‖W‖₂), valid for ‖W‖₂ < 1; otherwise ∞
-        if spectral_norm < 1.0 - 1e-12:
-            neumann_error = (spectral_norm ** 2) / (1.0 - spectral_norm)
-        else:
-            neumann_error = float('inf')
-
         # Approximated norms (assuming perfect orthogonality)
         spectral_norm_approx = lora_scale * torch.max(torch.abs(lambda_vec)).item()
         nuclear_norm_approx = lora_scale * torch.sum(torch.abs(lambda_vec)).item()
@@ -160,7 +146,6 @@ if __name__ == "__main__":
             'frobenius_norm': frobenius_norm,
             'effective_rank': effective_rank,
             'condition_number': condition_number,
-            'neumann_error': neumann_error,
             'spectral_norm_approx': spectral_norm_approx,
             'nuclear_norm_approx': nuclear_norm_approx,
             'spectral_error_ratio': spectral_error_ratio,
@@ -176,7 +161,6 @@ if __name__ == "__main__":
               f"{stats['nuclear_norm']:<8.3f} "
               f"{stats['effective_rank']:<10.1f} "
               f"{stats['condition_number']:<8.1f} "
-              f"{stats['neumann_error']:<8.1%} "
               f"{stats['spectral_norm_approx']:<8.3f} "
               f"{stats['nuclear_norm_approx']:<8.3f} "
               f"{stats['spectral_error_ratio']:<10.1%} "
@@ -192,7 +176,6 @@ if __name__ == "__main__":
         orthogonality_errors = [r['orthogonality_error'] for r in results]
         spectral_error_ratios = [r['spectral_error_ratio'] for r in results]
         nuclear_error_ratios = [r['nuclear_error_ratio'] for r in results]
-        neumann_errors = [r['neumann_error'] for r in results]
         print()
 
         layer_count_digits = len(str(len(results)))
@@ -210,8 +193,6 @@ if __name__ == "__main__":
               f"[{min(effective_ranks):.1f}, {max(effective_ranks):.1f}]")
         print(f"Condition number (κ(W))     : {sum(condition_numbers)/len(condition_numbers):.1f} "
               f"[{min(condition_numbers):.1f}, {max(condition_numbers):.1f}]")
-        print(f"Neumann inv error (ε_inv)   : {sum(neumann_errors)/len(neumann_errors):.1%} "
-              f"[{min(neumann_errors):.1%}, {max(neumann_errors):.1%}]")
         print(f"Spectral norm error (ε_2)   : {sum(spectral_error_ratios)/len(spectral_error_ratios):.1%} "
               f"[{min(spectral_error_ratios):.1%}, {max(spectral_error_ratios):.1%}]")
         print(f"Nuclear norm error (ε_*)    : {sum(nuclear_error_ratios)/len(nuclear_error_ratios):.1%} "
