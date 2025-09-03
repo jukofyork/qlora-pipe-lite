@@ -31,11 +31,17 @@ lora_rank = 64
 # NOTE: Can be used with either LoRAs or Control Adapters.
 lora_dropout = 0.05              # (default: 0.0)
 
-# (** LoRAs only **): L2 regularization on composite matrix W = s·B·A
-lora_weight_decay = 10.0         # (default: 0.0, requires lora_weight_dtype = "float32")
+# L2 weight decay regularization (works with both LoRAs and Control Adapters):
+# - LoRAs: L2 regularization on composite matrix W = B·A using L = ½||W||_F²
+# - Control Adapters: L2 regularization on log-eigenvalue vector S using L = ½||S||²
+# NOTE: Requires lora_weight_dtype = "float32" when > 0 for numerical stability
+lora_weight_decay = 10.0         # (default: 0.0)
 
-# (** Control Adapters only **): Soft orthogonality regularization step size
-#control_adapter_gamma = 0.1     # (default: 0.5, must be > 0 and <= 0.5)
+# (** Control Adapters only **): Orthogonality regularization step size for Q
+# Controls Newton-style step: Q ← Q − γ·Q·(Q^T Q − I) to maintain Q^T Q ≈ I
+# NOTE: Allowed range (0, 0.5], as values > 0.5 may cause divergence
+# NOTE: Recommend lora_weight_dtype = "float32" for numerical stability, but should still work with bfloat16.
+#control_adapter_gamma = 0.1     # (default: 0.5 = full Newton step)
 
 # =======================
 # OPTIMIZER CONFIGURATION
