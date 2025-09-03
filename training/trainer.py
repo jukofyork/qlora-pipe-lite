@@ -171,13 +171,13 @@ class Trainer:
 
         Returns:
             dict:
-                - 'norms'        : tensor of Frobenius norms ||W||_F per LoRA parameter (empty if none)
-                - 'weight_decay' : tensor of Frobenius norm reduction due to regularization
-                                   (only included when regularization is configured via lora_weight_decay > 0;
-                                   empty tensor if no applicable parameters on this stage)
+                - 'norms'        : tensor of Frobenius norms (||W||_F) per pair of LoRA parameters
+                - 'weight_decay' : tensor of Frobenius norm reductions due to the regularization
+                                   (only included when regularization is configured via lora_weight_decay > 0)
 
         Notes:
             - Requires A and B parameters to be float32 for numerical stability when lora_weight_decay > 0.
+            - Empty tensor(s) returned if no applicable parameters on this stage.
         """
         norms = []
         weight_decay = []
@@ -256,8 +256,11 @@ class Trainer:
 
        Returns:
            dict:
-               - 'norms'         : tensor of spectral norms of W per parameter (||W||₂ = max|λᵢ|)
-               - 'orthogonality' : tensor of ||Q^T Q − I||_F² values (empty if none)
+               - 'norms'         : tensor of spectral norms (||W||₂ = max|λᵢ|) per parameter
+               - 'orthogonality' : tensor of orthogonality residuals (||Q^T Q − I||_F²)
+
+        Notes:
+            - Empty tensor(s) returned if no applicable parameters on this stage.
        """
        norms = []
        orthogonality = []
