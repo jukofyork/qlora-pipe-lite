@@ -25,8 +25,7 @@ lora_weight_dtype = "bfloat16"
 # LORA CONFIGURATION & CONTROL ADAPTER CONFIGURATION
 # ==================================================
 
-lora_rank = 64
-#lora_alpha = 64              # (default: sqrt(lora_rank) for rsLoRA-style scaling)
+lora_rank = 64                # NOTE: We fix lora_alpha = lora_rank and then just adjust learning rate...
 
 #lora_dropout = 0.05          # (default: 0.0)
 
@@ -35,8 +34,6 @@ lora_rank = 64
                               # - Control Adapters: L2 regularization on spectral norm of W
                                           
 #control_adapter_gamma = 0.1  # (default: 0.5, soft orthogonality regularization step size, must be > 0 and <= 0.5)
-
-#control_adapter_sigma = 1.5  # (default: 2.0, hard symmetric scaling clamp, must be > 1.0 and <= 2.0)
 
 # =======================
 # OPTIMIZER CONFIGURATION

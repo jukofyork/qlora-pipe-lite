@@ -28,13 +28,8 @@ def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args):
     with open(config_file, 'r') as f:
         config = json.load(f)
 
-    # Compute scale factor from original config before modifying
-    original_rank = config['r']
-    original_alpha = config.get('lora_alpha', original_rank)
-    scale_factor = original_alpha / original_rank
-
-    # Determine target rank (allows exceeding original rank)
-    target_rank = args.rank if args.rank is not None else original_rank
+    # Use custom target rank if asked (allows exceeding original rank)
+    target_rank = args.rank if args.rank is not None else config['r']
 
     # Set target modules based on model type
     if args.mixtral:
@@ -44,17 +39,15 @@ def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args):
     else:
         config['target_modules'] = ["down_proj"]
 
-    # Update rank if different from original
+    # Update rank and alpha if different from original
     config['r'] = target_rank
-
-    # Always set alpha = rank since scale factor is baked into tensors
     config['lora_alpha'] = target_rank
 
     with open(output_path / 'adapter_config.json', 'w') as f:
         json.dump(config, f, indent=2)
     print("Updated and copied 'adapter_config.json'")
 
-    return scale_factor, target_rank
+    return target_rank
 
 def generate_model_weight_keys(layer_idx: int, args) -> List[str]:
     """Generate model weight keys for a given layer based on model type."""
@@ -126,7 +119,7 @@ if __name__ == "__main__":
     output_path = Path(args.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    scale_factor, target_rank = copy_and_patch_adapter_config(control_adapter_path, output_path, args)
+    target_rank = copy_and_patch_adapter_config(control_adapter_path, output_path, args)
 
     control_keys, control_state_dict = load_control_adapter_weights(control_adapter_path)
 
@@ -138,21 +131,22 @@ if __name__ == "__main__":
 
     print()
     print(f"Converting {len(control_keys)//2} layers ({len(control_keys)} tensors) "
-          f"(device='{device}', scale={f'{scale_factor:.4f}'.rstrip('0').rstrip('.')}):")
+          f"(device='{device}'):")
 
     for layer_idx in sorted(layer_data.keys()):
-        if 'Q' not in layer_data[layer_idx] or 'lambda' not in layer_data[layer_idx]:
+        if 'Q' not in layer_data[layer_idx] or 'S' not in layer_data[layer_idx]:
             continue
 
         Q = layer_data[layer_idx]['Q']
-        lambda_vec = layer_data[layer_idx]['lambda']
+        S = layer_data[layer_idx]['S']
+
         old_type = Q.dtype
 
         # Choose forward or exact inverse delta
-        if args.inverse:
-            lora_delta = apply_control_adapter_inverse_transform(Q, lambda_vec, scale_factor, device)
+        if not args.inverse:
+            lora_delta = apply_control_adapter_transform(Q, S, device)
         else:
-            lora_delta = apply_control_adapter_transform(Q, lambda_vec, scale_factor, device)
+            lora_delta = apply_control_adapter_inverse_transform(Q, S, device)
 
         target_keys = generate_model_weight_keys(layer_idx, args)
 
@@ -163,15 +157,15 @@ if __name__ == "__main__":
             weight = model_weights[target_key].to(device=device, dtype=torch.float32)
             multiplicative_effect = lora_delta @ weight
 
-            U, S, Vt = torch.linalg.svd(multiplicative_effect, full_matrices=False)
-            U, S, Vt = U.cpu(), S.cpu(), Vt.cpu()
+            U, svals, Vt = torch.linalg.svd(multiplicative_effect, full_matrices=False)
+            U, svals, Vt = U.cpu(), svals.cpu(), Vt.cpu()
 
             # Truncate to target rank
-            if target_rank > len(S):
-                raise ValueError(f"Requested rank {target_rank} exceeds maximum available rank {len(S)} from SVD")
-            sqrt_S = torch.sqrt(S[:target_rank])
-            A_approx = torch.diag(sqrt_S) @ Vt[:target_rank,:]
-            B_approx = U[:,:target_rank] @ torch.diag(sqrt_S)
+            if target_rank > len(svals):
+                raise ValueError(f"Requested rank {target_rank} exceeds maximum available rank {len(svals)} from SVD")
+            sqrt_svals = torch.sqrt(svals[:target_rank])
+            A_approx = torch.diag(sqrt_svals) @ Vt[:target_rank,:]
+            B_approx = U[:,:target_rank] @ torch.diag(sqrt_svals)
 
             A_approx = A_approx.to(old_type)
             B_approx = B_approx.to(old_type)
@@ -183,9 +177,9 @@ if __name__ == "__main__":
 
             base_key = f"base_model.model.model.layers.{layer_idx}"
             print()
-            print(f"- Layer {layer_idx}, SVD rank {target_rank}/{len(S)}, "
-                  f"{100*torch.sum(S[:target_rank]**2)/torch.sum(S**2):.1f}% of variance explained:")
-            print(f"  -- '{base_key}.control_Q' + '{base_key}.control_lambda'")
+            print(f"- Layer {layer_idx}, SVD rank {target_rank}/{len(svals)}, "
+                  f"{100*torch.sum(svals[:target_rank]**2)/torch.sum(svals**2):.1f}% of variance explained:")
+            print(f"  -- '{base_key}.control_Q' + '{base_key}.control_S'")
             print(f"  -> '{a_key}' + '{b_key}'")
 
     print()

@@ -62,10 +62,6 @@ if __name__ == '__main__':
     with open(args.config) as f:
         config = toml.load(f)
 
-    # Set lora_alpha to the "Rank-Stabilized LoRA" default, such that: scale = 1/sqrt(rank)
-    if 'lora_alpha' not in config and 'lora_rank' in config:
-        config['lora_alpha'] = round(math.sqrt(config['lora_rank']))
-
     # Increase deepspeed timeout to avoid timeouts during dataset loading
     deepspeed.init_distributed(timeout=timedelta(hours=DEEPSPEED_TIMEOUT_HOURS))
 

@@ -3,10 +3,9 @@
 Script to analyze Control Adapter matrix norms and statistical properties.
 
 OVERVIEW:
-    Analyzes Control Adapter matrices W = scale * Q @ diag(λ) @ Q^T where:
+    Analyzes Control Adapter matrices W = Q @ diag(λ) @ Q^T where:
     • Q ∈ ℝ^{H×r} should have semi-orthogonal columns (enforced by training regularizer)
     • λ ∈ ℝ^r contains per-direction eigenvalues
-    • scale = lora_alpha / r
 
     Computes true matrix norms via SVD and compares to λ-based approximations
     (which are exact only when Q is perfectly orthogonal).
@@ -29,7 +28,7 @@ OUTPUT COLUMNS:
                           • Good: < 100, Poor: > 1000, ∞ = rank deficient
 
     ‖Ŵ‖_2, ‖Ŵ‖_*        : λ-based approximations assuming perfect orthogonality:
-                          • ‖Ŵ‖_2 = scale * max(|λ|), ‖Ŵ‖_* = scale * sum(|λ|)
+                          • ‖Ŵ‖_2 = max(|λ|), ‖Ŵ‖_* = sum(|λ|)
 
     ε_‖Ŵ‖_2, ε_‖Ŵ‖_*    : Signed approximation errors = (approx - true) / true
                           • Positive = overestimation (expected with non-orthogonal Q)
@@ -62,21 +61,12 @@ if __name__ == "__main__":
 
     adapter_path = Path(args.control_adapter_path)
 
-    # Load configuration and weights
-    adapter_config = load_adapter_config(adapter_path)
+    # Load weights
     _, state_dict = load_control_adapter_weights(adapter_path)
-
-    # Extract parameters
-    lora_alpha = adapter_config['lora_alpha']
-    lora_rank = adapter_config['r']
-    lora_scale = lora_alpha / lora_rank
 
     print(f"Control Adapter Analysis")
     print(f"========================")
     print(f"Path   : '{adapter_path}'")
-    print(f"Alpha  : {lora_alpha}")
-    print(f"Rank   : {lora_rank}")
-    print(f"Scale  : {lora_scale:.4f}".rstrip('0').rstrip('.'))
     print(f"Device : '{device}'")
     print()
 
@@ -95,30 +85,30 @@ if __name__ == "__main__":
     print("-" * 104)
 
     for layer_idx in sorted(layer_data.keys()):
-        # Check that both Q and lambda exist for this layer
-        if 'lambda' not in layer_data[layer_idx] or 'Q' not in layer_data[layer_idx]:
+        # Check that both Q and S exist for this layer
+        if 'Q' not in layer_data[layer_idx] or 'S' not in layer_data[layer_idx]:
             continue
 
-        lambda_vec = layer_data[layer_idx]['lambda'].to(torch.float32)
         Q = layer_data[layer_idx]['Q'].to(torch.float32)
+        S = layer_data[layer_idx]['S'].to(torch.float32)
 
-        # Compute the full matrix W = scale * Q @ diag(λ) @ Q^T
-        W = apply_control_adapter_transform(Q, lambda_vec, lora_scale, device)
+        rank = int(S.numel())
+        assert Q.ndim == 2 and Q.shape[1] == rank, f"Shape mismatch: Q has {Q.shape[1]} cols, S has {rank} entries"
+
+        # Compute the full matrix W = Q @ diag(λ) @ Q^T, with λ = exp(S) - 1
+        W = apply_control_adapter_transform(Q, S, device)
 
         # Run SVD to get true singular values
-        S = torch.linalg.svdvals(W)
-
-        # Move singular values back to CPU for statistics
-        S = S.cpu()
+        svals = torch.linalg.svdvals(W).cpu()
 
         # Truncate to the actual rank of the control adapter
-        S_truncated = S[:lora_rank]
+        svals = svals[:rank]
 
         # True norms from SVD (using truncated singular values)
-        spectral_norm = S_truncated[0].item()  # ||W||_2 = max singular value
-        min_singular_value = S_truncated[-1].item()  # minimum singular value within rank
-        nuclear_norm = torch.sum(S_truncated).item()  # ||W||_* = sum of singular values
-        frobenius_norm = torch.norm(S_truncated).item()  # ||W||_F = ||singular values||_2
+        spectral_norm = svals[0].item()  # ||W||_2 = max singular value
+        min_singular_value = svals[-1].item()  # minimum singular value within rank
+        nuclear_norm = torch.sum(svals).item()  # ||W||_* = sum of singular values
+        frobenius_norm = torch.norm(svals).item()  # ||W||_F = ||singular values||_2
 
         # Effective rank
         effective_rank = (nuclear_norm ** 2) / (frobenius_norm ** 2) if frobenius_norm > 1e-10 else 0.0
@@ -126,9 +116,10 @@ if __name__ == "__main__":
         # Condition number
         condition_number = spectral_norm / min_singular_value if min_singular_value > 1e-10 else float('inf')
 
-        # Approximated norms (assuming perfect orthogonality)
-        spectral_norm_approx = lora_scale * torch.max(torch.abs(lambda_vec)).item()
-        nuclear_norm_approx = lora_scale * torch.sum(torch.abs(lambda_vec)).item()
+        # Approximated norms (assuming perfect orthogonality): λ = exp(S) - 1
+        lambda_vec = torch.expm1(S)
+        spectral_norm_approx = torch.max(torch.abs(lambda_vec)).item()
+        nuclear_norm_approx = torch.sum(torch.abs(lambda_vec)).item()
 
         # Signed ratio errors (for % formatting) - shows direction of bias
         spectral_error_ratio = (spectral_norm_approx - spectral_norm) / abs(spectral_norm) if abs(spectral_norm) > 1e-10 else 0.0

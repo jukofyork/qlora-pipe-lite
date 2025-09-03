@@ -64,19 +64,20 @@ def patch_decoder_layer_control_adapter(module):
         # Project to adapter subspace via Q (semi-orthogonal columns: Q^T Q ≈ I_r)
         x_q = x @ module.control_Q  # [batch_size, seq_len, adapter_rank]
 
-        # Per-rank eigenvalue offsets in the Q-subspace: w = s·lambda
-        # Forward operator on span(Q): I + diag(w)
-        w = module.control_scaling * module.control_lambda  # [adapter_rank]
+        # Per-rank eigenvalue offsets in the Q-subspace using a log-parameterization:
+        # λ = exp(S) - 1, so 1 + λ = exp(S) > 0 and the forward operator is I + diag(λ)
+        lambda_pos_coeff = torch.expm1(module.control_S)  # [adapter_rank]
 
-        # Exact inverse scaling term for the -1 branch:
-        # (I + Q diag(w) Q^T)^{-1} - I = -Q diag(w/(1+w)) Q^T
-        w_inv = w / (torch.ones_like(w) + w)  # [adapter_rank]
+        # Exact inverse for the -1 branch (exact if Q is orthonormal; otherwise approximate):
+        # (I + Q diag(λ) Q^T)^{-1} - I = -Q diag(λ/(1+λ)) Q^T
+        # Identity: λ' = -λ/(1+λ) = exp(-S) - 1
+        lambda_neg_coeff = torch.expm1(-module.control_S)  # [adapter_rank]
 
-        # +1 class delta: Q diag(w) Q^T x
-        out_pos = ((x_q * w) @ module.control_Q.T)  # [batch_size, seq_len, hidden_size]
+        # +1 class delta: Q diag(λ) Q^T x
+        out_pos = ((x_q * lambda_pos_coeff) @ module.control_Q.T)  # [batch_size, seq_len, hidden_size]
 
-        # -1 class delta (exact inverse): -Q diag(w/(1+w)) Q^T x
-        out_neg = -((x_q * w_inv) @ module.control_Q.T)  # [batch_size, seq_len, hidden_size]
+        # -1 class delta (exact inverse): Q diag(λ') Q^T x
+        out_neg = ((x_q * lambda_neg_coeff) @ module.control_Q.T)  # [batch_size, seq_len, hidden_size]
 
         # Select +1 branch where class==1; otherwise use inverse branch (class -1)
         class1_mask = (shift_control_classes == 1).unsqueeze(-1)  # broadcast to [batch_size, seq_len, 1]
@@ -247,7 +248,7 @@ def create_lora_config(config, target_modules, layers_to_transform):
 
     lora_config = LoraConfig(
         r=config['lora_rank'],
-        lora_alpha=config['lora_alpha'],
+        lora_alpha=config['lora_rank'],  # NOTE: We fix lora_alpha = lora_rank and then just adjust learning rate...
         lora_dropout=config.get('lora_dropout', 0.0),
         target_modules=actual_target_modules,
         layers_to_transform=layers_to_transform if layers_to_transform else None,
@@ -277,11 +278,7 @@ def apply_control_adapters(model, config, lora_config):
     """Apply Control Adapters using the LoraConfig object."""
     layers_to_transform = lora_config.layers_to_transform
     adapter_rank = lora_config.r
-    adapter_alpha = lora_config.lora_alpha
     adapter_dropout_p = lora_config.lora_dropout
-
-    layer_count = 0
-    applied_count = 0
 
     for name, module in model.named_modules():
         if 'decoderlayerpipe' in module.__class__.__name__.lower():
@@ -298,33 +295,23 @@ def apply_control_adapters(model, config, lora_config):
 
                 # Create Control Adapter parameters
                 module.control_Q = torch.nn.Parameter(torch.empty(hidden_size, adapter_rank, device=device))
-                module.control_lambda = torch.nn.Parameter(torch.empty(adapter_rank, device=device))
-
-                # Store scaling as attribute (needed in forward)
-                module.control_scaling = adapter_alpha / adapter_rank
+                module.control_S = torch.nn.Parameter(torch.empty(adapter_rank, device=device))
 
                 # Add original_name for saving compatibility
                 module.control_Q.original_name = f"base_model.model.model.layers.{layer_idx}.control_Q"
-                module.control_lambda.original_name = f"base_model.model.model.layers.{layer_idx}.control_lambda"
+                module.control_S.original_name = f"base_model.model.model.layers.{layer_idx}.control_S"
 
                 # Initialize
                 torch.nn.init.orthogonal_(module.control_Q)
-                torch.nn.init.zeros_(module.control_lambda)
+                torch.nn.init.zeros_(module.control_S)
 
                 # Cast to the desired dtype
                 lora_weight_dtype = DTYPE_MAP[config.get('lora_weight_dtype', 'float32')]
                 module.control_Q.data = module.control_Q.data.to(lora_weight_dtype)
-                module.control_lambda.data = module.control_lambda.data.to(lora_weight_dtype)
+                module.control_S.data = module.control_S.data.to(lora_weight_dtype)
 
-                # Store original forward method and replace with Control Adapter version
-                module._original_forward = module.forward
+                # Replace forward with Control Adapter version
                 module.forward = patch_decoder_layer_control_adapter(module)
-
-                applied_count += 1
-            # else:
-            #    log_all(f'not training {layer_idx} because it is not in layers_to_transform')
-
-            layer_count += 1
 
     # Set original_name for all parameters (for saving compatibility)
     for name, p in model.named_parameters():
@@ -333,12 +320,10 @@ def apply_control_adapters(model, config, lora_config):
 
     # Disable gradients for all base model parameters, enable only for Control Adapters
     for name, p in model.named_parameters():
-        if 'control_Q' in name or 'control_lambda' in name:
+        if 'control_Q' in name or 'control_S' in name:
             p.requires_grad = True
         else:
             p.requires_grad = False
-
-    # log_all(f"Applied Control Adapters to {applied_count} of {layer_count} decoder layers")
 
 def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
     """Setup full fine-tuning by setting requires_grad on parameters."""
