@@ -18,22 +18,24 @@ output_dir = '/data/training_runs/llama3_8b_example'
 # Set to train a LoRA/Control adapter on top of a 4-bit quantised model (ie: a "QLoRA")
 load_in_4bit = true
 
-# By default uses float32 and can change this to bfloat16 to save memory if not using lora_weight_decay.
-lora_weight_dtype = "bfloat16"
+# =====================
+# ADAPTER CONFIGURATION
+# =====================
 
-# ==================================================
-# LORA CONFIGURATION & CONTROL ADAPTER CONFIGURATION
-# ==================================================
+# NOTE: To use lora_weight_decay, this must be left as float32.
+#lora_weight_dtype = "bfloat16"  # (default: "float32")
 
-lora_rank = 64                # NOTE: We fix lora_alpha = lora_rank and then just adjust learning rate...
+# NOTE: We fix lora_alpha = lora_rank, so adjust learning rate to get approximately same effect.
+lora_rank = 64
 
-#lora_dropout = 0.05          # (default: 0.0)
+# NOTE: Can be used with either LoRAs or Control Adapters.
+lora_dropout = 0.05              # (default: 0.0)
 
-#lora_weight_decay = 10.0     # (default: 0.0, requires lora_weight_dtype = "float32")
-                              # - LoRAs: L2 regularization on composite matrix W = s·B·A  
-                              # - Control Adapters: L2 regularization on spectral norm of W
-                                          
-#control_adapter_gamma = 0.1  # (default: 0.5, soft orthogonality regularization step size, must be > 0 and <= 0.5)
+# (** LoRAs only **): L2 regularization on composite matrix W = s·B·A
+lora_weight_decay = 10.0         # (default: 0.0, requires lora_weight_dtype = "float32")
+
+# (** Control Adapters only **): Soft orthogonality regularization step size
+#control_adapter_gamma = 0.1     # (default: 0.5, must be > 0 and <= 0.5)
 
 # =======================
 # OPTIMIZER CONFIGURATION
