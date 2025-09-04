@@ -81,9 +81,9 @@ class CustomPipelineEngine(PipelineEngine):
                                        stages=self.num_stages,
                                        stage_id=self.stage_id)
         self._exec_schedule(sched)
+
+        # list of losses (NOTE: collapsed to "per-step" constants by _aggregate_total_losses)
         agg_losses = self._aggregate_total_losses()
-        # Actual training loss is always the first item.
-        self.agg_train_loss = agg_losses[0].mean()
 
         self.timers(TRAIN_BATCH_TIMER).stop()
 
@@ -102,8 +102,11 @@ class CustomPipelineEngine(PipelineEngine):
                 steps_completed = self.global_steps - self.start_step
                 eta = (total_elapsed / steps_completed) * (self.total_steps - self.global_steps)
 
+                # Per-step training loss (already normalized per token in _aggregate_total_losses)
+                loss = agg_losses[0].mean()
+
                 log(f'step: {self.global_steps} / {self.total_steps}, '
-                    f'loss: {self.agg_train_loss:0.4f}, '
+                    f'loss: {loss:0.4f}, '
                     f'throughput: {iter_throughput:0.3f} sequences/s, '
                     f'elapsed: {seconds_to_time_str(total_elapsed)}, '
                     f'eta: {seconds_to_time_str(eta)}')
@@ -142,13 +145,13 @@ class CustomPipelineEngine(PipelineEngine):
         with torch.no_grad():
             self._exec_schedule(sched)
 
-        # list of losses
-        agg_eval_losses = self._aggregate_total_losses()
+        # list of losses (NOTE: collapsed to "per-step" constants by _aggregate_total_losses)
+        agg_losses = self._aggregate_total_losses()
 
         # Restore the training iterator
         self.set_dataiterator(train_iterator)
 
-        return agg_eval_losses
+        return agg_losses
 
     def _aggregate_total_losses(self):
         all_agg_outputs = []
@@ -197,7 +200,13 @@ class CustomPipelineEngine(PipelineEngine):
                 dist.broadcast(tensor=agg_output, src=src_rank, group=self.grid.get_pipe_parallel_group())
                 all_agg_outputs.append(agg_output)
 
-        return all_agg_outputs
+        # Collapse per-micro contributions into per-step constants so mean() equals the step value
+        collapsed_outputs = []
+        for t in all_agg_outputs:
+            step_value = t.sum()
+            collapsed_outputs.append(torch.ones_like(t) * step_value)
+
+        return collapsed_outputs
 
     # We override this to handle the model returning a list of "losses", but only doing backprop on the first.
     def _exec_forward_pass(self, buffer_id):
@@ -267,6 +276,7 @@ class CustomPipelineEngine(PipelineEngine):
                 self.loss = losses
                 self.fwd_outputs.append([self.loss.detach()])
             else:
+                # Loss is already normalized by global token count in ComputeMetrics
                 self.loss = losses[0]
                 self.fwd_outputs.append([l.detach() for l in losses])
 
