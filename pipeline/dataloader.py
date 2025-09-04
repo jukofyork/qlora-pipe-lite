@@ -6,17 +6,24 @@ import torch
 
 from utils.utils import log
 
-def split_batch(batch, pieces):
+def split_batch(batch, gradient_accumulation_steps, data_parallel_world_size):
     example_tuple, labels = batch
-    log(f'before GAS splitting, batch size: {example_tuple[0].size(0)}, total tokens: {example_tuple[0].numel()}')
-    split_size = example_tuple[0].size(0) // pieces
+
+    local_batch_size = example_tuple[0].size(0)
+    local_tokens = example_tuple[0].numel()
+
+    batch_size = local_batch_size * data_parallel_world_size
+    batch_tokens = local_tokens * data_parallel_world_size
+    log(f'before GAS splitting, batch size: {batch_size} sequences ({batch_tokens} tokens)')
+
+    split_size = local_batch_size // gradient_accumulation_steps
 
     def split_or_broadcast(t):
         # Split tensors with a batch dimension; broadcast scalars/0-D tensors
         if torch.is_tensor(t) and t.dim() >= 1:
             return torch.split(t, split_size, dim=0)
         else:
-            return (t,) * pieces
+            return (t,) * gradient_accumulation_steps
 
     splits_per_field = [split_or_broadcast(t) for t in example_tuple]
     split_examples = zip(*splits_per_field)
@@ -88,6 +95,8 @@ class PipelineDataLoader:
         self.dataset = dataset
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.data_parallel_world_size = data_parallel_world_size
+
         self.data_sampler = DistributedBatchSampler(
             dataset=dataset,
             batch_size=self.batch_size,
@@ -135,7 +144,7 @@ class PipelineDataLoader:
     def _pull_batches_from_dataloader(self):
         for batch in self.dataloader:
             self.num_batches_pulled += 1
-            for micro_batch in split_batch(batch, self.gradient_accumulation_steps):
+            for micro_batch in split_batch(batch, self.gradient_accumulation_steps, self.data_parallel_world_size):
                 yield micro_batch
 
     def _create_dataloader(self):
