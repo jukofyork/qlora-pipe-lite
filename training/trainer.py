@@ -140,10 +140,8 @@ class Trainer:
         self.model_engine.micro_batches = orig_micro_batches
         eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
 
-        # Log evaluation metrics
-        self._write_metrics('eval', eval_metrics)
-
-        return self._extract_loss(eval_metrics)
+        # Log evaluation metrics and return the mean loss
+        return  self._write_metrics('eval', eval_metrics)
 
     # Private helper methods
     def _calculate_eval_steps(self, steps_per_epoch, evals_per_epoch):
@@ -434,14 +432,13 @@ class Trainer:
             local_stats = self._apply_lora_regularization_local(model, config, lr)
         return self._aggregate_statistics(local_stats)
 
-    def _extract_loss(self, metrics):
-        """Extract loss (first metric) as a scalar value."""
-        return metrics[0].mean().item()
-
     def _write_metrics(self, prefix, metrics):
-        """Write all metrics to tensorboard."""
-        self._write_scalar_metric(f'{prefix}/loss', metrics[0].mean().item())
-        self._write_scalar_metric(f'{prefix}/accuracy_top1', metrics[1].mean().item())
+        """Write all metrics to tensorboard and return mean loss."""
+        loss = metrics[0].mean().item()
+        accuracy_top1 = metrics[1].mean().item()
+        self._write_scalar_metric(f'{prefix}/loss', loss)
+        self._write_scalar_metric(f'{prefix}/accuracy_top1', accuracy_top1)
+        return loss
 
     def _write_scalar_metric(self, name, value):
         """Log scalar value to tensorboard using current global step."""

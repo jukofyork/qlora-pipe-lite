@@ -281,8 +281,5 @@ def fast_cross_entropy_loss(logits, labels):
         labels.view(-1),
     )
 
-    n_items = torch.count_nonzero(labels != -100)
-    assert n_items > 0, "All labels are masked (-100), so n_items denominator will be zero"
-
-    return loss.sum() / n_items
+    return loss.sum(dtype=torch.float32)
 pass

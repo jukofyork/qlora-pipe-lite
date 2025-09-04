@@ -10,7 +10,16 @@ def split_batch(batch, pieces):
     example_tuple, labels = batch
     log(f'before GAS splitting, batch size: {example_tuple[0].size(0)}, total tokens: {example_tuple[0].numel()}')
     split_size = example_tuple[0].size(0) // pieces
-    split_examples = zip(*(torch.split(tensor, split_size) for tensor in example_tuple))
+
+    def split_or_broadcast(t):
+        # Split tensors with a batch dimension; broadcast scalars/0-D tensors
+        if torch.is_tensor(t) and t.dim() >= 1:
+            return torch.split(t, split_size, dim=0)
+        else:
+            return (t,) * pieces
+
+    splits_per_field = [split_or_broadcast(t) for t in example_tuple]
+    split_examples = zip(*splits_per_field)
     return [(ex, None) for ex in split_examples]
 
 def shuffle_list(l, seed):
@@ -137,7 +146,13 @@ class PipelineDataLoader:
             control_classes = torch.stack([ex['control_classes'] for ex in examples])
             labels = torch.stack([ex['labels'] for ex in examples])
 
-            return ((input_ids, attention_mask, control_classes, labels), None)
+            # input_ids shape here is [batch_size * GAS, seq_len] per rank
+            batch_size, seq_len = input_ids.shape
+            local_tokens = batch_size * seq_len  # already includes GAS
+            n_tokens = local_tokens * self.data_sampler.num_replicas  # multiply by DP only
+            n_tokens = torch.tensor(n_tokens, dtype=torch.long, device=input_ids.device)
+
+            return ((input_ids, attention_mask, control_classes, labels, n_tokens), None)
 
         self.dataloader = DataLoader(
             self.dataset,
