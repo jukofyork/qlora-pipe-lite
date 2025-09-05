@@ -454,7 +454,7 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
     Set requires_grad for parameters to enable full fine-tuning with optional scoping.
 
     Behavior:
-        - Assign 'original_name' to all parameters for saving compatibility
+        - Assign 'original_name' to parameters that don't have it (preserve HF names if present)
         - Enable training for all parameters by default
         - If target_modules is provided, only parameters whose names contain any target string are trained
         - If layers_to_transform is provided, restrict to selected transformer layers
@@ -465,8 +465,10 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
         target_modules (Optional[list[str]]): Substrings of parameter names that should be trainable.
         layers_to_transform (Optional[list[int]]): Specific transformer layer indices to train.
     """
+    # Preserve existing original_name (from HF) if present; set only when missing
     for name, p in model.named_parameters():
-        p.original_name = name
+        if not hasattr(p, 'original_name'):
+            p.original_name = name
 
     for name, p in model.named_parameters():
         should_train = True
@@ -479,6 +481,32 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
                 should_train = False
                 # log_all(f'not training {name} because layer {layer_idx} is not in layers_to_transform')
         p.requires_grad = should_train
+
+    # Fail-fast validation: if using tied layers (FFT with tied embeddings), both ends must be trainable.
+    # DeepSpeed will all_reduce weight.grad for tied parameters; a frozen end (grad=None) would crash.
+    tied_param_ids = set()
+    # PipelineModule sets these only if TiedLayerSpec was used
+    has_ties = hasattr(model, 'tied_modules') and hasattr(model, 'tied_weight_attrs') and len(model.tied_modules) > 0
+    if has_ties:
+        # Gather tied parameters present on this stage
+        for key, tied_module in model.tied_modules.items():
+            weight_attrs = model.tied_weight_attrs.get(key, [])
+            for attr_name in weight_attrs:
+                try:
+                    # Recursive getattr matches DS internal logic
+                    tied_param = model._recursive_getattr(tied_module, attr_name)
+                    tied_param_ids.add(id(tied_param))
+                except Exception:
+                    pass
+
+        # Validate that all tied params are trainable on this stage
+        for pname, p in model.named_parameters():
+            if id(p) in tied_param_ids and not p.requires_grad:
+                raise ValueError(
+                    f'Full fine-tuning with tied embeddings requires training all tied weights. '
+                    f'Parameter "{pname}" is frozen by your target_modules/layers_to_transform selection. '
+                    f'Please include both the embedding and the lm_head in training or remove the restriction.'
+                )
 
 def setup_model_and_engine(config, args):
     """

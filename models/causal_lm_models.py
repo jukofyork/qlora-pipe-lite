@@ -1,4 +1,4 @@
-from deepspeed.runtime.pipe.module import LayerSpec
+from deepspeed.runtime.pipe.module import LayerSpec, TiedLayerSpec
 from torch import nn
 import accelerate
 import torch
@@ -40,9 +40,78 @@ class BaseCausalLMPipe(PipelineModel):
         embedding_on_cpu = not self.full_fine_tune
 
         result = []
-
         result.append(LayerSpec(PrepareInputsPipe))
 
+        use_tied_layers = bool(self.full_fine_tune) and bool(getattr(self.config, 'tie_word_embeddings', False))
+
+        if use_tied_layers:
+            # Full fine-tuning with tied embeddings/head: use a single tied module (EmbeddingPipe)
+            # and provide a custom forward for the head that projects with the embedding weight.
+            #
+            # DeepSpeed ties gradients across occurrences of the same module key. We tie the single
+            # parameter at orig.weight (nn.Embedding weight) across stages.
+            #
+            # Note: We intentionally do NOT instantiate LmHeadPipe in this mode.
+
+            # 1) Tied embedding at the start
+            result.append(TiedLayerSpec(
+                'tok_emb',
+                EmbeddingPipe,
+                self.module_loader,
+                self.model.embed_tokens,
+                self.model,
+                embedding_on_cpu=False,
+                tied_weight_attr='orig.weight'
+            ))
+
+            # 2) Decoder layers
+            for layer_idx, block in enumerate(self.model.layers):
+                result.append(LayerSpec(LlamaDecoderLayerPipe, self.module_loader, block, layer_idx))
+
+            # 3) Final RMSNorm
+            result.append(LayerSpec(LlamaRMSNormPipe, self.module_loader, self.model.norm))
+
+            # 4) Tied "head" using the same module instance with a custom forward
+            lm_head_kwargs = self._get_lm_head_kwargs()
+            logit_scale = lm_head_kwargs.get('logit_scale', None)
+            final_logit_softcapping = lm_head_kwargs.get('final_logit_softcapping', None)
+
+            def tied_lm_head_forward(tied_module, inputs):
+                # inputs are (hidden_states, labels) coming from LlamaRMSNormPipe
+                hidden_states, labels = inputs
+
+                # Optional logit scale (apply to hidden states for identical math)
+                if logit_scale is not None:
+                    hidden_states = hidden_states * logit_scale
+
+                # Project using the embedding weight
+                weight = tied_module.orig.weight  # [vocab, hidden]
+                logits = torch.matmul(hidden_states, weight.t())  # [b, s, hidden] x [hidden, vocab] -> [b, s, vocab]
+
+                # Optional final logit softcapping
+                if final_logit_softcapping is not None:
+                    logits = logits / final_logit_softcapping
+                    logits = torch.tanh(logits)
+                    logits = logits * final_logit_softcapping
+
+                return logits, labels
+
+            result.append(TiedLayerSpec(
+                'tok_emb',
+                EmbeddingPipe,  # reuse the same module class/key
+                self.module_loader,
+                self.model.embed_tokens,
+                self.model,
+                embedding_on_cpu=False,
+                forward_fn=tied_lm_head_forward,
+                tied_weight_attr='orig.weight'
+            ))
+
+            # 5) Loss
+            result.append(LayerSpec(ComputeLoss))
+            return result
+
+        # Non-FFT or models without tied embeddings: original untied pipeline
         result.append(LayerSpec(
             EmbeddingPipe,
             self.module_loader,
@@ -65,7 +134,6 @@ class BaseCausalLMPipe(PipelineModel):
         ))
 
         result.append(LayerSpec(ComputeLoss))
-
         return result
 
     def _get_attention_implementation(self):

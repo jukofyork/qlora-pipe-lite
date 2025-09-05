@@ -17,8 +17,6 @@ LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX = r'^language_model\.'
 class PipelineModel(nn.Module):
 
     def __init__(self, config, quantization_config, model_config):
-        if config.get('full_fine_tune', False) and model_config.tie_word_embeddings:
-            raise NotImplementedError('FFT is not supported for models with tied embeddings')
         self.full_fine_tune = config.get('full_fine_tune', False)
         self.modules_to_not_quantize = get_keys_to_not_convert(self)
         self.module_loader = PipelineModuleLoader(config['model_dir'], quantization_config, self.modules_to_not_quantize)
@@ -57,9 +55,11 @@ class PipelineModuleLoader:
         self._maybe_quantize(module)
         param_renaming_map = {p.original_name: new_name for new_name, p in module.named_parameters()}
         expected_keys = [p.original_name for p in module.parameters()]
-        # If we have any extra attributes on the parameter, loading with BNB 4bit params breaks, so delete them.
-        for p in module.parameters():
-            del p.original_name
+        # For BNB 4-bit params only: delete extra attributes to avoid load-time issues.
+        if self.quantization_config is not None:
+            for p in module.parameters():
+                if hasattr(p, 'original_name'):
+                    del p.original_name
 
         if self.checkpoint_metadata is not None:
             weight_map = self.checkpoint_metadata['weight_map']

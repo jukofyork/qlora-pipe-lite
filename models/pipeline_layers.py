@@ -117,10 +117,21 @@ class LmHeadPipe(nn.Module):
         self.lm_head = lm_head
         self.logit_scale = logit_scale
         self.final_logit_softcapping = final_logit_softcapping
-        # For tied weights case, the same checkpoint weights are loaded into both EmbeddingPipe and LmHeadPipe
+        # For tied weights case (checkpoint may omit lm_head.weight), temporarily alias
+        # original_name to embedding for loading only, then restore canonical name for saving.
+        canonical_name = getattr(self.lm_head.weight, 'original_name', 'lm_head.weight')
         if tie_weights:
             self.lm_head.weight.original_name = tie_weights
+
         module_loader.load_state_dict_into_module(self)
+
+        # Restore canonical name in non-quantized modes (quantized modes strip attributes)
+        if tie_weights and getattr(module_loader, 'quantization_config', None) is None:
+            # Only restore if attribute still exists (it is removed for BNB 4-bit)
+            try:
+                self.lm_head.weight.original_name = canonical_name
+            except Exception:
+                pass
 
     def forward(self, inputs):
         hidden_states, labels = inputs
