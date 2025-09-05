@@ -1,3 +1,19 @@
+"""
+Model factory and training setup utilities.
+
+This module provides a cohesive set of functions to:
+- Create and configure base models (with or without 4-bit quantization)
+- Build DeepSpeed PipelineModule with topology and activation checkpointing
+- Apply LoRA or Control Adapter modifications to the model
+- Configure full fine-tuning by selecting trainable parameters
+- Create optimizers and RMS-ratio LR schedulers
+- Initialize the DeepSpeed PipelineEngine and return all runtime handles
+
+Design:
+- Keep the module function-oriented for simple reuse and testing.
+- Order functions top-down by user workflows: utilities, optim/scheduler, model creation,
+  adapters/FT config, and final setup orchestration.
+"""
 from deepspeed import comm as dist
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.pipe.engine import PipelineEngine
@@ -21,7 +37,6 @@ from models import causal_lm_models
 from utils.unsloth_checkpoint import unsloth_checkpoint
 from utils.utils import DTYPE_MAP
 
-# Utility functions
 def patch_bitsandbytes_cuda():
     """Ugly hack to move quantized models from GPU to CPU, and back to GPU again without triggering re-quantization"""
     bnb_cuda_old = bitsandbytes.nn.modules.Params4bit.cuda
@@ -98,13 +113,32 @@ def patch_decoder_layer_control_adapter(module):
     return control_adapter_forward
 
 def get_model_type(config):
-    """Extract model type from model config."""
+    """
+    Extract model type from the model directory config.json.
+
+    Args:
+        config (dict): Configuration containing 'model_dir'.
+
+    Returns:
+        str: Model type string (e.g., 'llama', 'mistral', ...). Defaults to 'llama' if missing.
+    """
     with open(os.path.join(config['model_dir'], 'config.json')) as f:
         model_config = json.load(f)
         return model_config.get('model_type', 'llama')
 
 def parse_layers_to_transform(config):
-    """Parse layers_to_transform config into list of layer numbers."""
+    """
+    Parse a compact 'layers_to_transform' string into a list of layer indices.
+
+    Expected format in config: "start1:stop1,start2:stop2,..."
+    Example: "0:3,10:12" -> [0,1,2,3,10,11,12]
+
+    Args:
+        config (dict): Configuration with optional 'layers_to_transform' string.
+
+    Returns:
+        list[int]: Expanded list of layer indices (possibly empty).
+    """
     layers_to_transform = []
     if layers_spec := config.get('layers_to_transform', None):
         parts = layers_spec.split(',')
@@ -113,7 +147,6 @@ def parse_layers_to_transform(config):
             layers_to_transform.extend(range(int(start), int(stop) + 1))
     return layers_to_transform
 
-# Optimizer and scheduler functions
 def get_optimizer(model_parameters, config):
     """Create optimizer with configuration from config.
 
@@ -122,6 +155,13 @@ def get_optimizer(model_parameters, config):
     - Full fine-tuning always uses bfloat16 and weight decay will underflow due to catastrophic cancellation.
 
     By default, optimi will automatically use Kahan summation for any layers training in low precision.
+
+    Args:
+        model_parameters (iterable): Parameters to optimize.
+        config (dict): Must include 'lr'; may include 'beta1', 'beta2', 'eps'.
+
+    Returns:
+        torch.optim.Optimizer: The initialized optimizer instance.
     """
     optimizer_kwargs = {
         "params": model_parameters,
@@ -136,6 +176,13 @@ def get_lr_scheduler(optimizer, config):
 
     This is similar to RAdam (https://arxiv.org/abs/1908.03265), but using a scheduler instead.
     See: https://github.com/tdrussell/qlora-pipe/pull/35#issuecomment-2495460307
+
+    Args:
+        optimizer (torch.optim.Optimizer): Optimizer to schedule.
+        config (dict): Uses 'beta2' to compute the ratio schedule.
+
+    Returns:
+        torch.optim.lr_scheduler.LambdaLR: Scheduler that applies RMS-ratio scaling.
     """
     beta = config.get('beta2', DEFAULT_BETA2)
 
@@ -144,9 +191,25 @@ def get_lr_scheduler(optimizer, config):
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=rms_ratio_fn)
 
-# Model creation functions
 def create_model(config, model_type, trust_remote_code=False):
-    """Create the base transformer model with appropriate quantization."""
+    """
+    Create the base transformer model with appropriate quantization for training mode.
+
+    Behavior:
+        - If full_fine_tune or load_in_4bit=False: no quantization (fp16/bf16/fp32 as configured)
+        - Else: set up BitsAndBytes 4-bit quantization (NF4), with lm_head excluded and gate excluded for Mixtral
+
+    Args:
+        config (dict): Training configuration including 'model_dir' and quantization choices.
+        model_type (str): Parsed model type (e.g., 'llama', 'mistral', 'mixtral', ...).
+        trust_remote_code (bool): Forwarded to HF model factory.
+
+    Returns:
+        torch.nn.Module: The instantiated base model (pipeline-ready via to_layer_specs()).
+
+    Raises:
+        NotImplementedError: If model_type is not recognized.
+    """
     if config.get('full_fine_tune', False) or not config.get('load_in_4bit', False):
         quantization_config = None
     else:
@@ -220,7 +283,21 @@ def create_model(config, model_type, trust_remote_code=False):
     return model
 
 def create_pipeline_model(model, config):
-    """Create pipeline model from base model for distributed training."""
+    """
+    Create a PipelineModule from a base model for distributed training.
+
+    Configuration:
+        - Uniform partition with 'partition_method=uniform'
+        - Activation checkpointing via unsloth_checkpoint
+        - Topology may be column-major or standard using PipeDataParallelTopology
+
+    Args:
+        model (torch.nn.Module): Base model supporting to_layer_specs().
+        config (dict): Training configuration including 'pipeline_stages' and topology preferences.
+
+    Returns:
+        deepspeed.runtime.pipe.module.PipelineModule: The pipeline-wrapped model.
+    """
     # The "primary" layers of the model must have 'decoderlayer' in their name for activation checkpointing to work
     layers = model.to_layer_specs()
     checkpointable_layers = set()
@@ -259,10 +336,23 @@ def create_pipeline_model(model, config):
 
     return pipeline_model
 
-# Training configuration functions
-
 def create_lora_config(config, target_modules, layers_to_transform):
-    """Create LoRA configuration."""
+    """
+    Build a PEFT LoRA configuration compatible with this training setup.
+
+    Behavior:
+        - If target_modules is an empty list (Control Adapters path), we pass a dummy 'none'
+          value to peft for compatibility, then reset to [] afterward.
+        - Otherwise, use 'all-linear' when target_modules is None to target all linear modules.
+
+    Args:
+        config (dict): Must include 'lora_rank' and optional 'lora_dropout'.
+        target_modules (Optional[list[str]]): Specific module name substrings or None/'all-linear'.
+        layers_to_transform (Optional[list[int]]): Subset of transformer layers to target.
+
+    Returns:
+        peft.LoraConfig: Config object to be used by get_peft_model or Control Adapters.
+    """
     # Handle empty list case for Control Adapters
     use_dummy_target = target_modules == []
     actual_target_modules = ['none'] if use_dummy_target else (target_modules if target_modules else 'all-linear')
@@ -283,7 +373,20 @@ def create_lora_config(config, target_modules, layers_to_transform):
     return lora_config
 
 def apply_lora_adapters(model, config, lora_config):
-    """Apply LoRA configuration to model."""
+    """
+    Apply LoRA configuration to the base HF model via PEFT and fix trainable dtypes.
+
+    Steps:
+        - Wrap model with PEFT using lora_config
+        - Cast trainable parameters to desired dtype as per config['lora_weight_dtype']
+        - Disable KV cache for training
+        - Set 'original_name' on parameters to support custom saving flows
+
+    Args:
+        model (transformers.PreTrainedModel): Base model to wrap with PEFT.
+        config (dict): Training configuration containing 'lora_weight_dtype'.
+        lora_config (peft.LoraConfig): LoRA configuration.
+    """
     lora_model = get_peft_model(model, lora_config)
     # If the underlying weights are floats, the lora weights have already been
     # cast to the same dtype, so we need to change the dtype here.
@@ -347,7 +450,21 @@ def apply_control_adapters(model, config, lora_config):
             p.requires_grad = False
 
 def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
-    """Setup full fine-tuning by setting requires_grad on parameters."""
+    """
+    Set requires_grad for parameters to enable full fine-tuning with optional scoping.
+
+    Behavior:
+        - Assign 'original_name' to all parameters for saving compatibility
+        - Enable training for all parameters by default
+        - If target_modules is provided, only parameters whose names contain any target string are trained
+        - If layers_to_transform is provided, restrict to selected transformer layers
+
+    Args:
+        model (torch.nn.Module): Pipeline model whose parameters to mark as trainable.
+        config (dict): Unused here; kept for symmetry and future extension.
+        target_modules (Optional[list[str]]): Substrings of parameter names that should be trainable.
+        layers_to_transform (Optional[list[int]]): Specific transformer layer indices to train.
+    """
     for name, p in model.named_parameters():
         p.original_name = name
 
@@ -363,9 +480,29 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
                 # log_all(f'not training {name} because layer {layer_idx} is not in layers_to_transform')
         p.requires_grad = should_train
 
-# Main setup function
 def setup_model_and_engine(config, args):
-    """Complete model setup including LoRA/full fine-tuning and engine initialization."""
+    """
+    Complete model setup including LoRA/full fine-tuning and engine initialization.
+
+    Steps:
+        1) Patch bitsandbytes quantization handling for safe device transfers
+        2) Build the base model (with or without 4-bit) based on config and model_type
+        3) Optionally disable KV cache
+        4) Create pipeline model and apply one of:
+            - Full fine-tuning
+            - Control Adapters
+            - LoRA via PEFT (default)
+        5) Select trainable params and initialize DeepSpeed PipelineEngine
+        6) Configure LR scheduler on the (possibly wrapped) optimizer
+        7) Return engine, pipeline model, LoRA config (or None), and the optimizer
+
+    Args:
+        config (dict): Training configuration.
+        args (argparse.Namespace): Arguments namespace passed into DeepSpeed PipelineEngine.
+
+    Returns:
+        tuple: (model_engine, pipeline_model, lora_config, optimizer)
+    """
     patch_bitsandbytes_cuda()
 
     # Create model and pipeline

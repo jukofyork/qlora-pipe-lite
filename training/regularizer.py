@@ -1,16 +1,49 @@
+"""
+Regularization utilities for LoRA and Control Adapters.
+
+This module provides Regularizer, which:
+- Applies analytic, in-place regularization updates for LoRA or Control Adapter parameters
+- Computes per-rank statistics (norms, orthogonality residuals, decay deltas)
+- Aggregates statistics across pipeline stages using DeepSpeed collectives
+- Returns easy-to-log global summary metrics (avg/min/max) per key
+"""
 from deepspeed import comm as dist
 import torch
 
 from constants import DEFAULT_CONTROL_ADAPTER_GAMMA
 
-class RegularizationManager:
-    """Handles regularization for LoRA and Control Adapter parameters."""
+class Regularizer:
+    """
+    Handles regularization for LoRA and Control Adapter parameters.
+
+    Usage:
+    - Call apply_regularization(model, config, lr) once per training step
+    - It selects LoRA or Control Adapter path based on config['use_control_adapters']
+    - Statistics are computed locally then reduced across pipeline-parallel ranks
+    - Returns a dict of aggregated metrics (avg/min/max) for each reported key
+    """
 
     def __init__(self, model_engine):
+        """
+        Initialize the manager with the model engine.
+
+        Parameters:
+            model_engine: DeepSpeed engine; used for device selection and pipeline reductions.
+        """
         self.model_engine = model_engine
 
     def apply_regularization(self, model, config, lr):
-        """Apply regularization to LoRA or Control Adapter parameters and return aggregated statistics."""
+        """Apply regularization to LoRA or Control Adapter parameters and return aggregated statistics.
+
+        Behavior:
+            - If config['use_control_adapters'] is True, applies control adapter regularization
+              (orthogonality maintenance on Q and L2 shrinkage on S in log-space).
+            - Otherwise, applies LoRA regularization (L2 on composite W = B·A).
+            - Local stats are computed and then aggregated across pipeline stages.
+
+        Returns:
+            dict[str, float]: Global summary metrics containing avg/min/max for each reported key.
+        """
         if config.get('use_control_adapters', False):
             local_stats = self._apply_control_adapter_regularization_local(model, config, lr)
         else:
@@ -239,7 +272,19 @@ class RegularizationManager:
             }
 
     def _aggregate_statistics(self, local_stats):
-        """Aggregate LoRA and Control Adapter statistics across pipeline stages and compute global statistics."""
+        """Aggregate LoRA and Control Adapter statistics across pipeline stages and compute global statistics.
+
+        Reductions:
+            - If pipeline parallelism is enabled, SUM/MIN/MAX are computed across pipe stages
+            - Empty tensors contribute neutral elements via sentinels for MIN/MAX
+
+        Output:
+            For each key in local_stats (e.g., 'norms', 'orthogonality', 'weight_decay'),
+            returns three scalar entries:
+                - '{key}_avg'
+                - '{key}_min'
+                - '{key}_max'
+        """
         global_stats = {}
 
         for key, tensor in local_stats.items():
