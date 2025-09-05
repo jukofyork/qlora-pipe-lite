@@ -24,7 +24,7 @@ def parse_layers_to_transform(config):
 def create_lora_config(config, target_modules, layers_to_transform):
     """Create LoRA configuration."""
     # Handle empty list case for Control Adapters
-    use_dummy_target = target_modules == []
+    use_dummy_target = target_modules == [] or target_modules is None
     actual_target_modules = ['none'] if use_dummy_target else (target_modules if target_modules else 'all-linear')
 
     lora_config = LoraConfig(
