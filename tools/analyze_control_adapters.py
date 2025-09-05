@@ -35,13 +35,7 @@ OUTPUT COLUMNS:
                           • Good: < 5%, Poor: > 20%
 
 SUMMARY STATISTICS:
-    Shows mean [min, max] across layers to identify outliers and overall health.
-
-DIAGNOSTIC GUIDE:
-    High orthogonality error   → Increase control_adapter_gamma (≤ 0.5)
-    Low effective rank         → Check for rank collapse, review training dynamics
-    High condition number      → Reduce learning rate or rank
-    Large approximation errors → Use SVD values instead of λ-based estimates
+    Shows mean [min, max] across all layers.
 """
 
 from pathlib import Path
@@ -49,6 +43,11 @@ import argparse
 import torch
 
 from control_adapter_utils import *
+
+def format_percentage(value, precision=1):
+    """Format percentage, treating values that round to 0.0% as positive."""
+    formatted = f"{value:.{precision}%}"
+    return "0.0%" if formatted == "-0.0%" else formatted
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze Control Adapter norm constraints")
@@ -153,8 +152,8 @@ if __name__ == "__main__":
               f"{stats['condition_number']:<8.1f} "
               f"{stats['spectral_norm_approx']:<8.3f} "
               f"{stats['nuclear_norm_approx']:<8.3f} "
-              f"{stats['spectral_error_ratio']:<10.1%} "
-              f"{stats['nuclear_error_ratio']:<10.1%}")
+              f"{format_percentage(stats['spectral_error_ratio']):<10} "
+              f"{format_percentage(stats['nuclear_error_ratio']):<10}")
 
     # Summary statistics
     if results:
@@ -183,7 +182,7 @@ if __name__ == "__main__":
               f"[{min(effective_ranks):.1f}, {max(effective_ranks):.1f}]")
         print(f"Condition number (κ(W))     : {sum(condition_numbers)/len(condition_numbers):.1f} "
               f"[{min(condition_numbers):.1f}, {max(condition_numbers):.1f}]")
-        print(f"Spectral norm error (ε_2)   : {sum(spectral_error_ratios)/len(spectral_error_ratios):.1%} "
-              f"[{min(spectral_error_ratios):.1%}, {max(spectral_error_ratios):.1%}]")
-        print(f"Nuclear norm error (ε_*)    : {sum(nuclear_error_ratios)/len(nuclear_error_ratios):.1%} "
-              f"[{min(nuclear_error_ratios):.1%}, {max(nuclear_error_ratios):.1%}]")
+        print(f"Spectral norm error (ε_2)   : {format_percentage(sum(spectral_error_ratios)/len(spectral_error_ratios))} "
+              f"[{format_percentage(min(spectral_error_ratios))}, {format_percentage(max(spectral_error_ratios))}]")
+        print(f"Nuclear norm error (ε_*)    : {format_percentage(sum(nuclear_error_ratios)/len(nuclear_error_ratios))} "
+              f"[{format_percentage(min(nuclear_error_ratios))}, {format_percentage(max(nuclear_error_ratios))}]")
