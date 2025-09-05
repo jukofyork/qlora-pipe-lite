@@ -1,11 +1,9 @@
-from deepspeed import comm as dist
 from torch.utils.tensorboard import SummaryWriter
 import gc
 import time
 import torch
 
 from constants import (
-    DEFAULT_CONTROL_ADAPTER_GAMMA,
     DEFAULT_CHECKPOINT_INTERVAL_HOURS,
     DEFAULT_MAX_CHECKPOINTS,
     DEFAULT_EVALS_PER_EPOCH
@@ -13,7 +11,7 @@ from constants import (
 from training.checkpoint_manager import load_checkpoint, save_checkpoint, prune_checkpoints
 from training.model_saver import save_lora, save_full_model
 from training.regularization_manager import RegularizationManager
-from utils.utils import is_main_process, log
+from utils.utils import is_main_process, log, seconds_to_time_str
 
 class Trainer:
     """Handles the main training loop, evaluation, checkpointing, and model saving."""
@@ -29,7 +27,6 @@ class Trainer:
         args,
         lora_config,
         optimizer,
-        eval_gradient_accumulation_steps,
         resume_from_checkpoint=False
     ):
         self.config = config
@@ -46,7 +43,6 @@ class Trainer:
         # Extract config values with defaults
         self.model_dir = config['model_dir']
         self.epochs = config.get('epochs', 1)
-        self.eval_gradient_accumulation_steps = eval_gradient_accumulation_steps
         self.checkpoint_interval_hours = config.get('checkpoint_interval_hours', DEFAULT_CHECKPOINT_INTERVAL_HOURS)
         self.max_checkpoints = config.get('max_checkpoints', DEFAULT_MAX_CHECKPOINTS)
 
@@ -59,7 +55,7 @@ class Trainer:
         # Calculate and set total training steps
         model_engine.set_dataloader(train_dataloader)
         steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
-        model_engine.total_steps = steps_per_epoch * self.epochs
+        self.total_steps = steps_per_epoch * self.epochs
 
         # Calculate evaluation step indices per epoch
         evals_per_epoch = config.get('evals_per_epoch', DEFAULT_EVALS_PER_EPOCH)
@@ -67,6 +63,11 @@ class Trainer:
 
     def train(self):
         """Main training loop."""
+
+        # Add timing tracking (align with old CustomPipelineEngine behavior)
+        start_time = None
+        start_step = None
+        last_print_time = None
 
         last_eval_loss = None
 
@@ -86,8 +87,39 @@ class Trainer:
             self._cleanup_memory()
 
             # Forward/backward pass and optimizer step
-            metrics = self.model_engine.train_batch()
+            loss = self.model_engine.train_batch()
             self.train_dataloader.sync_epoch()
+
+            # Compute and log training loss (broadcast so rank-0 has the true loss)
+            train_loss_local = self._attempt_to_extract_loss(loss)
+            train_loss = self._broadcast_from_last_stage(train_loss_local)
+            self._write_scalar_metric('train/loss', train_loss)
+            self._write_scalar_metric('train/lr', self.optimizer.param_groups[0]['lr'])
+
+            # Track timing from first step to avoid startup bias
+            if is_main_process() and start_step is None:
+                start_step = self.model_engine.global_steps - 1
+                start_time = time.time()
+                last_print_time = start_time
+
+            # Custom progress logging matching previous format
+            if is_main_process() and self.model_engine.global_steps % self.model_engine.steps_per_print() == 0:
+                if start_step is not None and last_print_time is not None:
+                    now = time.time()
+                    iter_elapsed = now - last_print_time
+                    last_print_time = now
+                    iter_time = iter_elapsed / self.model_engine.steps_per_print()
+                    iter_throughput = self.model_engine.train_batch_size() / iter_time
+
+                    total_elapsed = now - start_time
+                    steps_completed = self.model_engine.global_steps - start_step
+                    if steps_completed > 0:
+                        eta = (total_elapsed / steps_completed) * (self.total_steps - self.model_engine.global_steps)
+                        log(f'step: {self.model_engine.global_steps} / {self.total_steps}, '
+                            f'loss: {train_loss:0.4f}, '
+                            f'throughput: {iter_throughput:0.3f} sequences/s, '
+                            f'elapsed: {seconds_to_time_str(total_elapsed)}, '
+                            f'eta: {seconds_to_time_str(eta)}')
 
             # Apply adapter-specific regularization and log statistics
             if self.lora_config is not None:
@@ -98,10 +130,6 @@ class Trainer:
                 )
                 for key, value in stats.items():
                     self._write_scalar_metric(f'train/{key}', value)
-
-            # Log training metrics
-            self._write_metrics('train', metrics)
-            self._write_scalar_metric('train/lr', self.optimizer.param_groups[0]['lr'])
 
             # Periodic evaluation
             if self.model_engine.global_steps in self.eval_step_indices:
@@ -122,30 +150,25 @@ class Trainer:
         log('TRAINING COMPLETE!')
 
     def evaluate(self):
-        """Run evaluation on the eval dataset and return average loss."""
-        orig_micro_batches = self.model_engine.micro_batches
-        self.model_engine.micro_batches = self.eval_gradient_accumulation_steps
+        """Run evaluation over the entire eval dataset and return average loss."""
         iterator = iter(self.eval_dataloader)
-        all_metrics = None
+        start_epoch = self.eval_dataloader.epoch
+        losses = []
 
-        # Collect metrics from all eval batches
         while True:
-            metrics = self.model_engine.eval_batch(iterator)
+            # DeepSpeed eval_batch already reduces and broadcasts loss to all pipeline stages
+            output = self.model_engine.eval_batch(iterator)
+            # DeepSpeed returns a scalar Tensor loss (reduced and broadcast)
+            losses.append(output.detach().float().mean().item())
+
             self.eval_dataloader.sync_epoch()
-            if all_metrics is None:
-                all_metrics = [[] for _ in range(len(metrics))]
-            if self.eval_dataloader.epoch == 2:
+            if self.eval_dataloader.epoch > start_epoch:
                 break
-            for i, metric in enumerate(metrics):
-                all_metrics[i].append(metric)
 
-        # Reset dataloader and restore original batch size
         self.eval_dataloader.reset()
-        self.model_engine.micro_batches = orig_micro_batches
-        eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
-
-        # Log evaluation metrics and return the mean loss
-        return  self._write_metrics('eval', eval_metrics)
+        eval_loss = float(sum(losses) / len(losses)) if losses else 0.0
+        self._write_scalar_metric('eval/loss', eval_loss)
+        return eval_loss
 
     # Private helper methods
     def _calculate_eval_steps(self, steps_per_epoch, evals_per_epoch):
@@ -165,16 +188,22 @@ class Trainer:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def _write_metrics(self, prefix, metrics):
-        """Write all metrics to tensorboard and return mean loss."""
-        loss = metrics[0].mean().item()
-        accuracy_top1 = metrics[1].mean().item()
-        self._write_scalar_metric(f'{prefix}/loss', loss)
-        self._write_scalar_metric(f'{prefix}/accuracy_top1', accuracy_top1)
-        return loss
+    def _attempt_to_extract_loss(self, output):
+        """Return scalar loss as float on last pipeline stage; None otherwise."""
+        if not self.model_engine.is_last_stage():
+            return None
+        # DeepSpeed returns a scalar Tensor loss (reduced and broadcast)
+        return output.detach().float().mean().item()
+
+    def _broadcast_from_last_stage(self, value):
+        """Broadcast a scalar from the last pipeline stage to all ranks and return it."""
+        src_rank = self.model_engine.grid.stage_to_global(self.model_engine.num_stages - 1)
+        payload = [value if self.model_engine.is_last_stage() else None]
+        torch.distributed.broadcast_object_list(payload, src=src_rank)
+        return payload[0]
 
     def _write_scalar_metric(self, name, value):
-        """Log scalar value to tensorboard using current global step."""
+        """Rank-0 only: log scalar to TensorBoard at current global step."""
         if is_main_process():
             self.tb_writer.add_scalar(name, value, self.model_engine.global_steps)
 
@@ -183,7 +212,7 @@ class Trainer:
         step = self.model_engine.global_steps
         if step == 0:  # Initial evaluation
             log(f'Initial evaluation loss: {current_loss:.4f}')
-        elif last_loss is None:
+        elif last_loss is None or last_loss <= 0:
             log(f'Step {step} evaluation loss: {current_loss:.4f}')
         else:
             percent_change = (current_loss / last_loss - 1) * 100

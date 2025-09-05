@@ -1,4 +1,8 @@
-from deepspeed.runtime.pipe.module import LayerSpec
+from deepspeed import comm as dist
+from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.pipe.engine import PipelineEngine
+from deepspeed.runtime.pipe.module import PipelineModule, LayerSpec
+from deepspeed.runtime.pipe.topology import ProcessTopology, PipeDataParallelTopology
 from peft import LoraConfig, get_peft_model
 import bitsandbytes
 import json
@@ -14,9 +18,8 @@ from constants import (
     DEFAULT_EPS
 )
 from models import causal_lm_models
-from pipeline import engine
 from utils.unsloth_checkpoint import unsloth_checkpoint
-from utils.utils import DTYPE_MAP, log_all
+from utils.utils import DTYPE_MAP
 
 # Utility functions
 def patch_bitsandbytes_cuda():
@@ -37,7 +40,7 @@ def patch_decoder_layer_control_adapter(module):
     """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
 
     def control_adapter_forward(inputs):
-        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels, n_tokens = inputs
+        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels = inputs
 
         # Shift control_classes for causal LM: [control_classes[1:], 0_padding]
         batch_size, seq_len = control_classes.shape
@@ -90,7 +93,7 @@ def patch_decoder_layer_control_adapter(module):
         # Cast adapter contribution back to original dtype and add to the residual stream
         result = layer_output + adapter_output.to(torch_result_dtype)
 
-        return (result, attention_mask, cos, sin, cache_position, control_classes, labels, n_tokens)
+        return (result, attention_mask, cos, sin, cache_position, control_classes, labels)
 
     return control_adapter_forward
 
@@ -226,14 +229,32 @@ def create_pipeline_model(model, config):
             checkpointable_layers.add(layer.typename.__name__)
     checkpointable_layers = list(checkpointable_layers)
 
-    pipeline_model = engine.CustomPipelineModule(
+    # Set up topology
+    use_column_major_topology = config.get('use_column_major_topology', False)
+    num_stages = config.get('pipeline_stages', 1)
+    world_size = dist.get_world_size()
+    num_dp = world_size // num_stages
+
+    if use_column_major_topology:
+
+        class ColumnMajorParallelTopology(ProcessTopology):
+
+            def __init__(self, num_pp, num_dp):
+                # Swap the axes and dims to change the rank mapping
+                super().__init__(axes=['data', 'pipe'], dims=[num_dp, num_pp])
+
+        topology = ColumnMajorParallelTopology(num_pp=num_stages, num_dp=num_dp)
+    else:
+        topology = PipeDataParallelTopology(num_pp=num_stages, num_dp=num_dp)
+
+    pipeline_model = PipelineModule(
         layers=layers,
-        num_stages=config.get('pipeline_stages', 1),
+        num_stages=num_stages,
+        topology=topology,
+        partition_method='uniform',
         activation_checkpoint_interval=1,
-        checkpointable_layers=checkpointable_layers,
         activation_checkpoint_func=unsloth_checkpoint,
-        partition_method='estimated_size',
-        use_column_major_topology=config.get('use_column_major_topology', False)
+        checkpointable_layers=checkpointable_layers
     )
 
     return pipeline_model
@@ -375,13 +396,29 @@ def setup_model_and_engine(config, args):
 
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
-    model_engine, optimizer = engine.initialize(
-        config=config,
+    # Initialize DeepSpeed engine
+    assert pipeline_model is not None, "deepspeed.initialize requires a model"
+
+    ds_config = {
+        'train_micro_batch_size_per_gpu': 1,
+        'gradient_accumulation_steps': config.get('gradient_accumulation_steps', 1),
+        'gradient_clipping': 1.0,
+        'steps_per_print': 1,
+    }
+
+    mpu = pipeline_model.mpu()
+    config_class = DeepSpeedConfig(ds_config, mpu)
+    model_engine = PipelineEngine(
         args=args,
         model=pipeline_model,
-        model_parameters=parameters_to_train,
         optimizer=lambda params: get_optimizer(params, config),
+        model_parameters=parameters_to_train,
+        mpu=mpu,
+        config=ds_config,
+        config_class=config_class
     )
+
+    optimizer = model_engine.optimizer
 
     if lora_config is None:
         weight_dtype = torch.bfloat16  # Always use bfloat16 for full fine-tuning regardless

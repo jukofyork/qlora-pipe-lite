@@ -1,21 +1,7 @@
-from deepspeed.runtime.pipe import module as pipe_module
 from torch import nn
 import torch
 
 from kernels.cross_entropy_loss import fast_cross_entropy_loss
-
-class LayerSpec(pipe_module.LayerSpec):
-
-    def __init__(self, typename, *module_args, **module_kwargs):
-        super().__init__(typename, *module_args, **module_kwargs)
-
-    def build(self):
-        self.module_kwargs.pop('_estimated_size', None)
-        return self.typename(*self.module_args, **self.module_kwargs)
-
-    @property
-    def estimated_size(self):
-        return self.module_kwargs.get('_estimated_size', 1)
 
 class PrepareInputsPipe(nn.Module):
     """Adds position_ids to the input tuple for pipeline processing."""
@@ -24,12 +10,12 @@ class PrepareInputsPipe(nn.Module):
         super().__init__()
 
     def forward(self, inputs):
-        input_ids, attention_mask, control_classes, labels, n_tokens = inputs
+        input_ids, attention_mask, control_classes, labels = inputs
         batch_size, seq_length = input_ids.shape[:2]
         device = input_ids.device
         position_ids = torch.arange(0, seq_length, dtype=torch.long, device=device)
         position_ids = position_ids.unsqueeze(0)
-        return input_ids, attention_mask, position_ids, control_classes, labels, n_tokens
+        return input_ids, attention_mask, position_ids, control_classes, labels
 
 class EmbeddingPipe(nn.Module):
 
@@ -51,7 +37,7 @@ class EmbeddingPipe(nn.Module):
         return self._model[0]
 
     def forward(self, inputs):
-        input_ids, attention_mask, position_ids, control_classes, labels, n_tokens = inputs
+        input_ids, attention_mask, position_ids, control_classes, labels = inputs
         # For tied weights case: only input_ids move CPU<->GPU, not the large embedding weights
         if self.orig.weight.device.type == 'cpu':
             original_device = input_ids.device
@@ -93,7 +79,7 @@ class EmbeddingPipe(nn.Module):
             if torch.is_floating_point(tensor):
                 tensor.requires_grad_(True)
 
-        return hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels, n_tokens
+        return hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels
 
 class LlamaDecoderLayerPipe(nn.Module):
 
@@ -104,10 +90,10 @@ class LlamaDecoderLayerPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels, n_tokens = inputs
+        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels = inputs
         result = (
             self.orig(hidden_states, attention_mask=attention_mask, position_embeddings=(cos, sin), cache_position=cache_position)[0],
-            attention_mask, cos, sin, cache_position, control_classes, labels, n_tokens
+            attention_mask, cos, sin, cache_position, control_classes, labels
         )
         return result
 
@@ -119,8 +105,8 @@ class LlamaRMSNormPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, _, _, _, _, _, labels, n_tokens = inputs
-        return self.orig(hidden_states), labels, n_tokens
+        hidden_states, _, _, _, _, _, labels = inputs
+        return self.orig(hidden_states), labels
 
 class LmHeadPipe(nn.Module):
 
@@ -137,7 +123,7 @@ class LmHeadPipe(nn.Module):
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, labels, n_tokens = inputs
+        hidden_states, labels = inputs
         if self.logit_scale is not None:
             hidden_states = hidden_states * self.logit_scale
         # For tied weights case: uses separate GPU copy of embedding weights
@@ -146,19 +132,15 @@ class LmHeadPipe(nn.Module):
             logits = logits / self.final_logit_softcapping
             logits = torch.tanh(logits)
             logits = logits * self.final_logit_softcapping
-        return logits, labels, n_tokens
+        return logits, labels
 
-class ComputeMetrics(nn.Module):
+class ComputeLoss(nn.Module):
 
     def __init__(self):
         super().__init__()
 
     def forward(self, inputs):
-        logits, labels, n_tokens = inputs
-
-        # Ensure scalar is on the same device
-        if n_tokens.device != logits.device:
-            n_tokens = n_tokens.to(logits.device)
+        logits, labels = inputs
 
         batch_size, seq_len, vocab_size = logits.shape
 
@@ -168,20 +150,8 @@ class ComputeMetrics(nn.Module):
             torch.full((batch_size, 1), -100, device=labels.device, dtype=labels.dtype)
         ], dim=1)
 
-        # Calculate the sum of top1 accuracies for the batch
-        with torch.no_grad():
-            mask = shift_labels != -100
-            assert mask.any(), "All labels are masked (-100), so no valid targets for top1_accuracy calculation"
-            accuracy_top1_sum = (torch.argmax(logits, -1) == shift_labels).masked_select(mask).float().sum()
-
-        # Calculate the sum of CE losses of the non-masked tokens
-        loss_sum = fast_cross_entropy_loss(
-            logits,  # (batch_size, seq_len, vocab_size)
-            shift_labels,  # (batch_size, seq_len)
+        # Return mean loss (fast_cross_entropy_loss should compute mean)
+        return fast_cross_entropy_loss(
+            logits,       # (batch_size, seq_len, vocab_size)
+            shift_labels  # (batch_size, seq_len)
         )
-
-        # Divide by global token count for normalized metrics
-        loss = loss_sum / n_tokens
-        accuracy_top1 = accuracy_top1_sum / n_tokens
-
-        return (loss, accuracy_top1)

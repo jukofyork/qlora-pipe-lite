@@ -1,32 +1,27 @@
 from deepspeed import comm as dist
 from torch.utils.data import DataLoader
 import accelerate
-import math
 import torch
 
 from utils.utils import log
 
 def split_batch(batch, gradient_accumulation_steps, data_parallel_world_size):
-    example_tuple, labels = batch
+    example_tuple, _ = batch
 
     local_batch_size = example_tuple[0].size(0)
-    local_tokens = example_tuple[0].numel()
 
     batch_size = local_batch_size * data_parallel_world_size
-    batch_tokens = local_tokens * data_parallel_world_size
-    log(f'before GAS splitting, batch size: {batch_size} sequences ({batch_tokens} tokens)')
+    log(f'before GAS splitting, batch size: {batch_size} sequences')
 
     split_size = local_batch_size // gradient_accumulation_steps
 
-    def split_or_broadcast(t):
-        # Split tensors with a batch dimension; broadcast scalars/0-D tensors
-        if torch.is_tensor(t) and t.dim() >= 1:
-            return torch.split(t, split_size, dim=0)
-        else:
-            return (t,) * gradient_accumulation_steps
+    # Split tensors along batch dimension (dim=0)
+    splits_per_field = [torch.split(tensor, split_size, dim=0) for tensor in example_tuple]
 
-    splits_per_field = [split_or_broadcast(t) for t in example_tuple]
+    # Zip splits together to form micro-batches
     split_examples = zip(*splits_per_field)
+
+    # Return list of (micro_batch, None) tuples
     return [(ex, None) for ex in split_examples]
 
 def shuffle_list(l, seed):
@@ -154,14 +149,7 @@ class PipelineDataLoader:
             attention_mask = torch.stack([ex['attention_mask'] for ex in examples])
             control_classes = torch.stack([ex['control_classes'] for ex in examples])
             labels = torch.stack([ex['labels'] for ex in examples])
-
-            # input_ids shape here is [batch_size * GAS, seq_len] per rank
-            batch_size, seq_len = input_ids.shape
-            local_tokens = batch_size * seq_len  # already includes GAS
-            n_tokens = local_tokens * self.data_sampler.num_replicas  # multiply by DP only
-            n_tokens = torch.tensor(n_tokens, dtype=torch.long, device=input_ids.device)
-
-            return ((input_ids, attention_mask, control_classes, labels, n_tokens), None)
+            return ((input_ids, attention_mask, control_classes, labels), None)
 
         self.dataloader = DataLoader(
             self.dataset,

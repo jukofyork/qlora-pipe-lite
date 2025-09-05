@@ -10,7 +10,6 @@ import torch
 from transformers.integrations import get_keys_to_not_convert
 import transformers
 
-from utils.utils import log_all
 import bitsandbytes as bnb
 
 LANGUAGE_MODEL_WEIGHT_PREFIX_REGEX = r'^language_model\.'

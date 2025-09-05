@@ -271,7 +271,7 @@ def fast_cross_entropy_loss(logits, labels):
         logits: (batch, seq_len, vocab_size)
         labels: (batch, seq_len,)
     Returns:
-        losses: float
+        losses: a 0-D tensor
     """
     batch, seq_len, d = logits.shape
     assert(labels.shape == (batch, seq_len))
@@ -281,5 +281,7 @@ def fast_cross_entropy_loss(logits, labels):
         labels.view(-1),
     )
 
-    return loss.sum(dtype=torch.float32)
-pass
+    n_items = torch.count_nonzero(labels != -100)
+    assert n_items.item() > 0 , "All labels are masked (-100), so n_items denominator will be zero"
+
+    return loss.float().sum() / n_items
