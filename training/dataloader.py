@@ -11,6 +11,11 @@ class PipelineDataLoader:
     - Each local batch is split into `gradient_accumulation_steps` micro-batches (size `batch_size`)
     - Supports saving/restoring iteration position via a one-shot local-batch skip counter
     - Uses a per-rank batch sampler that truncates remainders to only emit full global batches
+    - Does not reshuffle data; relies on the input dataset being pre-shuffled
+
+    Note:
+    - Expects datasets to be pre-shuffled (e.g., by DatasetBuilder). The sampler
+      deterministically groups/truncates indices and does not perform per-epoch shuffling.
 
     Parameters:
         dataset                     : torch.utils.data.Dataset returning dicts with keys:

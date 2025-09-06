@@ -11,9 +11,9 @@ import transformers
 
 from constants import DEEPSPEED_TIMEOUT_HOURS
 from training import dataloader
+from training.dataset_builder import DatasetBuilder
 from training.engine import Engine
 from training.trainer import Trainer
-from utils.dataset_utils import load_datasets
 from utils.utils import is_main_process
 
 parser = argparse.ArgumentParser()
@@ -77,7 +77,7 @@ if __name__ == '__main__':
     )
 
     # Load, convert and split the datasets
-    train_data, eval_data = load_datasets(config, tokenizer, run_dir)
+    train_data, eval_data = DatasetBuilder(config, tokenizer, run_dir).build()
 
     # Setup model and training engine
     engine = Engine(config, args)
