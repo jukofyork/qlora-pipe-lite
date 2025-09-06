@@ -11,7 +11,7 @@ import transformers
 
 from constants import DEEPSPEED_TIMEOUT_HOURS
 from training import dataloader
-from training.model_factory import setup_model_and_engine
+from training.engine import Engine
 from training.trainer import Trainer
 from utils.dataset_utils import load_datasets
 from utils.utils import is_main_process
@@ -80,37 +80,38 @@ if __name__ == '__main__':
     train_data, eval_data = load_datasets(config, tokenizer, run_dir)
 
     # Setup model and training engine
-    model_engine, pipeline_model, lora_config, optimizer = setup_model_and_engine(config, args)
+    engine = Engine(config, args)
+    pipeline_engine = engine.pipeline_engine
 
     # Create training dataloader with data parallelism and gradient accumulation
     train_dataloader = dataloader.PipelineDataLoader(
         train_data,
-        model_engine.train_micro_batch_size_per_gpu(),
-        model_engine.gradient_accumulation_steps(),
-        model_engine.grid.get_data_parallel_world_size(),
-        model_engine.grid.get_data_parallel_rank()
+        pipeline_engine.train_micro_batch_size_per_gpu(),
+        pipeline_engine.gradient_accumulation_steps(),
+        pipeline_engine.grid.get_data_parallel_world_size(),
+        pipeline_engine.grid.get_data_parallel_rank()
     )
 
     # Create evaluation dataloader with gradient_accumulation_steps=1
     eval_dataloader = dataloader.PipelineDataLoader(
         eval_data,
-        model_engine.train_micro_batch_size_per_gpu(),
+        pipeline_engine.train_micro_batch_size_per_gpu(),
         1,
-        model_engine.grid.get_data_parallel_world_size(),
-        model_engine.grid.get_data_parallel_rank()
+        pipeline_engine.grid.get_data_parallel_world_size(),
+        pipeline_engine.grid.get_data_parallel_rank()
     )
 
     # Initialize trainer
     trainer = Trainer(
         config=config,
-        model_engine=model_engine,
+        pipeline_engine=pipeline_engine,
         train_dataloader=train_dataloader,
         eval_dataloader=eval_dataloader,
         run_dir=run_dir,
-        pipeline_model=pipeline_model,
+        pipeline_model=engine.pipeline_model,
         args=args,
-        lora_config=lora_config,
-        optimizer=optimizer,
+        lora_config=engine.lora_config,
+        optimizer=engine.optimizer,
         resume_from_checkpoint=args.resume_from_checkpoint
     )
 

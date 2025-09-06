@@ -18,11 +18,11 @@ class Regularizer:
     - Returns a dict of aggregated metrics (avg/min/max) per key
     """
 
-    def __init__(self, model_engine):
+    def __init__(self, pipeline_engine):
         """
         Initialize with the model engine (for device and pipeline reductions).
         """
-        self.model_engine = model_engine
+        self.pipeline_engine = pipeline_engine
 
     def apply_regularization(self, model, config, lr):
         """Apply regularization to LoRA or Control Adapter parameters and return aggregated statistics.
@@ -120,17 +120,17 @@ class Regularizer:
 
         # Convert to tensors, handling empty case
         if len(norms) > 0:
-            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.model_engine.device)
+            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.pipeline_engine.device)
         else:
-            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
 
         # Only return weight decay if regularization was applied
         if lora_weight_decay > 0:
             # Convert to tensors, handling empty case
             if len(weight_decay) > 0:
-                weight_decay_tensor = torch.tensor(weight_decay, dtype=torch.float32, device=self.model_engine.device)
+                weight_decay_tensor = torch.tensor(weight_decay, dtype=torch.float32, device=self.pipeline_engine.device)
             else:
-                weight_decay_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+                weight_decay_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
             return {
                 'norms': norms_tensor,
                 'weight_decay': weight_decay_tensor
@@ -246,23 +246,23 @@ class Regularizer:
 
         # Convert to tensors, handling empty case
         if len(orthogonality) > 0:
-            orthogonality_tensor = torch.tensor(orthogonality, dtype=torch.float32, device=self.model_engine.device)
+            orthogonality_tensor = torch.tensor(orthogonality, dtype=torch.float32, device=self.pipeline_engine.device)
         else:
-            orthogonality_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+            orthogonality_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
 
         # Convert to tensors, handling empty case
         if len(norms) > 0:
-            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.model_engine.device)
+            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.pipeline_engine.device)
         else:
-            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
 
         # Only return weight decay if regularization was applied
         if lora_weight_decay > 0:
             # Convert to tensors, handling empty case
             if len(weight_decay) > 0:
-                weight_decay_tensor = torch.tensor(weight_decay, dtype=torch.float32, device=self.model_engine.device)
+                weight_decay_tensor = torch.tensor(weight_decay, dtype=torch.float32, device=self.pipeline_engine.device)
             else:
-                weight_decay_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+                weight_decay_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
             return {
                 'norms': norms_tensor,
                 'orthogonality': orthogonality_tensor,
@@ -292,20 +292,20 @@ class Regularizer:
 
         for key, tensor in local_stats.items():
             if tensor.numel() > 0:
-                count = torch.tensor(tensor.numel(), dtype=torch.float32, device=self.model_engine.device)
+                count = torch.tensor(tensor.numel(), dtype=torch.float32, device=self.pipeline_engine.device)
                 sum_val = torch.sum(tensor)
                 min_val = torch.min(tensor)
                 max_val = torch.max(tensor)
             else:
-                count = torch.tensor(0.0, dtype=torch.float32, device=self.model_engine.device)
-                sum_val = torch.tensor(0.0, dtype=torch.float32, device=self.model_engine.device)
+                count = torch.tensor(0.0, dtype=torch.float32, device=self.pipeline_engine.device)
+                sum_val = torch.tensor(0.0, dtype=torch.float32, device=self.pipeline_engine.device)
                 # Use sentinels so MIN/MAX reductions ignore empty ranks
-                min_val = torch.tensor(float('inf'), dtype=torch.float32, device=self.model_engine.device)
-                max_val = torch.tensor(float('-inf'), dtype=torch.float32, device=self.model_engine.device)
+                min_val = torch.tensor(float('inf'), dtype=torch.float32, device=self.pipeline_engine.device)
+                max_val = torch.tensor(float('-inf'), dtype=torch.float32, device=self.pipeline_engine.device)
 
             # Aggregate across pipeline stages if using pipeline parallelism
-            if self.model_engine.is_pipe_parallel:
-                pp_group = self.model_engine.grid.get_pipe_parallel_group()
+            if self.pipeline_engine.is_pipe_parallel:
+                pp_group = self.pipeline_engine.grid.get_pipe_parallel_group()
                 dist.all_reduce(count, op=dist.ReduceOp.SUM, group=pp_group)
                 dist.all_reduce(sum_val, op=dist.ReduceOp.SUM, group=pp_group)
                 dist.all_reduce(min_val, op=dist.ReduceOp.MIN, group=pp_group)
