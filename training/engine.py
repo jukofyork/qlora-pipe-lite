@@ -3,6 +3,7 @@ from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.runtime.pipe.engine import PipelineEngine
 from deepspeed.runtime.pipe.module import PipelineModule, LayerSpec
 from deepspeed.runtime.pipe.topology import ProcessTopology, PipeDataParallelTopology
+import bitsandbytes
 import optimi
 import torch
 
@@ -13,7 +14,6 @@ from constants import (
 )
 from training.control_adapters import apply_control_adapters
 from training.model_factory import (
-    patch_bitsandbytes_cuda,
     create_model,
     parse_layers_to_transform,
     configure_full_fine_tuning,
@@ -51,7 +51,7 @@ class Engine:
     """
 
     def __init__(self, config, args):
-        patch_bitsandbytes_cuda()
+        self._patch_bitsandbytes_cuda()
 
         # Create model and pipeline
         model = create_model(config, trust_remote_code=args.trust_remote_code)
@@ -130,6 +130,20 @@ class Engine:
         self.pipeline_model = pipeline_model
         self.lora_config = lora_config
         self.optimizer = optimizer
+
+    def _patch_bitsandbytes_cuda(self):
+        """Ugly hack to move quantized models from GPU to CPU, and back to GPU again without triggering re-quantization"""
+        bnb_cuda_old = bitsandbytes.nn.modules.Params4bit.cuda
+
+        def bnb_cuda_hijack(self, device):
+            if getattr(self, 'already_quantized', False):
+                self.data = self.data.to(device)
+                self.quant_state.to(device)
+                return self
+            self.already_quantized = True
+            return bnb_cuda_old(self, device)
+
+        bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
 
     def _create_pipeline_model(self, model, config):
         """

@@ -9,7 +9,6 @@ Provides functions to:
 - Configure full fine-tuning parameter selection
 """
 from peft import LoraConfig, get_peft_model
-import bitsandbytes
 import json
 import os
 import torch
@@ -29,20 +28,6 @@ from models.causal_lm import (
     Qwen3ForCausalLmPipe,
 )
 from utils.utils import DTYPE_MAP
-
-def patch_bitsandbytes_cuda():
-    """Ugly hack to move quantized models from GPU to CPU, and back to GPU again without triggering re-quantization"""
-    bnb_cuda_old = bitsandbytes.nn.modules.Params4bit.cuda
-
-    def bnb_cuda_hijack(self, device):
-        if getattr(self, 'already_quantized', False):
-            self.data = self.data.to(device)
-            self.quant_state.to(device)
-            return self
-        self.already_quantized = True
-        return bnb_cuda_old(self, device)
-
-    bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
 
 def create_model(config, trust_remote_code=False):
     """
