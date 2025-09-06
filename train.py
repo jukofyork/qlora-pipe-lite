@@ -73,7 +73,7 @@ if __name__ == '__main__':
         local_files_only=True,
         model_max_length=sys.maxsize,
         add_prefix_space=args.add_prefix_space,
-        trust_remote_code=args.trust_remote_code,
+        trust_remote_code=args.trust_remote_code
     )
 
     # Load, convert and split the datasets
@@ -88,17 +88,16 @@ if __name__ == '__main__':
         model_engine.train_micro_batch_size_per_gpu(),
         model_engine.gradient_accumulation_steps(),
         model_engine.grid.get_data_parallel_world_size(),
-        model_engine.grid.get_data_parallel_rank(),
+        model_engine.grid.get_data_parallel_rank()
     )
 
-    # Create evaluation dataloader with evaluation gradient accumulation setting and no shuffling
+    # Create evaluation dataloader with gradient_accumulation_steps=1
     eval_dataloader = dataloader.PipelineDataLoader(
         eval_data,
         model_engine.train_micro_batch_size_per_gpu(),
-        model_engine.gradient_accumulation_steps(),
+        1,
         model_engine.grid.get_data_parallel_world_size(),
-        model_engine.grid.get_data_parallel_rank(),
-        shuffle=False,
+        model_engine.grid.get_data_parallel_rank()
     )
 
     # Initialize trainer

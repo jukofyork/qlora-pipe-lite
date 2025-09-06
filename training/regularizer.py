@@ -1,12 +1,3 @@
-"""
-Regularization utilities for LoRA and Control Adapters.
-
-This module provides Regularizer, which:
-- Applies analytic, in-place regularization updates for LoRA or Control Adapter parameters
-- Computes per-rank statistics (norms, orthogonality residuals, decay deltas)
-- Aggregates statistics across pipeline stages using DeepSpeed collectives
-- Returns easy-to-log global summary metrics (avg/min/max) per key
-"""
 from deepspeed import comm as dist
 import torch
 
@@ -16,19 +7,20 @@ class Regularizer:
     """
     Handles regularization for LoRA and Control Adapter parameters.
 
+    Behavior:
+    - Apply analytic, in-place regularization updates for LoRA or Control Adapters
+    - Compute per-rank statistics (norms, residuals, decay deltas)
+    - Aggregate statistics across pipeline stages via DeepSpeed collectives
+
     Usage:
     - Call apply_regularization(model, config, lr) once per training step
-    - It selects LoRA or Control Adapter path based on config['use_control_adapters']
-    - Statistics are computed locally then reduced across pipeline-parallel ranks
-    - Returns a dict of aggregated metrics (avg/min/max) for each reported key
+    - Path selection is based on config['use_control_adapters']
+    - Returns a dict of aggregated metrics (avg/min/max) per key
     """
 
     def __init__(self, model_engine):
         """
-        Initialize the manager with the model engine.
-
-        Parameters:
-            model_engine: DeepSpeed engine; used for device selection and pipeline reductions.
+        Initialize with the model engine (for device and pipeline reductions).
         """
         self.model_engine = model_engine
 
@@ -44,13 +36,27 @@ class Regularizer:
         Returns:
             dict[str, float]: Global summary metrics containing avg/min/max for each reported key.
         """
-        if config.get('use_control_adapters', False):
-            local_stats = self._apply_control_adapter_regularization_local(model, config, lr)
+        use_control_adapters = config.get('use_control_adapters', False)
+        lora_weight_decay = config.get('lora_weight_decay', 0.0)
+
+        if use_control_adapters:
+            gamma = config.get('control_adapter_gamma', DEFAULT_CONTROL_ADAPTER_GAMMA)
+            local_stats = self._apply_control_adapter_regularization_local(
+                model=model,
+                lr=lr,
+                gamma=gamma,
+                lora_weight_decay=lora_weight_decay,
+            )
         else:
-            local_stats = self._apply_lora_regularization_local(model, config, lr)
+            local_stats = self._apply_lora_regularization_local(
+                model=model,
+                lr=lr,
+                lora_weight_decay=lora_weight_decay,
+            )
+
         return self._aggregate_statistics(local_stats)
 
-    def _apply_lora_regularization_local(self, model, config, lr):
+    def _apply_lora_regularization_local(self, model, lr, lora_weight_decay):
         """Apply L2 regularization to the composite matrix W = B·A using L = ½||W||_F².
 
         Returns:
@@ -66,7 +72,6 @@ class Regularizer:
         norms = []
         weight_decay = []
 
-        lora_weight_decay = config.get('lora_weight_decay', 0.0)
         assert lora_weight_decay >= 0, f"lora_weight_decay ({lora_weight_decay}) must be >= 0"
 
         for name, param in model.named_parameters():
@@ -135,7 +140,7 @@ class Regularizer:
                 'norms': norms_tensor
             }
 
-    def _apply_control_adapter_regularization_local(self, model, config, lr):
+    def _apply_control_adapter_regularization_local(self, model, lr, gamma, lora_weight_decay):
         """Apply orthogonality regularization to Q and weight decay to S.
 
         - Q orthogonality : Newton step (full or partial) to maintain Q^T Q ≈ I.
@@ -171,11 +176,9 @@ class Regularizer:
         orthogonality = []
         weight_decay = []
 
-        gamma = config.get('control_adapter_gamma', DEFAULT_CONTROL_ADAPTER_GAMMA)
         assert gamma > 0, f"control_adapter_gamma ({gamma}) must be > 0 to maintain semi-orthogonality"
         assert gamma <= 0.5, f"control_adapter_gamma ({gamma}) must be <= 0.5 to avoid overshooting"
 
-        lora_weight_decay = config.get('lora_weight_decay', 0.0)
         assert lora_weight_decay >= 0, f"lora_weight_decay ({lora_weight_decay}) must be >= 0"
 
         identity_matrix = None
@@ -318,7 +321,6 @@ class Regularizer:
                 global_min = 0
                 global_max = 0
 
-            # Store in output dictionary with descriptive names
             global_stats[f'{key}_avg'] = global_avg
             global_stats[f'{key}_min'] = global_min
             global_stats[f'{key}_max'] = global_max
