@@ -3,7 +3,8 @@ import transformers
 from .base import BaseCausalLmPipe
 
 class Gemma3ForCausalLmPipe(BaseCausalLmPipe, transformers.Gemma3ForCausalLM):
-    CONFIG_CLASS = transformers.Gemma3Config
+    # https://huggingface.co/docs/transformers/en/model_doc/gemma3?usage=AutoModel#transformers.Gemma3ForCausalLM
+    CONFIG_CLASS = transformers.Gemma3TextConfig
     TRANSFORMERS_CLASS = transformers.Gemma3ForCausalLM
 
     def _get_attention_implementation(self):
