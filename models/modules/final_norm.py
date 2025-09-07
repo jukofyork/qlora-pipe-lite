@@ -13,10 +13,7 @@ class FinalNormPipe(nn.Module):
         orig          : Normalization module (e.g., LlamaRMSNorm)
 
     Inputs:
-        require_local_rotary=False:
-            (hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels)
-        require_local_rotary=True:
-            (hidden_states, attention_mask, cos, sin, cos_local, sin_local, cache_position, control_classes, labels)
+        (hidden_states, *_, labels)
 
     Outputs:
         (hidden_states, labels)

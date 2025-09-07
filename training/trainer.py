@@ -1,4 +1,3 @@
-from huggingface_hub import save_torch_state_dict
 from torch.utils.tensorboard import SummaryWriter
 import deepspeed
 import gc
@@ -7,6 +6,8 @@ import os
 import shutil
 import time
 import torch
+
+from huggingface_hub import save_torch_state_dict
 
 from constants import (
     DEFAULT_CHECKPOINT_INTERVAL_HOURS,
@@ -114,10 +115,6 @@ class Trainer:
           * Periodically evaluate based on precomputed step indices
           * Checkpoint at epoch boundaries and optionally by time interval
         """
-        start_time = None
-        start_step = None
-        last_print_time = None
-
         last_eval_loss = None
 
         if self.resume_from_checkpoint:
@@ -125,8 +122,11 @@ class Trainer:
 
         if last_eval_loss is None:
             last_eval_loss = self.evaluate()
-            if is_main_process():
-                self._print_eval_progress(last_eval_loss)
+
+        # Track timing from first step to avoid startup bias
+        start_step = self.pipeline_engine.global_steps
+        start_time = time.time()
+        last_print_time = start_time
 
         prev_epoch = self.get_current_epoch()
         while self.pipeline_engine.global_steps < self.total_steps:
@@ -143,19 +143,14 @@ class Trainer:
             train_loss = self._broadcast_from_last_stage(train_loss_local)
             self._write_train_step_metrics(train_loss, learning_rate)
 
-            # Track timing from first step to avoid startup bias
-            if is_main_process() and start_step is None:
-                start_step = self.pipeline_engine.global_steps - 1
-                start_time = time.time()
-                last_print_time = start_time
-
             # Custom progress logging
-            last_print_time = self._maybe_print_train_progress(
-                start_time=start_time,
-                start_step=start_step,
-                last_print_time=last_print_time,
-                train_loss=train_loss,
-            )
+            if is_main_process():
+                last_print_time = self._print_train_progress(
+                    start_time=start_time,
+                    start_step=start_step,
+                    last_print_time=last_print_time,
+                    train_loss=train_loss,
+                )
 
             # Apply adapter-specific regularization and log statistics
             if self.lora_config is not None:
@@ -164,10 +159,7 @@ class Trainer:
 
             # Periodic evaluation
             if self.pipeline_engine.global_steps in self.eval_step_indices:
-                loss = self.evaluate()
-                if is_main_process():
-                    self._print_eval_progress(loss, last_eval_loss)
-                last_eval_loss = loss
+                last_eval_loss = self.evaluate(last_eval_loss)
 
             # Epoch boundary detection (based on global step)
             current_epoch = self.get_current_epoch()
@@ -183,17 +175,30 @@ class Trainer:
             self.tb_writer.flush()
             self.tb_writer.close()
 
-    def evaluate(self):
+    def evaluate(self, last_loss=None):
         """
-        Run evaluation over the entire eval dataset (GAS=1) and return average loss.
+        Run evaluation over the entire eval dataset (GAS=1) and return the average loss.
 
         Behavior:
-        - Eval dataloader constructed with gradient_accumulation_steps=1
-        - Iterate exactly len(eval_dataloader) micro-batches
-        - With truncation in the dataloader, incomplete final batches are dropped
-        - Uses pipeline_engine.eval_batch which returns reduced/broadcast loss
-        - Resets the eval_dataloader afterward
+        - Prints a short status line on rank-0 before and after evaluation
+        - Iterates exactly len(eval_dataloader) micro-batches using pipeline_engine.eval_batch
+        - Drops incomplete final batches via the eval dataloader’s internal truncation
+        - Resets the eval_dataloader after completion
+        - Logs 'eval/loss' to TensorBoard on rank-0
+        - If last_loss is provided (> 0), also prints the percent change vs the previous eval
+
+        Args:
+            last_loss (float | None): Previous evaluation loss for Δ% reporting.
+
+        Returns:
+            float: Average evaluation loss over the eval dataset.
         """
+        if is_main_process():
+            if last_loss is None:
+                log('calculating initial evaluation loss...')
+            else:
+                log(f'calculating step {self.pipeline_engine.global_steps} evaluation loss...')
+
         eval_steps = len(self.eval_dataloader)
         if eval_steps == 0:
             raise RuntimeError('Evaluation dataloader has no data after truncation')
@@ -207,6 +212,14 @@ class Trainer:
 
         self.eval_dataloader.reset()
         eval_loss = float(sum(losses) / len(losses))
+
+        if is_main_process():
+            if last_loss is None or last_loss <= 0:
+                log(f'evaluation loss: {eval_loss:.4f}')
+            else:
+                percent_change = (eval_loss / last_loss - 1.0) * 100.0
+                log(f'evaluation loss: {eval_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
+
         self._write_scalar_metric('eval/loss', eval_loss)
         return eval_loss
 
@@ -237,11 +250,23 @@ class Trainer:
         return output.detach().float().mean().item()
 
     def _broadcast_from_last_stage(self, value):
-        """Broadcast a scalar from the last pipeline stage to all ranks and return it."""
-        src_rank = self.pipeline_engine.grid.stage_to_global(self.pipeline_engine.num_stages - 1)
-        payload = [value if self.pipeline_engine.is_last_stage() else None]
-        torch.distributed.broadcast_object_list(payload, src=src_rank)
-        return payload[0]
+        """Return scalar loss on all ranks via PP-group all-reduce.
+
+        Only the last pipeline stage contributes a nonzero value; SUM yields the loss.
+        Avoids broadcast_object_list and single-source rank mapping issues.
+        """
+        pp_group = self.pipeline_engine.grid.get_pipe_parallel_group()
+        device = getattr(self.pipeline_engine, 'device', None)
+        if device is None:
+            device = torch.device('cuda', torch.cuda.current_device()) if torch.cuda.is_available() else torch.device('cpu')
+
+        contrib = torch.tensor(
+            0.0 if value is None else float(value),
+            dtype=torch.float32,
+            device=device,
+        )
+        deepspeed.comm.all_reduce(contrib, group=pp_group)  # SUM within PP group
+        return float(contrib.item())
 
     def _write_scalar_metric(self, name, value):
         """Rank-0 only: log a scalar to TensorBoard at the current global step."""
@@ -258,35 +283,16 @@ class Trainer:
         for key, value in stats.items():
             self._write_scalar_metric(f'train/{key}', value)
 
-    def _print_eval_progress(self, current_loss, last_loss=None):
-        """Rank-0 only: print evaluation progress with optional percentage change."""
-        step = self.pipeline_engine.global_steps
-        if step == 0:
-            log(f'Initial evaluation loss: {current_loss:.4f}')
-        elif last_loss is None or last_loss <= 0:
-            log(f'Step {step} evaluation loss: {current_loss:.4f}')
-        else:
-            percent_change = (current_loss / last_loss - 1) * 100
-            log(f'Step {step} evaluation loss: {current_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
-
-    def _maybe_print_train_progress(self, start_time, start_step, last_print_time, train_loss):
+    def _print_train_progress(self, start_time, start_step, last_print_time, train_loss):
         """
-        Rank-0 only: periodically print training progress (throughput, elapsed, ETA).
+        Print training progress (throughput, elapsed, ETA).
 
         Returns:
-            float | None: Updated last_print_time (or the input if no print was made).
+            float: Updated last_print_time.
         """
-        if not is_main_process():
-            return last_print_time
-        steps_per_print = self.pipeline_engine.steps_per_print()
-        if steps_per_print <= 0 or (self.pipeline_engine.global_steps % steps_per_print) != 0:
-            return last_print_time
-        if start_step is None or last_print_time is None:
-            return last_print_time
         now = time.time()
-        iter_elapsed = now - last_print_time
+        iter_time = now - last_print_time
         last_print_time = now
-        iter_time = iter_elapsed / steps_per_print if steps_per_print > 0 else float('inf')
         iter_throughput = self.pipeline_engine.train_batch_size() / iter_time if iter_time > 0 else 0.0
         total_elapsed = now - start_time
         steps_completed = self.pipeline_engine.global_steps - start_step

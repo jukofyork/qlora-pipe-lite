@@ -5,6 +5,7 @@ from deepspeed.runtime.pipe.module import PipelineModule, LayerSpec
 from deepspeed.runtime.pipe.topology import ProcessTopology, PipeDataParallelTopology
 import bitsandbytes
 import optimi
+import sys
 import torch
 
 from constants import (
@@ -98,7 +99,7 @@ class Engine:
             'train_micro_batch_size_per_gpu': 1,
             'gradient_accumulation_steps': config.get('gradient_accumulation_steps', 1),
             'gradient_clipping': 1.0,
-            'steps_per_print': 1,
+            'steps_per_print': sys.maxsize  # We do our own printing in Trainer._print_train_progress()
         }
 
         mpu = pipeline_model.mpu()

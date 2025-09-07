@@ -19,7 +19,6 @@ from models.causal_lm import (
     CohereForCausalLmPipe,
     Cohere2ForCausalLmPipe,
     Gemma2ForCausalLmPipe,
-    Gemma3ForCausalLmPipe,
     LlamaForCausalLmPipe,
     MistralForCausalLmPipe,
     MixtralForCausalLmPipe,
@@ -56,8 +55,6 @@ def create_model(config, trust_remote_code=False):
         model = Cohere2ForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
     elif model_type == 'gemma2':
         model = Gemma2ForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
-    elif model_type == 'gemma3' or model_type == 'gemma3_text':
-        model = Gemma3ForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
     elif model_type == 'llama':
         model = LlamaForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
     elif model_type == 'mistral' or model_type == 'mistral3':

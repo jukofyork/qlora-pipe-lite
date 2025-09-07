@@ -2,7 +2,6 @@ from .base import BaseCausalLmPipe
 from .cohere import CohereForCausalLmPipe
 from .cohere2 import Cohere2ForCausalLmPipe
 from .gemma2 import Gemma2ForCausalLmPipe
-from .gemma3 import Gemma3ForCausalLmPipe
 from .llama import LlamaForCausalLmPipe
 from .mistral import MistralForCausalLmPipe
 from .mixtral import MixtralForCausalLmPipe
@@ -15,7 +14,6 @@ __all__ = [
     "CohereForCausalLmPipe",
     "Cohere2ForCausalLmPipe",
     "Gemma2ForCausalLmPipe",
-    "Gemma3ForCausalLmPipe",
     "LlamaForCausalLmPipe",
     "MistralForCausalLmPipe",
     "MixtralForCausalLmPipe",

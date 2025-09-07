@@ -43,10 +43,9 @@ class BaseCausalLmPipe(PipelineModel):
         result.append(LayerSpec(PrepareInputsPipe))
 
         tie_weights = self._get_tie_weights()
-        use_tied = bool(self.full_fine_tune) and bool(tie_weights)
+        use_tied_layer_spec = bool(self.full_fine_tune) and bool(tie_weights)
 
         normalize_embedding_sqrt = self._normalize_embedding_sqrt()
-        require_local_rotary = self._require_local_rotary()
 
         def _build_tied_embedding(forward_fn=None):
             return TiedLayerSpec(
@@ -57,13 +56,12 @@ class BaseCausalLmPipe(PipelineModel):
                 self.model,
                 embedding_on_cpu=False,
                 normalize_embedding_sqrt=normalize_embedding_sqrt,
-                require_local_rotary=require_local_rotary,
                 forward_fn=forward_fn,
                 tied_weight_attr='orig.weight'
             )
 
         # Embedding
-        if use_tied:
+        if use_tied_layer_spec:
             # Share the same EmbeddingPipe module instance for embedding/head to preserve DS tied-module semantics.
             result.append(_build_tied_embedding())
         else:
@@ -73,8 +71,7 @@ class BaseCausalLmPipe(PipelineModel):
                 self.model.embed_tokens,
                 self.model,
                 embedding_on_cpu=embedding_on_cpu,
-                normalize_embedding_sqrt=normalize_embedding_sqrt,
-                require_local_rotary=require_local_rotary
+                normalize_embedding_sqrt=normalize_embedding_sqrt
             ))
 
         # Decoder Layers
@@ -83,15 +80,14 @@ class BaseCausalLmPipe(PipelineModel):
                 DecoderLayerPipe,
                 self.module_loader,
                 block,
-                layer_idx,
-                require_local_rotary=require_local_rotary
+                layer_idx
             ))
 
         # Final Norm
         result.append(LayerSpec(FinalNormPipe, self.module_loader, self.model.norm))
 
         # LM Head
-        if use_tied:
+        if use_tied_layer_spec:
             # Share the same EmbeddingPipe module instance for embedding/head to preserve DS tied-module semantics.
             result.append(_build_tied_embedding(LmHeadPipe.make_tied_lm_head_forward(**self._get_lm_head_kwargs())))
         else:
@@ -120,9 +116,5 @@ class BaseCausalLmPipe(PipelineModel):
         return {}
 
     def _normalize_embedding_sqrt(self):
-        """Override in subclasses that require sqrt(hidden_size) embedding scaling (e.g., Gemma 2/3)."""
-        return False
-
-    def _require_local_rotary(self):
-        """Override in subclasses that need dual rotary embeddings (e.g., Gemma 3)."""
+        """Override in subclasses that require sqrt(hidden_size) embedding scaling (e.g., Gemma 2)."""
         return False
