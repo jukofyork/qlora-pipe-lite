@@ -150,6 +150,7 @@ class Trainer:
                     start_step=start_step,
                     last_print_time=last_print_time,
                     train_loss=train_loss,
+                    learning_rate=learning_rate
                 )
 
             # Apply adapter-specific regularization and log statistics
@@ -159,7 +160,12 @@ class Trainer:
 
             # Periodic evaluation
             if self.pipeline_engine.global_steps in self.eval_step_indices:
+                eval_start_time = time.time()
                 last_eval_loss = self.evaluate(last_eval_loss)
+                dt = time.time() - eval_start_time
+                # Exclude evaluation time from next iter throughput and from elapsed/ETA
+                last_print_time += dt
+                start_time += dt
 
             # Epoch boundary detection (based on global step)
             current_epoch = self.get_current_epoch()
@@ -193,11 +199,10 @@ class Trainer:
         Returns:
             float: Average evaluation loss over the eval dataset.
         """
+
+        # Print this to make it obvious the program hasn't just hung for large evaluations
         if is_main_process():
-            if last_loss is None:
-                log('calculating initial evaluation loss...')
-            else:
-                log(f'calculating step {self.pipeline_engine.global_steps} evaluation loss...')
+                log('calculating evaluation loss...')
 
         eval_steps = len(self.eval_dataloader)
         if eval_steps == 0:
@@ -215,10 +220,10 @@ class Trainer:
 
         if is_main_process():
             if last_loss is None or last_loss <= 0:
-                log(f'evaluation loss: {eval_loss:.4f}')
+                log(f'initial evaluation loss: {eval_loss:.4f}')
             else:
                 percent_change = (eval_loss / last_loss - 1.0) * 100.0
-                log(f'evaluation loss: {eval_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
+                log(f'new evaluation loss: {eval_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
 
         self._write_scalar_metric('eval/loss', eval_loss)
         return eval_loss
@@ -283,9 +288,16 @@ class Trainer:
         for key, value in stats.items():
             self._write_scalar_metric(f'train/{key}', value)
 
-    def _print_train_progress(self, start_time, start_step, last_print_time, train_loss):
+    def _print_train_progress(self, start_time, start_step, last_print_time, train_loss, learning_rate):
         """
         Print training progress (throughput, elapsed, ETA).
+
+        Args:
+            start_time (float): Wall-clock timestamp when training started.
+            start_step (int): Global step at start_time.
+            last_print_time (float): Wall-clock timestamp of previous print.
+            train_loss (float): Latest training loss (broadcast to rank-0).
+            learning_rate (float): Current learning rate.
 
         Returns:
             float: Updated last_print_time.
@@ -295,16 +307,18 @@ class Trainer:
         last_print_time = now
         iter_throughput = self.pipeline_engine.train_batch_size() / iter_time if iter_time > 0 else 0.0
         total_elapsed = now - start_time
-        steps_completed = self.pipeline_engine.global_steps - start_step
-        if steps_completed > 0:
-            eta = (total_elapsed / steps_completed) * (self.total_steps - self.pipeline_engine.global_steps)
-            log(
-                f'step: {self.pipeline_engine.global_steps} / {self.total_steps}, '
-                f'loss: {train_loss:0.4f}, '
-                f'throughput: {iter_throughput:0.3f} sequences/s, '
-                f'elapsed: {seconds_to_time_str(total_elapsed)}, '
-                f'eta: {seconds_to_time_str(eta)}'
-            )
+        steps_completed = max(1, self.pipeline_engine.global_steps - start_step)
+        remaining_steps = max(0, self.total_steps - self.pipeline_engine.global_steps)
+        eta = (total_elapsed / steps_completed) * remaining_steps
+
+        log(
+            f'step: {self.pipeline_engine.global_steps} / {self.total_steps}, '
+            f'loss: {train_loss:0.4f}, '
+            f'lr: {learning_rate:.3e}, '
+            f'throughput: {iter_throughput:0.3f} sequences/s, '
+            f'elapsed: {seconds_to_time_str(total_elapsed)}, '
+            f'eta: {seconds_to_time_str(eta)}'
+        )
         return last_print_time
 
     def _should_checkpoint(self):
