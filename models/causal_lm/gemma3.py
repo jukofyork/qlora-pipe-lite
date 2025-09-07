@@ -13,6 +13,8 @@ class Gemma3ForCausalLmPipe(BaseCausalLmPipe, transformers.Gemma3ForCausalLM):
         return 'model.embed_tokens.weight'
 
     def _get_lm_head_kwargs(self):
+        if hasattr(self.config, 'text_config'):
+            return {'final_logit_softcapping': getattr(self.config.text_config, 'final_logit_softcapping', None)}
         return {'final_logit_softcapping': getattr(self.config, 'final_logit_softcapping', None)}
 
     def _normalize_embedding_sqrt(self):
