@@ -83,7 +83,7 @@ class LmHeadPipe(nn.Module):
         def tied_lm_head_forward(tied_module, inputs):
             # inputs are (hidden_states, labels) coming from FinalNormPipe
             hidden_states, labels = inputs
-            weight = tied_module.orig.weight  # [vocab, hidden]
+            weight = tied_module.weight  # [vocab, hidden]
 
             hidden_states = LmHeadPipe._apply_logit_scale(hidden_states, logit_scale)
             logits = torch.matmul(hidden_states, weight.t())

@@ -62,6 +62,15 @@ class EmbeddingPipe(nn.Module):
         if embedding_on_cpu:
             self.orig.to("cpu")
 
+    # Alias for DeepSpeed TiedLayerSpec (expects a top-level attribute name)
+    @property
+    def weight(self):
+        return self.orig.weight
+
+    @weight.setter
+    def weight(self, v):
+        self.orig.weight = v
+
     @property
     def model(self):
         return self._model[0]

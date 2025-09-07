@@ -57,7 +57,7 @@ class BaseCausalLmPipe(PipelineModel):
                 embedding_on_cpu=False,
                 normalize_embedding_sqrt=normalize_embedding_sqrt,
                 forward_fn=forward_fn,
-                tied_weight_attr='orig.weight'
+                tied_weight_attr='weight'
             )
 
         # Embedding
