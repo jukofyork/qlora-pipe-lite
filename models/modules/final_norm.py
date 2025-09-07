@@ -1,6 +1,6 @@
 from torch import nn
 
-class NormPipe(nn.Module):
+class FinalNormPipe(nn.Module):
     """
     Final normalization stage wrapper.
 
@@ -13,7 +13,10 @@ class NormPipe(nn.Module):
         orig          : Normalization module (e.g., LlamaRMSNorm)
 
     Inputs:
-        (hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels)
+        require_local_rotary=False:
+            (hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels)
+        require_local_rotary=True:
+            (hidden_states, attention_mask, cos, sin, cos_local, sin_local, cache_position, control_classes, labels)
 
     Outputs:
         (hidden_states, labels)

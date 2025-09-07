@@ -5,10 +5,8 @@ import torch
 from models.modules import (
     PrepareInputsPipe,
     EmbeddingPipe,
-    Gemma3EmbeddingPipe,
     DecoderLayerPipe,
-    Gemma3DecoderLayerPipe,
-    NormPipe,
+    FinalNormPipe,
     LmHeadPipe,
     LossPipe,
 )
@@ -40,100 +38,73 @@ class BaseCausalLmPipe(PipelineModel):
         embedding_on_cpu = not self.full_fine_tune
 
         result = []
+
+        # Prepare Inputs
         result.append(LayerSpec(PrepareInputsPipe))
 
-        if bool(self.full_fine_tune) and bool(getattr(self.config, 'tie_word_embeddings', False)):
-            # 1) Tied embedding at the start
-            result.append(TiedLayerSpec(
-                'tok_emb',
-                Gemma3EmbeddingPipe if self._require_local_rotary() else EmbeddingPipe,
+        tie_weights = self._get_tie_weights()
+        use_tied = bool(self.full_fine_tune) and bool(tie_weights)
+
+        normalize_embedding_sqrt = self._normalize_embedding_sqrt()
+        require_local_rotary = self._require_local_rotary()
+
+        def _build_tied_embedding(forward_fn=None):
+            return TiedLayerSpec(
+                'tied_embedding',
+                EmbeddingPipe,
                 self.module_loader,
                 self.model.embed_tokens,
                 self.model,
                 embedding_on_cpu=False,
-                normalize_embedding_sqrt=self._normalize_embedding_sqrt(),
+                normalize_embedding_sqrt=normalize_embedding_sqrt,
+                require_local_rotary=require_local_rotary,
+                forward_fn=forward_fn,
                 tied_weight_attr='orig.weight'
-            ))
+            )
 
-            # 2) Decoder layers
-            for layer_idx, block in enumerate(self.model.layers):
-                result.append(LayerSpec(
-                    Gemma3DecoderLayerPipe if self._require_local_rotary() else DecoderLayerPipe,
-                    self.module_loader,
-                    block,
-                    layer_idx
-                ))
-
-            # 3) Final norm
-            result.append(LayerSpec(NormPipe, self.module_loader, self.model.norm))
-
-            # 4) Tied "head" using the same module instance with a custom forward
-            lm_head_kwargs = self._get_lm_head_kwargs()
-            logit_scale = lm_head_kwargs.get('logit_scale', None)
-            final_logit_softcapping = lm_head_kwargs.get('final_logit_softcapping', None)
-
-            def tied_lm_head_forward(tied_module, inputs):
-                # inputs are (hidden_states, labels) coming from NormPipe
-                hidden_states, labels = inputs
-
-                if logit_scale is not None:
-                    hidden_states = hidden_states * logit_scale
-
-                weight = tied_module.orig.weight  # [vocab, hidden]
-                logits = torch.matmul(hidden_states, weight.t())  # [b, s, hidden] x [hidden, vocab] -> [b, s, vocab]
-
-                if final_logit_softcapping is not None:
-                    logits = logits / final_logit_softcapping
-                    logits = torch.tanh(logits)
-                    logits = logits * final_logit_softcapping
-
-                return logits, labels
-
-            result.append(TiedLayerSpec(
-                'tok_emb',
-                Gemma3EmbeddingPipe if self._require_local_rotary() else EmbeddingPipe,
+        # Embedding
+        if use_tied:
+            # Share the same EmbeddingPipe module instance for embedding/head to preserve DS tied-module semantics.
+            result.append(_build_tied_embedding())
+        else:
+            result.append(LayerSpec(
+                EmbeddingPipe,
                 self.module_loader,
                 self.model.embed_tokens,
                 self.model,
-                embedding_on_cpu=False,
-                normalize_embedding_sqrt=self._normalize_embedding_sqrt(),
-                forward_fn=tied_lm_head_forward,
-                tied_weight_attr='orig.weight'
+                embedding_on_cpu=embedding_on_cpu,
+                normalize_embedding_sqrt=normalize_embedding_sqrt,
+                require_local_rotary=require_local_rotary
             ))
 
-            # 5) Loss
-            result.append(LayerSpec(LossPipe))
-            return result
-
-        # Non-FFT or models without tied embeddings: original untied pipeline
-        result.append(LayerSpec(
-            Gemma3EmbeddingPipe if self._require_local_rotary() else EmbeddingPipe,
-            self.module_loader,
-            self.model.embed_tokens,
-            self.model,
-            embedding_on_cpu=embedding_on_cpu,
-            normalize_embedding_sqrt=self._normalize_embedding_sqrt()
-        ))
-
+        # Decoder Layers
         for layer_idx, block in enumerate(self.model.layers):
             result.append(LayerSpec(
-                Gemma3DecoderLayerPipe if self._require_local_rotary() else DecoderLayerPipe,
+                DecoderLayerPipe,
                 self.module_loader,
                 block,
-                layer_idx
+                layer_idx,
+                require_local_rotary=require_local_rotary
             ))
 
-        result.append(LayerSpec(NormPipe, self.module_loader, self.model.norm))
+        # Final Norm
+        result.append(LayerSpec(FinalNormPipe, self.module_loader, self.model.norm))
 
-        result.append(LayerSpec(
-            LmHeadPipe,
-            self.module_loader,
-            self.lm_head,
-            tie_weights=self._get_tie_weights(),
-            **self._get_lm_head_kwargs()
-        ))
+        # LM Head
+        if use_tied:
+            # Share the same EmbeddingPipe module instance for embedding/head to preserve DS tied-module semantics.
+            result.append(_build_tied_embedding(LmHeadPipe.make_tied_lm_head_forward(**self._get_lm_head_kwargs())))
+        else:
+            result.append(LayerSpec(
+                LmHeadPipe,
+                self.module_loader,
+                self.lm_head,
+                tie_weights=tie_weights,
+                **self._get_lm_head_kwargs()
+            ))
 
         result.append(LayerSpec(LossPipe))
+
         return result
 
     def _get_attention_implementation(self):

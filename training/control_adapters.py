@@ -19,19 +19,38 @@ def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dro
               - control_S: [r], zeros initialized (log-parameterization of λ: 1 + λ = exp(S))
           * Casts control_Q and control_S to adapter_dtype
           * Patches layer.forward with a wrapper that:
+              - Accepts either 7-tuple (cos, sin) or 9-tuple (cos, sin, cos_local, sin_local)
               - Computes residual delta
               - Projects into Q-subspace
               - Applies class-conditional transform using expm1(S) and its inverse
               - Masks class 0 positions to zero contribution
               - Adds adapter contribution back to residual stream
+          * Forwards the correct rotary kwargs (global only or global+local) to the original layer
         - Sets original_name for saving compatibility
         - Sets requires_grad True for control_Q/control_S and False for other parameters on the layer
     """
 
     def patch_decoder_layer_control_adapter(module):
 
+        def _position_embeddings_kwargs(rotary_tensors):
+            # rotary_tensors is [cos, sin] or [cos, sin, cos_local, sin_local]
+            if len(rotary_tensors) == 2:
+                cos, sin = rotary_tensors
+                return {"position_embeddings": (cos, sin)}
+            if len(rotary_tensors) == 4:
+                cos, sin, cos_local, sin_local = rotary_tensors
+                return {
+                    "position_embeddings_global": (cos, sin),
+                    "position_embeddings_local": (cos_local, sin_local),
+                }
+            raise ValueError(f"Unexpected rotary tensor count: {len(rotary_tensors)} (expected 2 or 4)")
+
         def control_adapter_forward(inputs):
-            hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels = inputs
+            if not isinstance(inputs, (tuple, list)) or (len(inputs) != 7 and len(inputs) != 9):
+                raise ValueError("Decoder layer forward expects a 7- or 9-tuple input")
+
+            # Unpack generically: rotary_tensors will be [cos, sin] or [cos, sin, cos_local, sin_local]
+            hidden_states, attention_mask, *rotary_tensors, cache_position, control_classes, labels = inputs
 
             # Shift control_classes for causal LM: [control_classes[1:], 0_padding]
             batch_size, seq_len = control_classes.shape
@@ -43,11 +62,12 @@ def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dro
             # Save input for residual computation
             input_hidden_states = hidden_states
 
+            # Call original layer with appropriate position_embeddings kwargs
             layer_output = module.orig(
                 hidden_states,
                 attention_mask=attention_mask,
-                position_embeddings=(cos, sin),
-                cache_position=cache_position
+                cache_position=cache_position,
+                **_position_embeddings_kwargs(rotary_tensors)
             )[0]
             torch_result_dtype = layer_output.dtype
 
@@ -84,7 +104,8 @@ def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dro
             # Cast adapter contribution back to original dtype and add to the residual stream
             result = layer_output + adapter_output.to(torch_result_dtype)  # [batch_size, seq_len, hidden_size]
 
-            return (result, attention_mask, cos, sin, cache_position, control_classes, labels)
+            # Preserve original tuple shape and ordering
+            return (result, attention_mask, *rotary_tensors, cache_position, control_classes, labels)
 
         return control_adapter_forward
 

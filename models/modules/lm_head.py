@@ -49,12 +49,46 @@ class LmHeadPipe(nn.Module):
 
     def forward(self, inputs):
         hidden_states, labels = inputs
-        if self.logit_scale is not None:
-            hidden_states = hidden_states * self.logit_scale
+        hidden_states = self._apply_logit_scale(hidden_states, self.logit_scale)
         # For tied weights case: uses separate GPU copy of embedding weights
         logits = self.lm_head(hidden_states)
-        if self.final_logit_softcapping is not None:
-            logits = logits / self.final_logit_softcapping
-            logits = torch.tanh(logits)
-            logits = logits * self.final_logit_softcapping
+        logits = self._apply_softcap(logits, self.final_logit_softcapping)
         return logits, labels
+
+    @staticmethod
+    def _apply_logit_scale(hidden_states, scale):
+        if scale is None:
+            return hidden_states
+        return hidden_states * scale
+
+    @staticmethod
+    def _apply_softcap(logits, cap):
+        if cap is None:
+            return logits
+        logits = logits / cap
+        logits = torch.tanh(logits)
+        logits = logits * cap
+        return logits
+
+    @staticmethod
+    def make_tied_lm_head_forward(logit_scale=None, final_logit_softcapping=None, **_ignored):
+        """
+        Factory for a forward_fn compatible with TiedLayerSpec that reuses the EmbeddingPipe module instance.
+
+        NOTE: Accepts extra kwargs to avoid TypeError if _get_lm_head_kwargs() grows new keys.
+
+        The returned function has signature: (tied_module, inputs) -> (logits, labels)
+        """
+
+        def tied_lm_head_forward(tied_module, inputs):
+            # inputs are (hidden_states, labels) coming from FinalNormPipe
+            hidden_states, labels = inputs
+            weight = tied_module.orig.weight  # [vocab, hidden]
+
+            hidden_states = LmHeadPipe._apply_logit_scale(hidden_states, logit_scale)
+            logits = torch.matmul(hidden_states, weight.t())
+            logits = LmHeadPipe._apply_softcap(logits, final_logit_softcapping)
+
+            return logits, labels
+
+        return tied_lm_head_forward

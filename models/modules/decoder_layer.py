@@ -7,74 +7,63 @@ class DecoderLayerPipe(nn.Module):
     Behavior:
     - Loads weights for a single HF transformer decoder layer into this stage
     - Applies the layer using precomputed rotary embeddings and causal mask
+    - Supports optional dual rotary embeddings (global+local) when require_local_rotary=True
     - Passes through pipeline-carry tensors unchanged
 
     Parameters:
-        module_loader : Loader that materializes weights and handles optional quantization
-        orig          : The original HF decoder layer module (e.g., LlamaDecoderLayer)
-        layer_idx     : Optional index for logging/identification
+        module_loader        : Loader that materializes weights and handles optional quantization
+        orig                 : The original HF decoder layer module (e.g., LlamaDecoderLayer or Gemma3DecoderLayer)
+        layer_idx            : Optional index for logging/identification
+        require_local_rotary : If True, expects and forwards both global and local rotary embeddings
 
     Inputs:
-        (hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels)
+        require_local_rotary=False:
+            (hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels)
+        require_local_rotary=True:
+            (hidden_states, attention_mask, cos, sin, cos_local, sin_local, cache_position, control_classes, labels)
 
     Outputs:
-        (hidden_states', attention_mask, cos, sin, cache_position, control_classes, labels)
+        Mirrors the input shape with updated hidden_states.
     """
 
-    def __init__(self, module_loader, orig, layer_idx=None):
+    def __init__(self, module_loader, orig, layer_idx=None, require_local_rotary: bool=False):
         super().__init__()
         self.orig = orig
         self.layer_idx = layer_idx
+        self.require_local_rotary = require_local_rotary
         module_loader.load_state_dict_into_module(self)
 
     def forward(self, inputs):
-        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels = inputs
-        return (
-            self.orig(
+        if not self.require_local_rotary:
+            if not isinstance(inputs, (tuple, list)) or len(inputs) != 7:
+                raise ValueError(
+                    "DecoderLayerPipe(require_local_rotary=False) expects 7-tuple: "
+                    "(hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels)"
+                )
+            hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels = inputs
+            hidden_states = self.orig(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_embeddings=(cos, sin),
                 cache_position=cache_position,
-            )[0],
-            attention_mask, cos, sin, cache_position, control_classes, labels,
-        )
-
-class Gemma3DecoderLayerPipe(nn.Module):
-    """
-    Single Gemma 3 decoder block wrapper for a pipeline stage (dual rotary embeddings).
-
-    Behavior:
-    - Loads weights for a single HF transformer decoder layer into this stage
-    - Applies the layer using BOTH global and local rotary embeddings and the causal mask
-    - Passes through pipeline-carry tensors unchanged
-
-    Parameters:
-        module_loader : Loader that materializes weights and handles optional quantization
-        orig          : The original HF decoder layer module (Gemma3DecoderLayer)
-        layer_idx     : Optional index for logging/identification
-
-    Inputs:
-        (hidden_states, attention_mask, cos_global, sin_global, cos_local, sin_local, cache_position, control_classes, labels)
-
-    Outputs:
-        (hidden_states', attention_mask, cos_global, sin_global, cos_local, sin_local, cache_position, control_classes, labels)
-    """
-
-    def __init__(self, module_loader, orig, layer_idx=None):
-        super().__init__()
-        self.orig = orig
-        self.layer_idx = layer_idx
-        module_loader.load_state_dict_into_module(self)
-
-    def forward(self, inputs):
-        hidden_states, attention_mask, cos_global, sin_global, cos_local, sin_local, cache_position, control_classes, labels = inputs
-        return (
-            self.orig(
+            )[0]
+            return (
+                hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels
+            )
+        else:
+            if not isinstance(inputs, (tuple, list)) or len(inputs) != 9:
+                raise ValueError(
+                    "DecoderLayerPipe(require_local_rotary=True) expects 9-tuple: "
+                    "(hidden_states, attention_mask, cos, sin, cos_local, sin_local, cache_position, control_classes, labels)"
+                )
+            hidden_states, attention_mask, cos, sin, cos_local, sin_local, cache_position, control_classes, labels = inputs
+            hidden_states = self.orig(
                 hidden_states,
                 attention_mask=attention_mask,
-                position_embeddings_global=(cos_global, sin_global),
+                position_embeddings_global=(cos, sin),
                 position_embeddings_local=(cos_local, sin_local),
                 cache_position=cache_position,
-            )[0],
-            attention_mask, cos_global, sin_global, cos_local, sin_local, cache_position, control_classes, labels,
-        )
+            )[0]
+            return (
+                hidden_states, attention_mask, cos, sin, cos_local, sin_local, cache_position, control_classes, labels
+            )
