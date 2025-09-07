@@ -1,149 +1,41 @@
-from deepspeed.runtime.pipe.module import LayerSpec
+"""
+Model factory utilities.
+
+Provides functions to:
+- Patch BitsAndBytes CUDA path to safely move 4-bit tensors across devices
+- Detect model_type and instantiate base HF models (optionally 4-bit)
+- Parse layers_to_transform
+- Build LoRA configuration and apply LoRA adapters
+- Configure full fine-tuning parameter selection
+"""
 from peft import LoraConfig, get_peft_model
-import bitsandbytes
 import json
-import optimi
 import os
 import torch
 
 import transformers
 
-from constants import (
-    DEFAULT_BETA1,
-    DEFAULT_BETA2,
-    DEFAULT_EPS
+from models.causal_lm import (
+    CohereForCausalLmPipe,
+    Cohere2ForCausalLmPipe,
+    Gemma2ForCausalLmPipe,
+    LlamaForCausalLmPipe,
+    MistralForCausalLmPipe,
+    MixtralForCausalLmPipe,
+    Qwen2ForCausalLmPipe,
+    Phi3ForCausalLmPipe,
+    Qwen3ForCausalLmPipe,
 )
-from models import causal_lm_models
-from pipeline import engine
-from utils.unsloth_checkpoint import unsloth_checkpoint
-from utils.utils import DTYPE_MAP, log_all
+from utils.utils import DTYPE_MAP
 
-# Utility functions
-def patch_bitsandbytes_cuda():
-    """Ugly hack to move quantized models from GPU to CPU, and back to GPU again without triggering re-quantization"""
-    bnb_cuda_old = bitsandbytes.nn.modules.Params4bit.cuda
-
-    def bnb_cuda_hijack(self, device):
-        if getattr(self, 'already_quantized', False):
-            self.data = self.data.to(device)
-            self.quant_state.to(device)
-            return self
-        self.already_quantized = True
-        return bnb_cuda_old(self, device)
-
-    bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
-
-def patch_decoder_layer_control_adapter(module):
-    """Create a new forward method that includes Control Adapter logic for DecoderLayerPipe."""
-
-    def control_adapter_forward(inputs):
-        hidden_states, attention_mask, cos, sin, cache_position, control_classes, labels, n_tokens = inputs
-
-        # Shift control_classes for causal LM: [control_classes[1:], 0_padding]
-        batch_size, seq_len = control_classes.shape
-        shift_control_classes = torch.cat([
-            control_classes[:, 1:],
-            torch.full((batch_size, 1), 0, device=control_classes.device, dtype=control_classes.dtype)
-        ], dim=1)
-
-        # Save input for residual computation
-        input_hidden_states = hidden_states
-
-        layer_output = module.orig(
-            hidden_states,
-            attention_mask=attention_mask,
-            position_embeddings=(cos, sin),
-            cache_position=cache_position
-        )[0]
-        torch_result_dtype = layer_output.dtype
-
-        # Compute residual delta, apply optional dropout, then cast to adapter dtype
-        layer_delta = layer_output - input_hidden_states
-        x = module.control_dropout(layer_delta).to(module.control_Q.dtype)
-
-        # Project to adapter subspace via Q (semi-orthogonal columns: Q^T Q ≈ I_r)
-        x_q = x @ module.control_Q  # [batch_size, seq_len, adapter_rank]
-
-        # Per-rank eigenvalue offsets in the Q-subspace using a log-parameterization:
-        # λ = exp(S) - 1, so 1 + λ = exp(S) > 0 and the forward operator is I + diag(λ)
-        lambda_pos_coeff = torch.expm1(module.control_S)  # [adapter_rank]
-
-        # Exact inverse for the -1 branch (exact if Q is orthonormal; otherwise approximate):
-        # (I + Q diag(λ) Q^T)^{-1} - I = -Q diag(λ/(1+λ)) Q^T
-        # Identity: λ' = -λ/(1+λ) = exp(-S) - 1
-        lambda_neg_coeff = torch.expm1(-module.control_S)  # [adapter_rank]
-
-        # +1 class delta: Q diag(λ) Q^T x
-        out_pos = ((x_q * lambda_pos_coeff) @ module.control_Q.T)  # [batch_size, seq_len, hidden_size]
-
-        # -1 class delta (exact inverse): Q diag(λ') Q^T x
-        out_neg = ((x_q * lambda_neg_coeff) @ module.control_Q.T)  # [batch_size, seq_len, hidden_size]
-
-        # Select +1 branch where class==1; otherwise use inverse branch (class -1)
-        class1_mask = (shift_control_classes == 1).unsqueeze(-1)  # broadcast to [batch_size, seq_len, 1]
-        adapter_output = torch.where(class1_mask, out_pos, out_neg)  # [batch_size, seq_len, hidden_size]
-
-        # 0 class: zero-out (no loss; labels = -100)
-        class0_mask = (shift_control_classes == 0).unsqueeze(-1)  # broadcast to [batch_size, seq_len, 1]
-        adapter_output = torch.where(class0_mask, torch.zeros_like(adapter_output), adapter_output)  # [batch_size, seq_len, hidden_size]
-
-        # Cast adapter contribution back to original dtype and add to the residual stream
-        result = layer_output + adapter_output.to(torch_result_dtype)
-
-        return (result, attention_mask, cos, sin, cache_position, control_classes, labels, n_tokens)
-
-    return control_adapter_forward
-
-def get_model_type(config):
-    """Extract model type from model config."""
+def create_model(config, trust_remote_code=False):
+    """
+    Create the base transformer model with appropriate quantization for training mode.
+    """
     with open(os.path.join(config['model_dir'], 'config.json')) as f:
         model_config = json.load(f)
-        return model_config.get('model_type', 'llama')
+        model_type = model_config.get('model_type', 'llama')
 
-def parse_layers_to_transform(config):
-    """Parse layers_to_transform config into list of layer numbers."""
-    layers_to_transform = []
-    if layers_spec := config.get('layers_to_transform', None):
-        parts = layers_spec.split(',')
-        for part in parts:
-            start, stop = part.split(':')
-            layers_to_transform.extend(range(int(start), int(stop) + 1))
-    return layers_to_transform
-
-# Optimizer and scheduler functions
-def get_optimizer(model_parameters, config):
-    """Create optimizer with configuration from config.
-
-    Do NOT use AdamW or set the 'weight_decay' parameter:
-    - We do our own "LoRA-specific" decoupled weight decay on the composite matrix AB now.
-    - Full fine-tuning always uses bfloat16 and weight decay will underflow due to catastrophic cancellation.
-
-    By default, optimi will automatically use Kahan summation for any layers training in low precision.
-    """
-    optimizer_kwargs = {
-        "params": model_parameters,
-        "lr": config['lr'],
-        "betas": (config.get('beta1', DEFAULT_BETA1), config.get('beta2', DEFAULT_BETA2)),
-        "eps": config.get('eps', DEFAULT_EPS)
-    }
-    return optimi.Adam(**optimizer_kwargs)
-
-def get_lr_scheduler(optimizer, config):
-    """Create learning rate scheduler with RMS ratio scaling.
-
-    This is similar to RAdam (https://arxiv.org/abs/1908.03265), but using a scheduler instead.
-    See: https://github.com/tdrussell/qlora-pipe/pull/35#issuecomment-2495460307
-    """
-    beta = config.get('beta2', DEFAULT_BETA2)
-
-    def rms_ratio_fn(step):
-        return torch.sqrt(torch.tensor((1 - beta ** step) / (1 + beta ** step))).item()
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=rms_ratio_fn)
-
-# Model creation functions
-def create_model(config, model_type, trust_remote_code=False):
-    """Create the base transformer model with appropriate quantization."""
     if config.get('full_fine_tune', False) or not config.get('load_in_4bit', False):
         quantization_config = None
     else:
@@ -152,96 +44,131 @@ def create_model(config, model_type, trust_remote_code=False):
             no_quant_modules.append('gate')
         quantization_config = transformers.BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,  # Always use bfloat16 for QLoRA fine-tuning regardless
+            bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_quant_type="nf4",
             llm_int8_skip_modules=no_quant_modules,
         )
 
-    if model_type == 'llama':
-        model = causal_lm_models.LlamaForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
-    elif model_type == 'mistral' or model_type == 'mistral3':
-        model = causal_lm_models.MistralForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
-    elif model_type == 'mixtral':
-        model = causal_lm_models.MixtralForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
-    elif model_type == 'qwen2':
-        model = causal_lm_models.Qwen2ForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
-    elif model_type == 'qwen3':
-        model = causal_lm_models.Qwen3ForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
-    elif model_type == 'phi3':
-        model = causal_lm_models.Phi3ForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
-    elif model_type == 'cohere':
-        model = causal_lm_models.CohereForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
+    if model_type == 'cohere':
+        model = CohereForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
     elif model_type == 'cohere2':
-        model = causal_lm_models.Cohere2ForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
+        model = Cohere2ForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
     elif model_type == 'gemma2':
-        model = causal_lm_models.Gemma2ForCausalLMPipe(
-            config,
-            quantization_config=quantization_config,
-            trust_remote_code=trust_remote_code
-        )
+        model = Gemma2ForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
+    elif model_type == 'llama':
+        model = LlamaForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
+    elif model_type == 'mistral' or model_type == 'mistral3':
+        model = MistralForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
+    elif model_type == 'mixtral':
+        model = MixtralForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
+    elif model_type == 'phi3':
+        model = Phi3ForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
+    elif model_type == 'qwen2':
+        model = Qwen2ForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
+    elif model_type == 'qwen3':
+        model = Qwen3ForCausalLmPipe(config, quantization_config=quantization_config, trust_remote_code=trust_remote_code)
     else:
         raise NotImplementedError()
 
     return model
 
-def create_pipeline_model(model, config):
-    """Create pipeline model from base model for distributed training."""
-    # The "primary" layers of the model must have 'decoderlayer' in their name for activation checkpointing to work
-    layers = model.to_layer_specs()
-    checkpointable_layers = set()
-    for layer in layers:
-        if isinstance(layer, LayerSpec) and 'decoderlayer' in layer.typename.__name__.lower():
-            checkpointable_layers.add(layer.typename.__name__)
-    checkpointable_layers = list(checkpointable_layers)
+def parse_layers_to_transform(config):
+    """
+    Parse a compact 'layers_to_transform' string into a list of layer indices.
 
-    pipeline_model = engine.CustomPipelineModule(
-        layers=layers,
-        num_stages=config.get('pipeline_stages', 1),
-        activation_checkpoint_interval=1,
-        checkpointable_layers=checkpointable_layers,
-        activation_checkpoint_func=unsloth_checkpoint,
-        partition_method='estimated_size',
-        use_column_major_topology=config.get('use_column_major_topology', False)
-    )
+    Expected format in config: "start1:stop1,start2:stop2,..."
+    Example: "0:3,10:12" -> [0,1,2,3,10,11,12]
 
-    return pipeline_model
+    Args:
+        config (dict): Configuration with optional 'layers_to_transform' string.
 
-# Training configuration functions
+    Returns:
+        list[int]: Expanded list of layer indices (possibly empty).
+    """
+    layers_to_transform = []
+    if layers_spec := config.get('layers_to_transform', None):
+        parts = layers_spec.split(',')
+        for part in parts:
+            start, stop = part.split(':')
+            layers_to_transform.extend(range(int(start), int(stop) + 1))
+    return layers_to_transform
+
+def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
+    """
+    Set requires_grad for parameters to enable full fine-tuning with optional scoping.
+
+    Behavior:
+        - Assign 'original_name' to parameters that don't have it (preserve HF names if present)
+        - Enable training for all parameters by default
+        - If target_modules is provided, only parameters whose names contain any target string are trained
+        - If layers_to_transform is provided, restrict to selected transformer layers
+
+    Args:
+        model (torch.nn.Module): Pipeline model whose parameters to mark as trainable.
+        config (dict): Unused here; kept for symmetry and future extension.
+        target_modules (Optional[list[str]]): Substrings of parameter names that should be trainable.
+        layers_to_transform (Optional[list[int]]): Specific transformer layer indices to train.
+    """
+    # Preserve existing original_name (from HF) if present; set only when missing
+    for name, p in model.named_parameters():
+        if not hasattr(p, 'original_name'):
+            p.original_name = name
+
+    for name, p in model.named_parameters():
+        should_train = True
+        if target_modules and not any(target in name for target in target_modules):
+            should_train = False
+            # log_all(f'not training {name} because it is not present in target_modules')
+        elif layers_to_transform and 'model.layers.' in name:
+            layer_idx = int(name.split('model.layers.')[1].split('.')[0])
+            if layer_idx not in layers_to_transform:
+                should_train = False
+                # log_all(f'not training {name} because layer {layer_idx} is not in layers_to_transform')
+        p.requires_grad = should_train
+
+    # Fail-fast validation: if using tied layers (FFT with tied embeddings), both ends must be trainable.
+    # DeepSpeed will all_reduce weight.grad for tied parameters; a frozen end (grad=None) would crash.
+    tied_param_ids = set()
+    # PipelineModule sets these only if TiedLayerSpec was used
+    has_ties = hasattr(model, 'tied_modules') and hasattr(model, 'tied_weight_attrs') and len(model.tied_modules) > 0
+    if has_ties:
+        # Gather tied parameters present on this stage
+        for key, tied_module in model.tied_modules.items():
+            weight_attrs = model.tied_weight_attrs.get(key, [])
+            for attr_name in weight_attrs:
+                try:
+                    # Recursive getattr matches DS internal logic
+                    tied_param = model._recursive_getattr(tied_module, attr_name)
+                    tied_param_ids.add(id(tied_param))
+                except Exception:
+                    pass
+
+        # Validate that all tied params are trainable on this stage
+        for pname, p in model.named_parameters():
+            if id(p) in tied_param_ids and not p.requires_grad:
+                raise ValueError(
+                    f'Full fine-tuning with tied embeddings requires training all tied weights. '
+                    f'Parameter "{pname}" is frozen by your target_modules/layers_to_transform selection. '
+                    f'Please include both the embedding and the lm_head in training or remove the restriction.'
+                )
 
 def create_lora_config(config, target_modules, layers_to_transform):
-    """Create LoRA configuration."""
+    """
+    Build a PEFT LoRA configuration compatible with this training setup.
+
+    Behavior:
+        - If target_modules is an empty list (Control Adapters path), we pass a dummy 'none'
+          value to peft for compatibility, then reset to [] afterward.
+        - Otherwise, use 'all-linear' when target_modules is None to target all linear modules.
+
+    Args:
+        config (dict): Must include 'lora_rank' and optional 'lora_dropout'.
+        target_modules (Optional[list[str]]): Specific module name substrings or None/'all-linear'.
+        layers_to_transform (Optional[list[int]]): Subset of transformer layers to target.
+
+    Returns:
+        peft.LoraConfig: Config object to be used by get_peft_model or Control Adapters.
+    """
     # Handle empty list case for Control Adapters
     use_dummy_target = target_modules == []
     actual_target_modules = ['none'] if use_dummy_target else (target_modules if target_modules else 'all-linear')
@@ -262,7 +189,20 @@ def create_lora_config(config, target_modules, layers_to_transform):
     return lora_config
 
 def apply_lora_adapters(model, config, lora_config):
-    """Apply LoRA configuration to model."""
+    """
+    Apply LoRA configuration to the base HF model via PEFT and fix trainable dtypes.
+
+    Steps:
+        - Wrap model with PEFT using lora_config
+        - Cast trainable parameters to desired dtype as per config['lora_weight_dtype']
+        - Disable KV cache for training
+        - Set 'original_name' on parameters to support custom saving flows
+
+    Args:
+        model (transformers.PreTrainedModel): Base model to wrap with PEFT.
+        config (dict): Training configuration containing 'lora_weight_dtype'.
+        lora_config (peft.LoraConfig): LoRA configuration.
+    """
     lora_model = get_peft_model(model, lora_config)
     # If the underlying weights are floats, the lora weights have already been
     # cast to the same dtype, so we need to change the dtype here.
@@ -273,125 +213,3 @@ def apply_lora_adapters(model, config, lora_config):
     lora_model.model.config.use_cache = False
     for name, p in lora_model.named_parameters():
         p.original_name = name
-
-def apply_control_adapters(model, config, lora_config):
-    """Apply Control Adapters using the LoraConfig object."""
-    layers_to_transform = lora_config.layers_to_transform
-    adapter_rank = lora_config.r
-    adapter_dropout_p = lora_config.lora_dropout
-
-    for name, module in model.named_modules():
-        if 'decoderlayerpipe' in module.__class__.__name__.lower():
-            layer_idx = module.layer_idx
-            should_transform = (layers_to_transform is None or layer_idx in layers_to_transform)
-
-            if should_transform:
-                device = next(module.orig.parameters()).device
-                hidden_size = module.orig.hidden_size
-
-                # Add dropout
-                module.control_dropout = torch.nn.Dropout(p=adapter_dropout_p) if adapter_dropout_p > 0 else torch.nn.Identity()
-                module.control_dropout = module.control_dropout.to(device)
-
-                # Create Control Adapter parameters
-                module.control_Q = torch.nn.Parameter(torch.empty(hidden_size, adapter_rank, device=device))
-                module.control_S = torch.nn.Parameter(torch.empty(adapter_rank, device=device))
-
-                # Add original_name for saving compatibility
-                module.control_Q.original_name = f"base_model.model.model.layers.{layer_idx}.control_Q"
-                module.control_S.original_name = f"base_model.model.model.layers.{layer_idx}.control_S"
-
-                # Initialize
-                torch.nn.init.orthogonal_(module.control_Q)
-                torch.nn.init.zeros_(module.control_S)
-
-                # Cast to the desired dtype
-                lora_weight_dtype = DTYPE_MAP[config.get('lora_weight_dtype', 'float32')]
-                module.control_Q.data = module.control_Q.data.to(lora_weight_dtype)
-                module.control_S.data = module.control_S.data.to(lora_weight_dtype)
-
-                # Replace forward with Control Adapter version
-                module.forward = patch_decoder_layer_control_adapter(module)
-
-    # Set original_name for all parameters (for saving compatibility)
-    for name, p in model.named_parameters():
-        if not hasattr(p, 'original_name'):
-            p.original_name = name
-
-    # Disable gradients for all base model parameters, enable only for Control Adapters
-    for name, p in model.named_parameters():
-        if 'control_Q' in name or 'control_S' in name:
-            p.requires_grad = True
-        else:
-            p.requires_grad = False
-
-def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
-    """Setup full fine-tuning by setting requires_grad on parameters."""
-    for name, p in model.named_parameters():
-        p.original_name = name
-
-    for name, p in model.named_parameters():
-        should_train = True
-        if target_modules and not any(target in name for target in target_modules):
-            should_train = False
-            # log_all(f'not training {name} because it is not present in target_modules')
-        elif layers_to_transform and 'model.layers.' in name:
-            layer_idx = int(name.split('model.layers.')[1].split('.')[0])
-            if layer_idx not in layers_to_transform:
-                should_train = False
-                # log_all(f'not training {name} because layer {layer_idx} is not in layers_to_transform')
-        p.requires_grad = should_train
-
-# Main setup function
-def setup_model_and_engine(config, args):
-    """Complete model setup including LoRA/full fine-tuning and engine initialization."""
-    patch_bitsandbytes_cuda()
-
-    # Create model and pipeline
-    model_type = get_model_type(config)
-    model = create_model(config, model_type, trust_remote_code=args.trust_remote_code)
-
-    # Disable KV cache for all training modes
-    if hasattr(model, "config"):
-        model.config.use_cache = False
-
-    # Setup training adapters
-    target_modules = config.get('target_modules', None)
-    layers_to_transform = parse_layers_to_transform(config)
-
-    if config.get('full_fine_tune', False):
-        lora_config = None
-        pipeline_model = create_pipeline_model(model, config)
-        configure_full_fine_tuning(pipeline_model, config, target_modules, layers_to_transform)  # Apply to pipeline_model
-    elif config.get('use_control_adapters', False):
-        assert not target_modules, "Control Adapters don't use target_modules - they apply to entire decoder layers"
-        lora_config = create_lora_config(config, [], layers_to_transform)
-        pipeline_model = create_pipeline_model(model, config)
-        apply_control_adapters(pipeline_model, config, lora_config)  # Apply to pipeline_model
-    else:
-        lora_config = create_lora_config(config, target_modules, layers_to_transform)
-        apply_lora_adapters(model, config, lora_config)  # Apply to base model (PEFT wraps HF modules)
-        pipeline_model = create_pipeline_model(model, config)  # Build the pipeline AFTER PEFT wrapping
-
-    parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
-
-    model_engine, optimizer = engine.initialize(
-        config=config,
-        args=args,
-        model=pipeline_model,
-        model_parameters=parameters_to_train,
-        optimizer=lambda params: get_optimizer(params, config),
-    )
-
-    if lora_config is None:
-        weight_dtype = torch.bfloat16  # Always use bfloat16 for full fine-tuning regardless
-    else:
-        weight_dtype = DTYPE_MAP[config.get('lora_weight_dtype', 'float32')]
-
-    model_engine.communication_data_type = weight_dtype
-
-    # Handle Deepspeed optimizer wrapper (e.g. BF16_Optimizer)
-    optimizer = getattr(optimizer, 'optimizer', optimizer)
-    model_engine.lr_scheduler = get_lr_scheduler(optimizer, config)
-
-    return model_engine, pipeline_model, lora_config, optimizer

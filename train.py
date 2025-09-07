@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 import argparse
 import deepspeed
 import glob
-import math
 import os
 import shutil
 import sys
@@ -11,10 +10,10 @@ import toml
 import transformers
 
 from constants import DEEPSPEED_TIMEOUT_HOURS
-from pipeline import dataloader
-from training.model_factory import setup_model_and_engine
+from training import dataloader
+from training.dataset_builder import DatasetBuilder
+from training.engine import Engine
 from training.trainer import Trainer
-from utils.dataset_utils import load_datasets
 from utils.utils import is_main_process
 
 parser = argparse.ArgumentParser()
@@ -74,52 +73,45 @@ if __name__ == '__main__':
         local_files_only=True,
         model_max_length=sys.maxsize,
         add_prefix_space=args.add_prefix_space,
-        trust_remote_code=args.trust_remote_code,
+        trust_remote_code=args.trust_remote_code
     )
 
     # Load, convert and split the datasets
-    train_data, eval_data = load_datasets(config, tokenizer, run_dir)
+    train_data, eval_data = DatasetBuilder(config, tokenizer, run_dir).build()
 
     # Setup model and training engine
-    model_engine, pipeline_model, lora_config, optimizer = setup_model_and_engine(config, args)
+    engine = Engine(config, args)
+    pipeline_engine = engine.pipeline_engine
 
     # Create training dataloader with data parallelism and gradient accumulation
     train_dataloader = dataloader.PipelineDataLoader(
         train_data,
-        model_engine.train_micro_batch_size_per_gpu(),
-        model_engine.gradient_accumulation_steps(),
-        model_engine.grid.get_data_parallel_world_size(),
-        model_engine.grid.get_data_parallel_rank(),
+        pipeline_engine.train_micro_batch_size_per_gpu(),
+        pipeline_engine.gradient_accumulation_steps(),
+        pipeline_engine.grid.get_data_parallel_world_size(),
+        pipeline_engine.grid.get_data_parallel_rank()
     )
 
-    # Get the (optional) separate evaluation gradient accumulation setting
-    eval_gradient_accumulation_steps = config.get(
-        'eval_gradient_accumulation_steps',
-        config.get('gradient_accumulation_steps', 1)
-    )
-
-    # Create evaluation dataloader with evaluation gradient accumulation setting and no shuffling
+    # Create evaluation dataloader with gradient_accumulation_steps=1
     eval_dataloader = dataloader.PipelineDataLoader(
         eval_data,
-        model_engine.train_micro_batch_size_per_gpu(),
-        eval_gradient_accumulation_steps,
-        model_engine.grid.get_data_parallel_world_size(),
-        model_engine.grid.get_data_parallel_rank(),
-        shuffle=False,
+        pipeline_engine.train_micro_batch_size_per_gpu(),
+        1,
+        pipeline_engine.grid.get_data_parallel_world_size(),
+        pipeline_engine.grid.get_data_parallel_rank()
     )
 
     # Initialize trainer
     trainer = Trainer(
         config=config,
-        model_engine=model_engine,
+        pipeline_engine=pipeline_engine,
         train_dataloader=train_dataloader,
         eval_dataloader=eval_dataloader,
         run_dir=run_dir,
-        pipeline_model=pipeline_model,
+        pipeline_model=engine.pipeline_model,
         args=args,
-        lora_config=lora_config,
-        optimizer=optimizer,
-        eval_gradient_accumulation_steps=eval_gradient_accumulation_steps,
+        lora_config=engine.lora_config,
+        optimizer=engine.optimizer,
         resume_from_checkpoint=args.resume_from_checkpoint
     )
 

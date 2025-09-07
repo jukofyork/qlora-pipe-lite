@@ -3,21 +3,60 @@ import torch
 
 from constants import DEFAULT_CONTROL_ADAPTER_GAMMA
 
-class RegularizationManager:
-    """Handles regularization for LoRA and Control Adapter parameters."""
+class Regularizer:
+    """
+    Handles regularization for LoRA and Control Adapter parameters.
 
-    def __init__(self, model_engine):
-        self.model_engine = model_engine
+    Behavior:
+    - Apply analytic, in-place regularization updates for LoRA or Control Adapters
+    - Compute per-rank statistics (norms, residuals, decay deltas)
+    - Aggregate statistics across pipeline stages via DeepSpeed collectives
+
+    Usage:
+    - Call apply_regularization(model, config, lr) once per training step
+    - Path selection is based on config['use_control_adapters']
+    - Returns a dict of aggregated metrics (avg/min/max) per key
+    """
+
+    def __init__(self, pipeline_engine):
+        """
+        Initialize with the model engine (for device and pipeline reductions).
+        """
+        self.pipeline_engine = pipeline_engine
 
     def apply_regularization(self, model, config, lr):
-        """Apply regularization to LoRA or Control Adapter parameters and return aggregated statistics."""
-        if config.get('use_control_adapters', False):
-            local_stats = self._apply_control_adapter_regularization_local(model, config, lr)
+        """Apply regularization to LoRA or Control Adapter parameters and return aggregated statistics.
+
+        Behavior:
+            - If config['use_control_adapters'] is True, applies control adapter regularization
+              (orthogonality maintenance on Q and L2 shrinkage on S in log-space).
+            - Otherwise, applies LoRA regularization (L2 on composite W = B·A).
+            - Local stats are computed and then aggregated across pipeline stages.
+
+        Returns:
+            dict[str, float]: Global summary metrics containing avg/min/max for each reported key.
+        """
+        use_control_adapters = config.get('use_control_adapters', False)
+        lora_weight_decay = config.get('lora_weight_decay', 0.0)
+
+        if use_control_adapters:
+            gamma = config.get('control_adapter_gamma', DEFAULT_CONTROL_ADAPTER_GAMMA)
+            local_stats = self._apply_control_adapter_regularization_local(
+                model=model,
+                lr=lr,
+                gamma=gamma,
+                lora_weight_decay=lora_weight_decay,
+            )
         else:
-            local_stats = self._apply_lora_regularization_local(model, config, lr)
+            local_stats = self._apply_lora_regularization_local(
+                model=model,
+                lr=lr,
+                lora_weight_decay=lora_weight_decay,
+            )
+
         return self._aggregate_statistics(local_stats)
 
-    def _apply_lora_regularization_local(self, model, config, lr):
+    def _apply_lora_regularization_local(self, model, lr, lora_weight_decay):
         """Apply L2 regularization to the composite matrix W = B·A using L = ½||W||_F².
 
         Returns:
@@ -33,7 +72,6 @@ class RegularizationManager:
         norms = []
         weight_decay = []
 
-        lora_weight_decay = config.get('lora_weight_decay', 0.0)
         assert lora_weight_decay >= 0, f"lora_weight_decay ({lora_weight_decay}) must be >= 0"
 
         for name, param in model.named_parameters():
@@ -82,17 +120,17 @@ class RegularizationManager:
 
         # Convert to tensors, handling empty case
         if len(norms) > 0:
-            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.model_engine.device)
+            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.pipeline_engine.device)
         else:
-            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
 
         # Only return weight decay if regularization was applied
         if lora_weight_decay > 0:
             # Convert to tensors, handling empty case
             if len(weight_decay) > 0:
-                weight_decay_tensor = torch.tensor(weight_decay, dtype=torch.float32, device=self.model_engine.device)
+                weight_decay_tensor = torch.tensor(weight_decay, dtype=torch.float32, device=self.pipeline_engine.device)
             else:
-                weight_decay_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+                weight_decay_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
             return {
                 'norms': norms_tensor,
                 'weight_decay': weight_decay_tensor
@@ -102,7 +140,7 @@ class RegularizationManager:
                 'norms': norms_tensor
             }
 
-    def _apply_control_adapter_regularization_local(self, model, config, lr):
+    def _apply_control_adapter_regularization_local(self, model, lr, gamma, lora_weight_decay):
         """Apply orthogonality regularization to Q and weight decay to S.
 
         - Q orthogonality : Newton step (full or partial) to maintain Q^T Q ≈ I.
@@ -138,11 +176,9 @@ class RegularizationManager:
         orthogonality = []
         weight_decay = []
 
-        gamma = config.get('control_adapter_gamma', DEFAULT_CONTROL_ADAPTER_GAMMA)
         assert gamma > 0, f"control_adapter_gamma ({gamma}) must be > 0 to maintain semi-orthogonality"
         assert gamma <= 0.5, f"control_adapter_gamma ({gamma}) must be <= 0.5 to avoid overshooting"
 
-        lora_weight_decay = config.get('lora_weight_decay', 0.0)
         assert lora_weight_decay >= 0, f"lora_weight_decay ({lora_weight_decay}) must be >= 0"
 
         identity_matrix = None
@@ -210,23 +246,23 @@ class RegularizationManager:
 
         # Convert to tensors, handling empty case
         if len(orthogonality) > 0:
-            orthogonality_tensor = torch.tensor(orthogonality, dtype=torch.float32, device=self.model_engine.device)
+            orthogonality_tensor = torch.tensor(orthogonality, dtype=torch.float32, device=self.pipeline_engine.device)
         else:
-            orthogonality_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+            orthogonality_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
 
         # Convert to tensors, handling empty case
         if len(norms) > 0:
-            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.model_engine.device)
+            norms_tensor = torch.tensor(norms, dtype=torch.float32, device=self.pipeline_engine.device)
         else:
-            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+            norms_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
 
         # Only return weight decay if regularization was applied
         if lora_weight_decay > 0:
             # Convert to tensors, handling empty case
             if len(weight_decay) > 0:
-                weight_decay_tensor = torch.tensor(weight_decay, dtype=torch.float32, device=self.model_engine.device)
+                weight_decay_tensor = torch.tensor(weight_decay, dtype=torch.float32, device=self.pipeline_engine.device)
             else:
-                weight_decay_tensor = torch.empty(0, dtype=torch.float32, device=self.model_engine.device)
+                weight_decay_tensor = torch.empty(0, dtype=torch.float32, device=self.pipeline_engine.device)
             return {
                 'norms': norms_tensor,
                 'orthogonality': orthogonality_tensor,
@@ -239,25 +275,37 @@ class RegularizationManager:
             }
 
     def _aggregate_statistics(self, local_stats):
-        """Aggregate LoRA and Control Adapter statistics across pipeline stages and compute global statistics."""
+        """Aggregate LoRA and Control Adapter statistics across pipeline stages and compute global statistics.
+
+        Reductions:
+            - If pipeline parallelism is enabled, SUM/MIN/MAX are computed across pipe stages
+            - Empty tensors contribute neutral elements via sentinels for MIN/MAX
+
+        Output:
+            For each key in local_stats (e.g., 'norms', 'orthogonality', 'weight_decay'),
+            returns three scalar entries:
+                - '{key}_avg'
+                - '{key}_min'
+                - '{key}_max'
+        """
         global_stats = {}
 
         for key, tensor in local_stats.items():
             if tensor.numel() > 0:
-                count = torch.tensor(tensor.numel(), dtype=torch.float32, device=self.model_engine.device)
+                count = torch.tensor(tensor.numel(), dtype=torch.float32, device=self.pipeline_engine.device)
                 sum_val = torch.sum(tensor)
                 min_val = torch.min(tensor)
                 max_val = torch.max(tensor)
             else:
-                count = torch.tensor(0.0, dtype=torch.float32, device=self.model_engine.device)
-                sum_val = torch.tensor(0.0, dtype=torch.float32, device=self.model_engine.device)
+                count = torch.tensor(0.0, dtype=torch.float32, device=self.pipeline_engine.device)
+                sum_val = torch.tensor(0.0, dtype=torch.float32, device=self.pipeline_engine.device)
                 # Use sentinels so MIN/MAX reductions ignore empty ranks
-                min_val = torch.tensor(float('inf'), dtype=torch.float32, device=self.model_engine.device)
-                max_val = torch.tensor(float('-inf'), dtype=torch.float32, device=self.model_engine.device)
+                min_val = torch.tensor(float('inf'), dtype=torch.float32, device=self.pipeline_engine.device)
+                max_val = torch.tensor(float('-inf'), dtype=torch.float32, device=self.pipeline_engine.device)
 
             # Aggregate across pipeline stages if using pipeline parallelism
-            if self.model_engine.is_pipe_parallel:
-                pp_group = self.model_engine.grid.get_pipe_parallel_group()
+            if self.pipeline_engine.is_pipe_parallel:
+                pp_group = self.pipeline_engine.grid.get_pipe_parallel_group()
                 dist.all_reduce(count, op=dist.ReduceOp.SUM, group=pp_group)
                 dist.all_reduce(sum_val, op=dist.ReduceOp.SUM, group=pp_group)
                 dist.all_reduce(min_val, op=dist.ReduceOp.MIN, group=pp_group)
@@ -273,7 +321,6 @@ class RegularizationManager:
                 global_min = 0
                 global_max = 0
 
-            # Store in output dictionary with descriptive names
             global_stats[f'{key}_avg'] = global_avg
             global_stats[f'{key}_min'] = global_min
             global_stats[f'{key}_max'] = global_max

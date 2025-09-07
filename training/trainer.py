@@ -1,27 +1,63 @@
-from deepspeed import comm as dist
 from torch.utils.tensorboard import SummaryWriter
+import deepspeed
 import gc
+import glob
+import os
+import shutil
 import time
 import torch
 
+from huggingface_hub import save_torch_state_dict
+
 from constants import (
-    DEFAULT_CONTROL_ADAPTER_GAMMA,
     DEFAULT_CHECKPOINT_INTERVAL_HOURS,
     DEFAULT_MAX_CHECKPOINTS,
-    DEFAULT_EVALS_PER_EPOCH
+    DEFAULT_EVALS_PER_EPOCH,
 )
-from training.checkpoint_manager import load_checkpoint, save_checkpoint, prune_checkpoints
-from training.model_saver import save_lora, save_full_model
-from training.regularization_manager import RegularizationManager
-from utils.utils import is_main_process, log
+from training.regularizer import Regularizer
+from utils.utils import is_main_process, log, seconds_to_time_str, safe_rmtree
 
 class Trainer:
-    """Handles the main training loop, evaluation, checkpointing, and model saving."""
+    """
+    Orchestrates training with a DeepSpeed pipeline engine.
+
+    Behavior:
+    - Runs the main training loop across global steps (epoch is derived from steps)
+    - Evaluates periodically within each epoch
+    - Saves checkpoints (time-based and epoch-boundary) with pruning
+    - Saves full model or LoRA adapters
+    - Logs metrics to TensorBoard (rank-0 only)
+    - Applies optional adapter-specific regularization
+
+    Parameters:
+        config                 : Dict-like configuration.
+        pipeline_engine        : DeepSpeed pipeline engine.
+        train_dataloader       : PipelineDataLoader for training.
+        eval_dataloader        : PipelineDataLoader for evaluation (GAS=1 recommended).
+        run_dir                : Directory for checkpoints and logs.
+        pipeline_model         : Model reference for saving/regularization.
+        args                   : Arbitrary arguments namespace.
+        lora_config            : Optional LoRA configuration.
+        optimizer              : Optimizer instance.
+        resume_from_checkpoint : If True, resume from the latest checkpoint.
+
+    Attributes:
+        model_dir                 : Output model directory from config.
+        epochs                    : Total number of training epochs.
+        checkpoint_interval_hours : Minimum hours between checkpoints.
+        max_checkpoints           : Max number of checkpoints retained.
+        tb_writer                 : TensorBoard SummaryWriter (rank-0 only) or None.
+        last_checkpoint_time      : Timestamp of the last checkpoint (rank-0 only) or None.
+        regularizer               : Adapter-specific regularization helper.
+        steps_per_epoch           : Optimizer steps per epoch.
+        total_steps               : Total global training steps across all epochs.
+        eval_step_indices         : Global step indices where evaluation is triggered.
+    """
 
     def __init__(
         self,
         config,
-        model_engine,
+        pipeline_engine,
         train_dataloader,
         eval_dataloader,
         run_dir,
@@ -29,11 +65,10 @@ class Trainer:
         args,
         lora_config,
         optimizer,
-        eval_gradient_accumulation_steps,
-        resume_from_checkpoint=False
+        resume_from_checkpoint=False,
     ):
         self.config = config
-        self.model_engine = model_engine
+        self.pipeline_engine = pipeline_engine
         self.train_dataloader = train_dataloader
         self.eval_dataloader = eval_dataloader
         self.run_dir = run_dir
@@ -43,114 +78,162 @@ class Trainer:
         self.optimizer = optimizer
         self.resume_from_checkpoint = resume_from_checkpoint
 
-        # Extract config values with defaults
         self.model_dir = config['model_dir']
         self.epochs = config.get('epochs', 1)
-        self.eval_gradient_accumulation_steps = eval_gradient_accumulation_steps
         self.checkpoint_interval_hours = config.get('checkpoint_interval_hours', DEFAULT_CHECKPOINT_INTERVAL_HOURS)
         self.max_checkpoints = config.get('max_checkpoints', DEFAULT_MAX_CHECKPOINTS)
 
         self.tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
         self.last_checkpoint_time = time.time() if is_main_process() else None
 
-        # Initialize regularization manager
-        self.regularization_manager = RegularizationManager(model_engine)
+        self.regularizer = Regularizer(pipeline_engine)
 
-        # Calculate and set total training steps
-        model_engine.set_dataloader(train_dataloader)
-        steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
-        model_engine.total_steps = steps_per_epoch * self.epochs
+        pipeline_engine.set_dataloader(train_dataloader)
 
-        # Calculate evaluation step indices per epoch
+        training_steps = len(train_dataloader)
+        if training_steps == 0:
+            raise RuntimeError('Training dataloader has no data after truncation')
+
+        steps_per_epoch = training_steps // pipeline_engine.gradient_accumulation_steps()
+        self.steps_per_epoch = steps_per_epoch
+        self.total_steps = self.steps_per_epoch * self.epochs
+
         evals_per_epoch = config.get('evals_per_epoch', DEFAULT_EVALS_PER_EPOCH)
-        self.eval_step_indices = self._calculate_eval_steps(steps_per_epoch, evals_per_epoch)
+        self.eval_step_indices = self._calculate_eval_steps(self.steps_per_epoch, evals_per_epoch)
 
     def train(self):
-        """Main training loop."""
+        """
+        Run the main training loop until total_steps are reached.
 
+        Workflow:
+        - Optionally resume from checkpoint and run initial evaluation
+        - For each training step:
+          * Clean up memory pressure on GPU
+          * Execute train_batch()
+          * Extract/broadcast loss and log metrics (loss, LR)
+          * Apply adapter regularization (if configured) and log stats
+          * Periodically evaluate based on precomputed step indices
+          * Checkpoint at epoch boundaries and optionally by time interval
+        """
         last_eval_loss = None
 
-        # Attempt to resume from checkpoint if requested
         if self.resume_from_checkpoint:
-            last_eval_loss = load_checkpoint(self.model_engine, self.train_dataloader, self.run_dir)
+            last_eval_loss = self._load_checkpoint()
 
-        # Fresh run or no checkpoint found, so run initial evaluation
         if last_eval_loss is None:
             last_eval_loss = self.evaluate()
-            if is_main_process():
-                self._print_eval_progress(last_eval_loss)
 
-        # Main training loop
-        current_epoch = self.train_dataloader.epoch
-        while self.train_dataloader.epoch <= self.epochs:
+        # Track timing from first step to avoid startup bias
+        start_step = self.pipeline_engine.global_steps
+        start_time = time.time()
+        last_print_time = start_time
+
+        prev_epoch = self.get_current_epoch()
+        while self.pipeline_engine.global_steps < self.total_steps:
             self._cleanup_memory()
 
             # Forward/backward pass and optimizer step
-            metrics = self.model_engine.train_batch()
-            self.train_dataloader.sync_epoch()
+            loss = self.pipeline_engine.train_batch()
+
+            # Current learning rate
+            learning_rate = self.optimizer.param_groups[0]['lr']
+
+            # Compute and log training loss (broadcast so rank-0 has the true loss)
+            train_loss_local = self._attempt_to_extract_loss(loss)
+            train_loss = self._broadcast_from_last_stage(train_loss_local)
+            self._write_train_step_metrics(train_loss, learning_rate)
+
+            # Custom progress logging
+            if is_main_process():
+                last_print_time = self._print_train_progress(
+                    start_time=start_time,
+                    start_step=start_step,
+                    last_print_time=last_print_time,
+                    train_loss=train_loss,
+                    learning_rate=learning_rate
+                )
 
             # Apply adapter-specific regularization and log statistics
             if self.lora_config is not None:
-                stats = self.regularization_manager.apply_regularization(
-                    self.pipeline_model,
-                    self.config,
-                    self.optimizer.param_groups[0]['lr']
-                )
-                for key, value in stats.items():
-                    self._write_scalar_metric(f'train/{key}', value)
-
-            # Log training metrics
-            self._write_metrics('train', metrics)
-            self._write_scalar_metric('train/lr', self.optimizer.param_groups[0]['lr'])
+                stats = self.regularizer.apply_regularization(self.pipeline_model, self.config, learning_rate)
+                self._write_regularizer_metrics(stats)
 
             # Periodic evaluation
-            if self.model_engine.global_steps in self.eval_step_indices:
-                loss = self.evaluate()
-                if is_main_process():
-                    self._print_eval_progress(loss, last_eval_loss)
-                last_eval_loss = loss
+            if self.pipeline_engine.global_steps in self.eval_step_indices:
+                eval_start_time = time.time()
+                last_eval_loss = self.evaluate(last_eval_loss)
+                dt = time.time() - eval_start_time
+                # Exclude evaluation time from next iter throughput and from elapsed/ETA
+                last_print_time += dt
+                start_time += dt
 
-            if self.train_dataloader.epoch > current_epoch:
-                # Always save a checkpoint at the start of each epoch
+            # Epoch boundary detection (based on global step)
+            current_epoch = self.get_current_epoch()
+            if current_epoch > prev_epoch:
                 self._checkpoint_if_needed(last_eval_loss, True)
-                self._save_model(f'epoch{current_epoch}')
-                current_epoch = self.train_dataloader.epoch
+                self._save_model(f'epoch{prev_epoch}')
+                prev_epoch = current_epoch
             else:
-                # Time-based checkpointing
                 self._checkpoint_if_needed(last_eval_loss)
 
         log('TRAINING COMPLETE!')
+        if is_main_process() and self.tb_writer is not None:
+            self.tb_writer.flush()
+            self.tb_writer.close()
 
-    def evaluate(self):
-        """Run evaluation on the eval dataset and return average loss."""
-        orig_micro_batches = self.model_engine.micro_batches
-        self.model_engine.micro_batches = self.eval_gradient_accumulation_steps
+    def evaluate(self, last_loss=None):
+        """
+        Run evaluation over the entire eval dataset (GAS=1) and return the average loss.
+
+        Behavior:
+        - Prints a short status line on rank-0 before and after evaluation
+        - Iterates exactly len(eval_dataloader) micro-batches using pipeline_engine.eval_batch
+        - Drops incomplete final batches via the eval dataloader’s internal truncation
+        - Resets the eval_dataloader after completion
+        - Logs 'eval/loss' to TensorBoard on rank-0
+        - If last_loss is provided (> 0), also prints the percent change vs the previous eval
+
+        Args:
+            last_loss (float | None): Previous evaluation loss for Δ% reporting.
+
+        Returns:
+            float: Average evaluation loss over the eval dataset.
+        """
+
+        # Print this to make it obvious the program hasn't just hung for large evaluations
+        if is_main_process():
+                log('calculating evaluation loss...')
+
+        eval_steps = len(self.eval_dataloader)
+        if eval_steps == 0:
+            raise RuntimeError('Evaluation dataloader has no data after truncation')
+
         iterator = iter(self.eval_dataloader)
-        all_metrics = None
 
-        # Collect metrics from all eval batches
-        while True:
-            metrics = self.model_engine.eval_batch(iterator)
-            self.eval_dataloader.sync_epoch()
-            if all_metrics is None:
-                all_metrics = [[] for _ in range(len(metrics))]
-            if self.eval_dataloader.epoch == 2:
-                break
-            for i, metric in enumerate(metrics):
-                all_metrics[i].append(metric)
+        losses = []
+        for _ in range(eval_steps):
+            output = self.pipeline_engine.eval_batch(iterator)
+            losses.append(output.detach().float().mean().item())
 
-        # Reset dataloader and restore original batch size
         self.eval_dataloader.reset()
-        self.model_engine.micro_batches = orig_micro_batches
-        eval_metrics = [torch.cat(metric_list) for metric_list in all_metrics]
+        eval_loss = float(sum(losses) / len(losses))
 
-        # Log evaluation metrics and return the mean loss
-        return  self._write_metrics('eval', eval_metrics)
+        if is_main_process():
+            if last_loss is None or last_loss <= 0:
+                log(f'initial evaluation loss: {eval_loss:.4f}')
+            else:
+                percent_change = (eval_loss / last_loss - 1.0) * 100.0
+                log(f'new evaluation loss: {eval_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
 
-    # Private helper methods
+        self._write_scalar_metric('eval/loss', eval_loss)
+        return eval_loss
+
+    def get_current_epoch(self):
+        """Compute the 1-based epoch from global_steps and steps_per_epoch."""
+        return (self.pipeline_engine.global_steps // self.steps_per_epoch) + 1
+
     def _calculate_eval_steps(self, steps_per_epoch, evals_per_epoch):
-        """Calculate which steps to run evaluation on."""
-        # Avoid requesting more evals than steps and avoid step 0
+        """Precompute global steps on which to run evaluation within each epoch."""
         evals = max(1, min(evals_per_epoch, steps_per_epoch))
         eval_steps = set()
         for epoch in range(self.epochs):
@@ -161,39 +244,87 @@ class Trainer:
         return eval_steps
 
     def _cleanup_memory(self):
-        """Clean up GPU memory before training step."""
+        """Reduce GPU memory pressure prior to a training step."""
         gc.collect()
         torch.cuda.empty_cache()
 
-    def _write_metrics(self, prefix, metrics):
-        """Write all metrics to tensorboard and return mean loss."""
-        loss = metrics[0].mean().item()
-        accuracy_top1 = metrics[1].mean().item()
-        self._write_scalar_metric(f'{prefix}/loss', loss)
-        self._write_scalar_metric(f'{prefix}/accuracy_top1', accuracy_top1)
-        return loss
+    def _attempt_to_extract_loss(self, output):
+        """Return scalar loss (float) on the last pipeline stage; None otherwise."""
+        if not self.pipeline_engine.is_last_stage():
+            return None
+        return output.detach().float().mean().item()
+
+    def _broadcast_from_last_stage(self, value):
+        """Return scalar loss on all ranks via PP-group all-reduce.
+
+        Only the last pipeline stage contributes a nonzero value; SUM yields the loss.
+        Avoids broadcast_object_list and single-source rank mapping issues.
+        """
+        pp_group = self.pipeline_engine.grid.get_pipe_parallel_group()
+        device = getattr(self.pipeline_engine, 'device', None)
+        if device is None:
+            device = torch.device('cuda', torch.cuda.current_device()) if torch.cuda.is_available() else torch.device('cpu')
+
+        contrib = torch.tensor(
+            0.0 if value is None else float(value),
+            dtype=torch.float32,
+            device=device,
+        )
+        deepspeed.comm.all_reduce(contrib, group=pp_group)  # SUM within PP group
+        return float(contrib.item())
 
     def _write_scalar_metric(self, name, value):
-        """Log scalar value to tensorboard using current global step."""
+        """Rank-0 only: log a scalar to TensorBoard at the current global step."""
         if is_main_process():
-            self.tb_writer.add_scalar(name, value, self.model_engine.global_steps)
+            self.tb_writer.add_scalar(name, value, self.pipeline_engine.global_steps)
 
-    def _print_eval_progress(self, current_loss, last_loss=None):
-        """Print evaluation progress with optional percentage change."""
-        step = self.model_engine.global_steps
-        if step == 0:  # Initial evaluation
-            log(f'Initial evaluation loss: {current_loss:.4f}')
-        elif last_loss is None:
-            log(f'Step {step} evaluation loss: {current_loss:.4f}')
-        else:
-            percent_change = (current_loss / last_loss - 1) * 100
-            log(f'Step {step} evaluation loss: {current_loss:.4f} (last: {last_loss:.4f}, Δ: {percent_change:.2f}%)')
+    def _write_train_step_metrics(self, train_loss, learning_rate):
+        """Rank-0 only: log core training step metrics (loss, LR)."""
+        self._write_scalar_metric('train/loss', train_loss)
+        self._write_scalar_metric('train/lr', learning_rate)
+
+    def _write_regularizer_metrics(self, stats):
+        """Rank-0 only: log adapter/regularizer-specific training metrics."""
+        for key, value in stats.items():
+            self._write_scalar_metric(f'train/{key}', value)
+
+    def _print_train_progress(self, start_time, start_step, last_print_time, train_loss, learning_rate):
+        """
+        Print training progress (throughput, elapsed, ETA).
+
+        Args:
+            start_time (float): Wall-clock timestamp when training started.
+            start_step (int): Global step at start_time.
+            last_print_time (float): Wall-clock timestamp of previous print.
+            train_loss (float): Latest training loss (broadcast to rank-0).
+            learning_rate (float): Current learning rate.
+
+        Returns:
+            float: Updated last_print_time.
+        """
+        now = time.time()
+        iter_time = now - last_print_time
+        last_print_time = now
+        iter_throughput = self.pipeline_engine.train_batch_size() / iter_time if iter_time > 0 else 0.0
+        total_elapsed = now - start_time
+        steps_completed = max(1, self.pipeline_engine.global_steps - start_step)
+        remaining_steps = max(0, self.total_steps - self.pipeline_engine.global_steps)
+        eta = (total_elapsed / steps_completed) * remaining_steps
+
+        log(
+            f'step: {self.pipeline_engine.global_steps} / {self.total_steps}, '
+            f'loss: {train_loss:0.4f}, '
+            f'lr: {learning_rate:.3e}, '
+            f'throughput: {iter_throughput:0.3f} sequences/s, '
+            f'elapsed: {seconds_to_time_str(total_elapsed)}, '
+            f'eta: {seconds_to_time_str(eta)}'
+        )
+        return last_print_time
 
     def _should_checkpoint(self):
-        """Check if it's time to checkpoint based on time interval."""
+        """Rank-0 only: determine if a time-based checkpoint should be taken."""
         if not is_main_process():
             return False
-
         current_time = time.time()
         if (current_time - self.last_checkpoint_time) / 3600 >= self.checkpoint_interval_hours:
             self.last_checkpoint_time = current_time
@@ -201,22 +332,171 @@ class Trainer:
         return False
 
     def _checkpoint_if_needed(self, last_eval_loss, force=False):
-        """Save checkpoint and broadcast decision to all processes."""
+        """Save a checkpoint if requested by time or force, and prune older ones."""
         do_checkpoint = force or self._should_checkpoint()
-
-        # Broadcast decision to ensure all processes checkpoint together
         result = [do_checkpoint]
         torch.distributed.broadcast_object_list(result, src=0)
         do_checkpoint = result[0]
-
         if do_checkpoint:
-            save_checkpoint(self.model_engine, self.train_dataloader, self.run_dir, last_eval_loss)
+            self._save_checkpoint(last_eval_loss)
             if is_main_process():
-                prune_checkpoints(self.run_dir, self.max_checkpoints)
+                self._prune_checkpoints()
+
+    def _load_checkpoint(self):
+        """
+        Load a checkpoint and restore dataloader/engine state.
+
+        Returns:
+            Optional[float]: Last evaluation loss stored in the checkpoint, or None if not found.
+        """
+        load_path, client_state = self.pipeline_engine.load_checkpoint(
+            self.run_dir,
+            load_module_strict=False,
+            load_optimizer_states=True,
+        )
+        if load_path is None:
+            return None
+        self.train_dataloader.load_state_dict(client_state['custom_loader'])
+        last_eval_loss = client_state.get('last_eval_loss')
+        log(
+            f'Resuming training from checkpoint. Resuming at epoch: {self.get_current_epoch()}, '
+            f'step: {self.pipeline_engine.global_steps}'
+        )
+        return last_eval_loss
+
+    def _save_checkpoint(self, last_eval_loss):
+        """Save a training checkpoint with current engine and dataloader state."""
+        save_root = self.run_dir + '/' if self.run_dir[-1] != '/' else self.run_dir
+        self.pipeline_engine.save_checkpoint(
+            save_root,
+            client_state={
+                'custom_loader': self.train_dataloader.state_dict(),
+                'last_eval_loss': last_eval_loss,
+            },
+            save_latest=True,
+            exclude_frozen_parameters=True,
+        )
+
+    def _prune_checkpoints(self):
+        """Remove old checkpoints, keeping only the most recent `self.max_checkpoints`."""
+        if self.max_checkpoints <= 0:
+            return
+        save_root = self.run_dir + '/' if self.run_dir[-1] != '/' else self.run_dir
+        checkpoint_pattern = os.path.join(save_root, 'global_step*')
+        checkpoints = []
+        for path in glob.glob(checkpoint_pattern):
+            if os.path.isdir(path):
+                basename = os.path.basename(path)
+                if basename.startswith('global_step'):
+                    try:
+                        step_num = int(basename[11:])
+                        checkpoints.append((step_num, path))
+                    except ValueError:
+                        continue
+        checkpoints.sort(key=lambda x: x[0])
+        while len(checkpoints) > self.max_checkpoints:
+            step_num, path = checkpoints.pop(0)
+            log(f"Pruning oldest checkpoint: 'global_step{step_num}'")
+            safe_rmtree(path)
 
     def _save_model(self, name):
-        """Save the trained model (LoRA adapters, Control Adapters, or full model)."""
+        """Save trained model artifacts (full model or LoRA adapters)."""
         if self.lora_config is None:
-            save_full_model(self.model_engine, self.pipeline_model, self.model_dir, self.run_dir, name)
+            self._save_full_model(name)
         else:
-            save_lora(self.model_engine, self.pipeline_model, self.lora_config, self.run_dir, name)
+            self._save_lora(name)
+
+    def _save_lora(self, name):
+        """
+        Save LoRA adapters in distributed fashion across pipeline stages.
+
+        - Each pipeline stage writes its trainable parameters to a temporary shard
+        - Rank (dp=0, stage=0) merges shards and writes adapter_model.bin
+        - LoRA config is saved alongside artifacts
+        """
+        save_root = self.run_dir + '/' if self.run_dir[-1] != '/' else self.run_dir
+        save_dir = save_root + name
+        dp_id, stage_id = self._get_process_ranks()
+
+        tmp_dir = self._prepare_save_directory(save_dir, dp_id, stage_id)
+        self._save_partial_state_dict(self.pipeline_model, tmp_dir, stage_id, dp_id, trainable_only=True)
+        deepspeed.comm.barrier()
+
+        if dp_id == 0 and stage_id == 0:
+            state_dict = self._merge_and_save_state_dict(tmp_dir, save_dir, dp_id, stage_id)
+            torch.save(state_dict, os.path.join(save_dir, 'adapter_model.bin'))
+            self.lora_config.save_pretrained(save_dir)
+            safe_rmtree(tmp_dir)
+
+    def _save_full_model(self, name):
+        """
+        Save full model in distributed fashion across pipeline stages.
+
+        - Each pipeline stage writes its full parameter shard
+        - Rank (dp=0, stage=0) merges shards and saves sharded model files
+        - Copies tokenizer/config files from the base model directory
+        """
+        save_root = self.run_dir + '/' if self.run_dir[-1] != '/' else self.run_dir
+        save_dir = save_root + name
+        dp_id, stage_id = self._get_process_ranks()
+
+        tmp_dir = self._prepare_save_directory(save_dir, dp_id, stage_id)
+        self._save_partial_state_dict(self.pipeline_model, tmp_dir, stage_id, dp_id, trainable_only=False)
+        deepspeed.comm.barrier()
+
+        if dp_id == 0 and stage_id == 0:
+            state_dict = self._merge_and_save_state_dict(tmp_dir, save_dir, dp_id, stage_id)
+            save_torch_state_dict(state_dict, save_dir, max_shard_size='5GB')
+            self._copy_model_files(self.model_dir, save_dir)
+            safe_rmtree(tmp_dir)
+
+    def _get_process_ranks(self):
+        """Get data parallel and pipeline parallel ranks for current process."""
+        dp_id = self.pipeline_engine.grid.get_data_parallel_rank()
+        stage_id = self.pipeline_engine.grid.get_pipe_parallel_rank()
+        return dp_id, stage_id
+
+    def _prepare_save_directory(self, save_dir, dp_id, stage_id):
+        """Create temporary directory for distributed saving."""
+        tmp_dir = os.path.join(save_dir, 'tmp')
+        if dp_id == 0 and stage_id == 0:
+            os.makedirs(tmp_dir, exist_ok=False)
+        deepspeed.comm.barrier()
+        return tmp_dir
+
+    def _save_partial_state_dict(self, pipeline_model, tmp_dir, stage_id, dp_id, trainable_only=False):
+        """Save partial state dict for current pipeline stage."""
+        if dp_id != 0:
+            return
+        partial_state_dict = {}
+        for name, p in pipeline_model.named_parameters():
+            if trainable_only and not p.requires_grad:
+                continue
+            if trainable_only:
+                if not hasattr(p, 'original_name'):
+                    log(f'WARNING: parameter {name} requires_grad but does not have original_name. Not saving it.')
+                    continue
+                param_name = p.original_name.replace('.default', '').replace('.modules_to_save', '')
+            else:
+                param_name = p.original_name
+            partial_state_dict[param_name] = p.detach()
+        torch.save(partial_state_dict, os.path.join(tmp_dir, f'state_dict_{stage_id}.bin'))
+
+    def _merge_and_save_state_dict(self, tmp_dir, save_dir, dp_id, stage_id):
+        """Merge partial state dicts from all pipeline stages."""
+        if dp_id != 0 or stage_id != 0:
+            return None
+        state_dict = {}
+        for path in glob.glob(os.path.join(tmp_dir, '*.bin')):
+            state_dict.update(torch.load(path, map_location='cpu', weights_only=True))
+        return state_dict
+
+    def _copy_model_files(self, model_dir, save_dir):
+        """Copy additional model files (tokenizer, config, etc.) to save directory."""
+        # Copy all JSON files
+        for path in glob.glob(os.path.join(model_dir, '*.json')):
+            shutil.copy(path, save_dir)
+        # Also copy tokenizer.model if present
+        tok_model_path = os.path.join(model_dir, 'tokenizer.model')
+        if os.path.exists(tok_model_path):
+            shutil.copy(tok_model_path, save_dir)
