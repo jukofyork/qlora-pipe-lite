@@ -53,6 +53,7 @@ class Engine:
 
     def __init__(self, config, args):
         self._patch_bitsandbytes_cuda()
+        self._patch_ds_tied_broadcast_no_grad()
 
         # Create model and pipeline
         model = create_model(config, trust_remote_code=args.trust_remote_code)
@@ -145,6 +146,23 @@ class Engine:
             return bnb_cuda_old(self, device)
 
         bitsandbytes.nn.modules.Params4bit.cuda = bnb_cuda_hijack
+
+    def _patch_ds_tied_broadcast_no_grad(self):
+        """Ensure DeepSpeed's tied-weight broadcasts are not recorded by autograd."""
+        if getattr(PipelineModule, "_qp_tied_broadcast_patched", False):
+            return
+
+        assert hasattr(PipelineModule, "_synchronize_tied_weights"), \
+            "DeepSpeed PipelineModule missing _synchronize_tied_weights"
+
+        original = PipelineModule._synchronize_tied_weights
+
+        def _wrapped(self, *args, **kwargs):
+            with torch.no_grad():
+                return original(self, *args, **kwargs)
+
+        PipelineModule._synchronize_tied_weights = _wrapped
+        PipelineModule._qp_tied_broadcast_patched = True
 
     def _create_pipeline_model(self, model, config):
         """
