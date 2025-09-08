@@ -1,6 +1,6 @@
 from torch import nn
 
-class FinalNormPipe(nn.Module):
+class NormPipe(nn.Module):
     """
     Final normalization stage wrapper.
 

@@ -6,7 +6,7 @@ from models.modules import (
     PrepareInputsPipe,
     EmbeddingPipe,
     DecoderLayerPipe,
-    FinalNormPipe,
+    NormPipe,
     LmHeadPipe,
     LossPipe,
 )
@@ -84,7 +84,7 @@ class BaseCausalLmPipe(PipelineModel):
             ))
 
         # Final Norm
-        result.append(LayerSpec(FinalNormPipe, self.module_loader, self.model.norm))
+        result.append(LayerSpec(NormPipe, self.module_loader, self.model.norm))
 
         # LM Head
         if use_tied_layer_spec:

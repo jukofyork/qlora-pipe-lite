@@ -81,7 +81,7 @@ class LmHeadPipe(nn.Module):
         """
 
         def tied_lm_head_forward(tied_module, inputs):
-            # inputs are (hidden_states, labels) coming from FinalNormPipe
+            # inputs are (hidden_states, labels) coming from NormPipe
             hidden_states, labels = inputs
             weight = tied_module.weight  # [vocab, hidden]
 
