@@ -107,7 +107,7 @@ def parse_layers_to_transform(config):
                 layers_to_transform.append(int(token))
     return layers_to_transform
 
-def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
+def configure_full_fine_tuning(model, config):
     """
     Set requires_grad for parameters to enable full fine-tuning with optional scoping.
 
@@ -119,10 +119,12 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
 
     Args:
         model (torch.nn.Module): Pipeline model whose parameters to mark as trainable.
-        config (dict): Unused here; kept for symmetry and future extension.
-        target_modules (Optional[list[str]]): Substrings of parameter names that should be trainable.
-        layers_to_transform (Optional[list[int]]): Specific transformer layer indices to train.
+        config (dict): Training configuration containing optional 'target_modules'
+                       and 'layers_to_transform'.
     """
+    target_modules = config.get('target_modules', None)
+    layers_to_transform = parse_layers_to_transform(config)
+
     # Preserve existing original_name (from HF) if present; set only when missing
     for name, p in model.named_parameters():
         if not hasattr(p, 'original_name'):
@@ -166,42 +168,47 @@ def configure_full_fine_tuning(model, config, target_modules, layers_to_transfor
                     f'Please include both the embedding and the lm_head in training or remove the restriction.'
                 )
 
-def create_lora_config(config, target_modules, layers_to_transform):
+def create_lora_config(config):
     """
-    Build a PEFT LoRA configuration compatible with this training setup.
+    Build a PEFT LoRA configuration based on the training config.
 
     Behavior:
-        - If target_modules is an empty list (Control Adapters path), we pass a dummy 'none'
-          value to peft for compatibility, then reset to [] afterward.
-        - Otherwise, use 'all-linear' when target_modules is None to target all linear modules.
-
-    Args:
-        config (dict): Must include 'lora_rank' and optional 'lora_dropout'.
-        target_modules (Optional[list[str]]): Specific module name substrings or None/'all-linear'.
-        layers_to_transform (Optional[list[int]]): Subset of transformer layers to target.
+        - Requires 'lora_rank' in config.
+        - Reads 'target_modules' and 'layers_to_transform' from config.
+        - If use_control_adapters is True:
+            * target_modules must not be set (asserts falsy).
+            * target_modules is forced to [] (adapters apply to entire decoder layers).
+        - If target_modules is None:
+            * defaults to 'all-linear' (target all linear modules).
+        - If target_modules is an empty list:
+            * raises ValueError (no point training a LoRA with nothing to train).
+        - layers_to_transform is parsed and passed through unchanged.
 
     Returns:
-        peft.LoraConfig: Config object to be used by get_peft_model or Control Adapters.
+        peft.LoraConfig
     """
-    # Handle empty list case for Control Adapters
-    use_dummy_target = target_modules == []
-    actual_target_modules = ['none'] if use_dummy_target else (target_modules if target_modules else 'all-linear')
-
     if 'lora_rank' not in config:
         raise KeyError("Training config TOML must define 'lora_rank' to build adapter_config.json")
 
+    target_modules = config.get('target_modules', None)
+    layers_to_transform = parse_layers_to_transform(config)
+
+    if config.get('use_control_adapters', False):
+        assert not target_modules, "Control Adapters don't use target_modules - they apply to entire decoder layers"
+        target_modules = []
+    elif target_modules is None:
+        target_modules = 'all-linear'
+    elif isinstance(target_modules, list) and len(target_modules) == 0:
+        raise ValueError("Empty target_modules specified for LoRA - no point in training a LoRA with nothing to train")
+
     lora_config = LoraConfig(
         r=config['lora_rank'],
-        lora_alpha=config['lora_rank'],  # NOTE: We fix lora_alpha = lora_rank and then just adjust learning rate...
+        lora_alpha=config['lora_rank'],  # NOTE: Fix lora_alpha = lora_rank and adjust LR externally
         lora_dropout=config.get('lora_dropout', 0.0),
-        target_modules=actual_target_modules,
+        target_modules=target_modules,
         layers_to_transform=layers_to_transform if layers_to_transform else None,
         task_type='CAUSAL_LM'
     )
-
-    # Reset target_modules to empty list if we used dummy value
-    if use_dummy_target:
-        lora_config.target_modules = []
 
     return lora_config
 
@@ -274,14 +281,11 @@ def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, config_path, lora_output_di
             combined_state_dict[converted_name] = weight
 
     # Create LoRA config
-    target_modules = config.get('target_modules', None)
-    layers_to_transform = parse_layers_to_transform(config)
-    lora_config = create_lora_config(config, target_modules, layers_to_transform)
+    lora_config = create_lora_config(config)
 
     # Save files
     os.makedirs(lora_output_dir, exist_ok=True)
     torch.save(combined_state_dict, os.path.join(lora_output_dir, 'adapter_model.bin'))
 
-    # Save adapter config as JSON
-    with open(os.path.join(lora_output_dir, 'adapter_config.json'), 'w') as f:
-        json.dump(lora_config.to_dict(), f, indent=2)
+    # Save adapter config (handles set→list conversion internally)
+    lora_config.save_pretrained(lora_output_dir)
