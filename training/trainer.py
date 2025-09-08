@@ -212,7 +212,9 @@ class Trainer:
 
         losses = []
         for _ in range(eval_steps):
-            output = self.pipeline_engine.eval_batch(iterator)
+            # Force single-micro-batch eval to match eval_dataloader GAS=1 without changing engine state
+            # NOTE: This is to avoid losing sequences due to truncation in PipelineDataLoader's DistributedBatchSampler.
+            output = self.pipeline_engine.eval_batch(iterator, num_micro_batches=1)
             losses.append(output.detach().float().mean().item())
 
         self.eval_dataloader.reset()
