@@ -1,3 +1,21 @@
+"""
+Control Adapter utilities.
+
+Provides functions to:
+- Inject Control Adapter parameters and patch layer forward logic
+- Compute Control Adapter forward/inverse transforms
+- Load/parse Control Adapter weights and keys
+- Patch adapter_config.json for conversion
+- Generate model weight keys and LoRA keys for conversion
+- Load base model weights from safetensors shards
+"""
+
+from pathlib import Path
+from tqdm import tqdm
+from typing import Dict, List, Tuple
+import json
+import re
+import safetensors.torch
 import torch
 
 def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dropout, adapter_dtype=torch.float32):
@@ -136,3 +154,156 @@ def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dro
             p.requires_grad = True
         else:
             p.requires_grad = False
+
+def apply_control_adapter_transform(Q, S, device=None, inverse: bool=False):
+    """Compute Control Adapter delta: Q diag(λ) Q^T (forward) or exact inverse.
+
+    Definitions:
+        - Forward delta: λ = exp(S) - 1,      result = Q diag(λ) Q^T
+        - Exact inverse: λ' = exp(-S) - 1,    result = Q diag(λ') Q^T
+          (equivalently (I + Q diag(λ) Q^T)^{-1} - I = -Q diag(λ/(1+λ)) Q^T)
+
+    Args:
+        Q (Tensor): [hidden_size, r], semi-orthogonal columns (Q^T Q ≈ I_r).
+        S (Tensor): [r], log-parameterization of eigenvalue offsets.
+        device (str|torch.device|None): device to run on; defaults to 'cuda' if available else 'cpu'.
+        inverse (bool): when True, compute exact inverse delta; otherwise forward delta.
+
+    Returns:
+        Tensor: [hidden_size, hidden_size] delta on the specified device (float32).
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    Q_gpu = Q.to(device=device, dtype=torch.float32)
+    S_gpu = S.to(device=device, dtype=torch.float32)
+
+    coeff = torch.expm1(-S_gpu) if inverse else torch.expm1(S_gpu)
+    result = (Q_gpu * coeff.unsqueeze(0)) @ Q_gpu.T
+    return result
+
+def load_control_adapter_weights(adapter_path: Path) -> Tuple[List[Tuple[str, torch.Tensor]], Dict[str, torch.Tensor]]:
+    """Load control adapter weights and return (sorted key-value pairs, full state dict)."""
+
+    def _find_and_load_adapter_weights(path: Path) -> Tuple[Dict[str, torch.Tensor], str]:
+        """Find and load control adapter weights, returning weights and filename."""
+        for filename in ['adapter_model.safetensors', 'adapter_model.bin']:
+            filepath = path / filename
+            if filepath.exists():
+                if filename.endswith('.safetensors'):
+                    weights = safetensors.torch.load_file(filepath)
+                else:
+                    weights = torch.load(filepath, map_location='cpu', weights_only=True)
+                return weights, filename
+
+        raise FileNotFoundError("No adapter_model.safetensors or adapter_model.bin found in adapter directory")
+
+    def _extract_layer_num(item):
+        """Extract layer number and parameter type from control adapter key for sorting."""
+        key, _ = item
+        match = re.search(r'layers\.(\d+)\.control_(Q|S)', key)
+        if match:
+            layer_num = int(match.group(1))
+            param_type = match.group(2)
+            return (layer_num, 0 if param_type == 'Q' else 1)
+        return (float('inf'), 2)
+
+    state_dict, _ = _find_and_load_adapter_weights(adapter_path)
+    control_keys = list(state_dict.items())
+    control_keys.sort(key=_extract_layer_num)
+    return control_keys, state_dict
+
+def parse_control_adapter_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[int, Dict[str, torch.Tensor]]:
+    """Parse control adapter state dict into layer -> {Q, S} mapping."""
+    control_adapters: Dict[int, Dict[str, torch.Tensor]] = {}
+
+    for key, tensor in state_dict.items():
+        match = re.search(r'layers\.(\d+)\.control_(Q|S)', key)
+        if match:
+            layer_idx = int(match.group(1))
+            param_type = match.group(2)
+
+            if layer_idx not in control_adapters:
+                control_adapters[layer_idx] = {}
+            control_adapters[layer_idx][param_type] = tensor
+        else:
+            raise ValueError(f"Could not parse control adapter key: {key}")
+
+    return control_adapters
+
+def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args):
+    """Copy adapter config, patch target_modules based on model type, and optionally patch rank/alpha."""
+    config_file = input_path / 'adapter_config.json'
+    if not config_file.exists():
+        raise FileNotFoundError(f"adapter_config.json not found in {input_path}")
+
+    with open(config_file, 'r') as f:
+        config = json.load(f)
+
+    # Use custom target rank if asked (allows exceeding original rank)
+    target_rank = args.rank if args.rank is not None else config['r']
+
+    # Set target modules based on model type
+    if getattr(args, 'mixtral', None):
+        config['target_modules'] = ["w2"]
+    elif getattr(args, 'cohere', None):
+        config['target_modules'] = ["down_proj", "o_proj"]
+    else:
+        config['target_modules'] = ["down_proj"]
+
+    # Update rank and alpha if different from original
+    config['r'] = target_rank
+    config['lora_alpha'] = target_rank  # NOTE: We fix lora_alpha = lora_rank and then just adjust learning rate...
+
+    with open(output_path / 'adapter_config.json', 'w') as f:
+        json.dump(config, f, indent=2)
+    print("Updated and copied 'adapter_config.json'")
+
+    return target_rank
+
+def generate_model_weight_keys(layer_idx: int, args) -> List[str]:
+    """Generate model weight keys for a given layer based on model type."""
+    base_key = f"model.layers.{layer_idx}"
+    target_keys: List[str] = []
+
+    if getattr(args, 'mixtral', None):
+        for expert_idx in range(args.mixtral):
+            target_keys.append(f"{base_key}.block_sparse_moe.experts.{expert_idx}.w2.weight")
+    else:
+        target_keys.append(f"{base_key}.mlp.down_proj.weight")
+        if getattr(args, 'cohere', None):
+            target_keys.append(f"{base_key}.self_attn.o_proj.weight")
+
+    return target_keys
+
+def generate_lora_key(layer_idx: int, target_key: str, adapter_type: str, args) -> str:
+    """Generate LoRA A or B key for LoRA format."""
+    base_key = f"base_model.model.model.layers.{layer_idx}"
+
+    if getattr(args, 'mixtral', None):
+        expert_match = re.search(r'experts\.(\d+)\.w2\.weight', target_key)
+        if expert_match:
+            expert_idx = expert_match.group(1)
+            lora_base = f"{base_key}.block_sparse_moe.experts.{expert_idx}.w2"
+        else:
+            raise ValueError(f"Could not parse expert index from {target_key}")
+    elif "o_proj" in target_key:
+        lora_base = f"{base_key}.self_attn.o_proj"
+    else:
+        lora_base = f"{base_key}.mlp.down_proj"
+
+    return f"{lora_base}.lora_{adapter_type}.weight"
+
+def load_model_weights(model_path: Path) -> Dict[str, torch.Tensor]:
+    """Load model weights from safetensors shards into CPU memory."""
+    model_weights: Dict[str, torch.Tensor] = {}
+    model_shards = list(model_path.glob('model*.safetensors'))
+    if not model_shards:
+        raise FileNotFoundError("No model*.safetensors files found in model directory")
+
+    for shard in tqdm(model_shards, desc="Loading model shards"):
+        with safetensors.torch.safe_open(shard, framework='pt', device='cpu') as f:
+            for key in f.keys():
+                model_weights[key] = f.get_tensor(key)
+
+    return model_weights

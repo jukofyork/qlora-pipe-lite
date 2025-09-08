@@ -7,10 +7,14 @@ Provides functions to:
 - Parse layers_to_transform
 - Build LoRA configuration and apply LoRA adapters
 - Configure full fine-tuning parameter selection
+- Convert DeepSpeed pipeline checkpoints to a LoRA adapter (utility)
 """
+from glob import glob
 from peft import LoraConfig, get_peft_model
 import json
 import os
+import re
+import toml
 import torch
 
 import transformers
@@ -76,8 +80,11 @@ def parse_layers_to_transform(config):
     """
     Parse a compact 'layers_to_transform' string into a list of layer indices.
 
-    Expected format in config: "start1:stop1,start2:stop2,..."
-    Example: "0:3,10:12" -> [0,1,2,3,10,11,12]
+    Supported formats:
+        - Ranges: "start1:stop1,start2:stop2,..."
+          e.g., "0:3,10:12" -> [0,1,2,3,10,11,12]
+        - Singles: "1,2,3" -> [1,2,3]
+        - Mixed: "0:2, 5, 7:8" -> [0,1,2,5,7,8]
 
     Args:
         config (dict): Configuration with optional 'layers_to_transform' string.
@@ -87,10 +94,17 @@ def parse_layers_to_transform(config):
     """
     layers_to_transform = []
     if layers_spec := config.get('layers_to_transform', None):
-        parts = layers_spec.split(',')
-        for part in parts:
-            start, stop = part.split(':')
-            layers_to_transform.extend(range(int(start), int(stop) + 1))
+        for part in layers_spec.split(','):
+            token = part.strip()
+            if not token:
+                continue
+            if ':' in token:
+                start_str, stop_str = token.split(':', 1)
+                start = int(start_str.strip())
+                stop = int(stop_str.strip())
+                layers_to_transform.extend(range(start, stop + 1))
+            else:
+                layers_to_transform.append(int(token))
     return layers_to_transform
 
 def configure_full_fine_tuning(model, config, target_modules, layers_to_transform):
@@ -173,6 +187,9 @@ def create_lora_config(config, target_modules, layers_to_transform):
     use_dummy_target = target_modules == []
     actual_target_modules = ['none'] if use_dummy_target else (target_modules if target_modules else 'all-linear')
 
+    if 'lora_rank' not in config:
+        raise KeyError("Training config TOML must define 'lora_rank' to build adapter_config.json")
+
     lora_config = LoraConfig(
         r=config['lora_rank'],
         lora_alpha=config['lora_rank'],  # NOTE: We fix lora_alpha = lora_rank and then just adjust learning rate...
@@ -213,3 +230,58 @@ def apply_lora_adapters(model, config, lora_config):
     lora_model.model.config.use_cache = False
     for name, p in lora_model.named_parameters():
         p.original_name = name
+
+def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, config_path, lora_output_dir):
+    """
+    Convert pipeline-parallel DeepSpeed checkpoints into a saved LoRA adapter directory.
+
+    Steps:
+        - Load training config from TOML
+        - Merge per-layer model_states.pt files into a single state dict with HF-compatible keys
+        - Build LoRA config via create_lora_config/parse_layers_to_transform
+        - Write adapter_model.bin and adapter_config.json to output directory
+
+    Args:
+        ds_checkpoint_dir (str): Path to DeepSpeed checkpoint directory containing layer_*-model_states.pt files.
+        config_path (str): Path to the training config TOML file used for the run.
+        lora_output_dir (str): Destination directory for the LoRA adapter artifacts.
+    """
+    # Load config
+    with open(config_path) as f:
+        config = toml.load(f)
+
+    # Convert checkpoint files
+    layer_checkpoint_files = glob(os.path.join(ds_checkpoint_dir, 'layer_*-model_states.pt'))
+    if not layer_checkpoint_files:
+        raise FileNotFoundError(
+            f"No checkpoint files matching 'layer_*-model_states.pt' found in '{ds_checkpoint_dir}'"
+        )
+
+    combined_state_dict = {}
+    for path in layer_checkpoint_files:
+        # Expect exact 'layer_<N>-model_states.pt' filenames with integer N
+        basename = os.path.basename(path)
+        match = re.fullmatch(r'layer_(\d+)-model_states\.pt', basename)
+        if not match:
+            raise ValueError(
+                f"Unexpected checkpoint filename: '{basename}' "
+                f"(expected 'layer_<N>-model_states.pt' with integer N)"
+            )
+        layer_idx = int(match.group(1)) - 2
+        state_dict = torch.load(path, weights_only=True)
+        for name, weight in state_dict.items():
+            converted_name = f'base_model.model.model.layers.{layer_idx}.{name}'
+            combined_state_dict[converted_name] = weight
+
+    # Create LoRA config
+    target_modules = config.get('target_modules', None)
+    layers_to_transform = parse_layers_to_transform(config)
+    lora_config = create_lora_config(config, target_modules, layers_to_transform)
+
+    # Save files
+    os.makedirs(lora_output_dir, exist_ok=True)
+    torch.save(combined_state_dict, os.path.join(lora_output_dir, 'adapter_model.bin'))
+
+    # Save adapter config as JSON
+    with open(os.path.join(lora_output_dir, 'adapter_config.json'), 'w') as f:
+        json.dump(lora_config.to_dict(), f, indent=2)

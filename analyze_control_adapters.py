@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to analyze Control Adapter matrix norms and statistical properties.
+Analyze Control Adapter matrix norms and statistical properties.
 
 OVERVIEW:
     Analyzes Control Adapter matrices W = Q @ diag(λ) @ Q^T where:
@@ -11,7 +11,7 @@ OVERVIEW:
     (which are exact only when Q is perfectly orthogonal).
 
 USAGE:
-    python analyze_control_adapters.py control_adapter_path [--no-gpu]
+    python analyze_control_adapters.py --adapter /path/to/adapter [--no-gpu]
 
 OUTPUT COLUMNS:
     ‖Q^TQ-I_r‖_F²       : Squared orthogonality error of Q
@@ -42,39 +42,39 @@ from pathlib import Path
 import argparse
 import torch
 
-from control_adapter_utils import *
-
-def format_percentage(value, precision=1):
-    """Format percentage, treating values that round to 0.0% as positive."""
-    formatted = f"{value:.{precision}%}"
-    return "0.0%" if formatted == "-0.0%" else formatted
+from training.control_adapters import (
+    apply_control_adapter_transform,
+    load_control_adapter_weights,
+    parse_control_adapter_keys,
+)
+from utils.utils import format_percentage
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze Control Adapter norm constraints")
-    parser.add_argument("control_adapter_path", type=str, help="Path to the Control Adapter directory")
+    parser.add_argument("--adapter", required=True, type=str, help="Path to the Control Adapter directory")
     parser.add_argument("--no-gpu", action="store_true", help="Use CPU for SVD computation")
     args = parser.parse_args()
 
-    # Device selection logic from control_adapter_to_lora.py
+    # Device selection logic
     device = "cpu" if args.no_gpu or not torch.cuda.is_available() else "cuda"
 
-    adapter_path = Path(args.control_adapter_path)
+    adapter_path = Path(args.adapter)
 
     # Load weights
     _, state_dict = load_control_adapter_weights(adapter_path)
 
-    print(f"Control Adapter Analysis")
-    print(f"========================")
+    print("Control Adapter Analysis")
+    print("========================")
     print(f"Path   : '{adapter_path}'")
     print(f"Device : '{device}'")
     print()
 
-    # Parse layers using utils function
+    # Parse layers
     layer_data = parse_control_adapter_keys(state_dict)
 
     if not layer_data:
         print("No control adapter layers found!")
-        exit(1)
+        raise SystemExit(1)
 
     # Analyze each layer
     results = []
@@ -94,40 +94,41 @@ if __name__ == "__main__":
         rank = int(S.numel())
         assert Q.ndim == 2 and Q.shape[1] == rank, f"Shape mismatch: Q has {Q.shape[1]} cols, S has {rank} entries"
 
-        # Compute the full matrix W = Q @ diag(λ) @ Q^T, with λ = exp(S) - 1
-        W = apply_control_adapter_transform(Q, S, device)
+        with torch.no_grad():
+            # Compute the full matrix W = Q @ diag(λ) @ Q^T, with λ = exp(S) - 1
+            W = apply_control_adapter_transform(Q, S, device=device, inverse=False)
 
-        # Run SVD to get true singular values
-        svals = torch.linalg.svdvals(W).cpu()
+            # Run SVD to get true singular values
+            svals = torch.linalg.svdvals(W).cpu()
 
-        # Truncate to the actual rank of the control adapter
-        svals = svals[:rank]
+            # Truncate to the actual rank of the control adapter
+            svals = svals[:rank]
 
-        # True norms from SVD (using truncated singular values)
-        spectral_norm = svals[0].item()  # ||W||_2 = max singular value
-        min_singular_value = svals[-1].item()  # minimum singular value within rank
-        nuclear_norm = torch.sum(svals).item()  # ||W||_* = sum of singular values
-        frobenius_norm = torch.norm(svals).item()  # ||W||_F = ||singular values||_2
+            # True norms from SVD (using truncated singular values)
+            spectral_norm = svals[0].item()  # ||W||_2 = max singular value
+            min_singular_value = svals[-1].item()  # minimum singular value within rank
+            nuclear_norm = torch.sum(svals).item()  # ||W||_* = sum of singular values
+            frobenius_norm = torch.norm(svals).item()  # ||W||_F = ||singular values||_2
 
-        # Effective rank
-        effective_rank = (nuclear_norm ** 2) / (frobenius_norm ** 2) if frobenius_norm > 1e-10 else 0.0
+            # Effective rank
+            effective_rank = (nuclear_norm ** 2) / (frobenius_norm ** 2) if frobenius_norm > 1e-10 else 0.0
 
-        # Condition number
-        condition_number = spectral_norm / min_singular_value if min_singular_value > 1e-10 else float('inf')
+            # Condition number
+            condition_number = spectral_norm / min_singular_value if min_singular_value > 1e-10 else float('inf')
 
-        # Approximated norms (assuming perfect orthogonality): λ = exp(S) - 1
-        lambda_vec = torch.expm1(S)
-        spectral_norm_approx = torch.max(torch.abs(lambda_vec)).item()
-        nuclear_norm_approx = torch.sum(torch.abs(lambda_vec)).item()
+            # Approximated norms (assuming perfect orthogonality): λ = exp(S) - 1
+            lambda_vec = torch.expm1(S)
+            spectral_norm_approx = torch.max(torch.abs(lambda_vec)).item()
+            nuclear_norm_approx = torch.sum(torch.abs(lambda_vec)).item()
 
-        # Signed ratio errors (for % formatting) - shows direction of bias
-        spectral_error_ratio = (spectral_norm_approx - spectral_norm) / abs(spectral_norm) if abs(spectral_norm) > 1e-10 else 0.0
-        nuclear_error_ratio = (nuclear_norm_approx - nuclear_norm) / abs(nuclear_norm) if abs(nuclear_norm) > 1e-10 else 0.0
+            # Signed ratio errors (for % formatting) - shows direction of bias
+            spectral_error_ratio = (spectral_norm_approx - spectral_norm) / abs(spectral_norm) if abs(spectral_norm) > 1e-10 else 0.0
+            nuclear_error_ratio = (nuclear_norm_approx - nuclear_norm) / abs(nuclear_norm) if abs(nuclear_norm) > 1e-10 else 0.0
 
-        # Orthogonality measure: ||Q^T @ Q - I_r||_F^2
-        QTQ = Q.t() @ Q
-        I_r = torch.eye(Q.size(1), dtype=Q.dtype)
-        orthogonality_error = (torch.norm(QTQ - I_r, p='fro') ** 2).item()
+            # Orthogonality measure: ||Q^T @ Q - I_r||_F^2
+            QTQ = Q.t() @ Q
+            I_r = torch.eye(Q.size(1), dtype=Q.dtype, device=Q.device)
+            orthogonality_error = (torch.norm(QTQ - I_r, p='fro') ** 2).item()
 
         stats = {
             'spectral_norm': spectral_norm,
@@ -152,8 +153,8 @@ if __name__ == "__main__":
               f"{stats['condition_number']:<8.1f} "
               f"{stats['spectral_norm_approx']:<8.3f} "
               f"{stats['nuclear_norm_approx']:<8.3f} "
-              f"{format_percentage(stats['spectral_error_ratio']):<10} "
-              f"{format_percentage(stats['nuclear_error_ratio']):<10}")
+              f"{format_percentage(stats['spectral_error_ratio'], 3):<10} "
+              f"{format_percentage(stats['nuclear_error_ratio'], 3):<10}")
 
     # Summary statistics
     if results:

@@ -46,6 +46,11 @@ def seconds_to_time_str(seconds):
     else:
         return f'{seconds}s'
 
+def format_percentage(value, decimal_places=1):
+    """Format percentage, treating values that round to 0.0% as positive."""
+    formatted = f"{value:.{decimal_places}%}"
+    return "0.0%" if formatted == "-0.0%" else formatted
+
 def safe_rmtree(dir_path, max_retries=5, initial_wait_seconds=1):
     """Remove directory tree with exponential backoff retries on failure."""
     for attempt in range(max_retries + 1):
