@@ -1,6 +1,8 @@
 from torch.utils.data import DataLoader, Sampler
 import torch
 
+from utils.utils import is_main_process, log
+
 class PipelineDataLoader:
     """
     Pipeline-aware data loader that yields micro-batches suitable for gradient accumulation.
@@ -79,8 +81,8 @@ class PipelineDataLoader:
         return self
 
     def __len__(self):
-        """Total number of micro-batches produced by one full traversal of the sampler."""
-        return len(self.data_sampler) * self.gradient_accumulation_steps
+        """Total number of local batches (optimizer steps) per full traversal of the sampler."""
+        return len(self.data_sampler)
 
     def __next__(self):
         """
@@ -142,6 +144,8 @@ class PipelineDataLoader:
         Split a local batch into gradient_accumulation_steps micro-batches and yield them.
         """
         example_tuple, _ = batch
+        if is_main_process():
+            log(f'before GAS splitting, batch size: {example_tuple[0].size(0)}, total tokens: {example_tuple[0].numel()}')
         local_batch_size = example_tuple[0].size(0)
         split_size = local_batch_size // gradient_accumulation_steps
 

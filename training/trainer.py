@@ -93,12 +93,10 @@ class Trainer:
 
         pipeline_engine.set_dataloader(train_dataloader)
 
-        training_steps = len(train_dataloader)
-        if training_steps == 0:
+        self.steps_per_epoch = len(train_dataloader)
+        if self.steps_per_epoch == 0:
             raise RuntimeError('Training dataloader has no data after truncation')
 
-        steps_per_epoch = training_steps // pipeline_engine.gradient_accumulation_steps()
-        self.steps_per_epoch = steps_per_epoch
         self.total_steps = self.steps_per_epoch * self.epochs
 
         evals_per_epoch = config.get('evals_per_epoch', DEFAULT_EVALS_PER_EPOCH)
@@ -214,10 +212,6 @@ class Trainer:
         eval_steps = len(self.eval_dataloader)
         if eval_steps == 0:
             raise RuntimeError('Evaluation dataloader has no data after truncation')
-
-        # Print this to make it obvious the program hasn't just hung for large evaluations
-        if is_main_process():
-            log('running evaluation... (NOTE: this may take a long time without any output!!!)')
 
         iterator = iter(self.eval_dataloader)
 
