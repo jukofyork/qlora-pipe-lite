@@ -158,8 +158,8 @@ class Engine:
         Create a PipelineModule from a base model for distributed training.
 
         Configuration:
-            - Uniform partition with 'partition_method=uniform'
-            - Activation checkpointing via unsloth_checkpoint
+            - Activation checkpointing of LayerSpec names containing 'decoderlayer' via unsloth_checkpoint (case-insensitive)
+            - Type-balanced partitioning of DecoderLayerPipe via "partition_method='type:decoderlayer'" (case-insensitive)
             - Topology may be column-major or standard using PipeDataParallelTopology
 
         Args:
@@ -199,7 +199,7 @@ class Engine:
             layers=layers,
             num_stages=num_stages,
             topology=topology,
-            partition_method='uniform',
+            partition_method='type:decoderlayer',  # Matched via case-insensitive regex in PipelineModule._find_layer_type()
             activation_checkpoint_interval=1,
             activation_checkpoint_func=unsloth_checkpoint,
             checkpointable_layers=checkpointable_layers
