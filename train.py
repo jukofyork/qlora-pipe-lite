@@ -92,11 +92,18 @@ if __name__ == '__main__':
         pipeline_engine.grid.get_data_parallel_rank()
     )
 
-    # Create evaluation dataloader with gradient_accumulation_steps=1
+    # Get the (optional) separate evaluation gradient accumulation setting
+    # NOTE: Used to avoid losing too many sequences due to truncation the then DistributedBatchSampler.
+    eval_gradient_accumulation_steps = config.get(
+        'eval_gradient_accumulation_steps',
+        config.get('gradient_accumulation_steps', 1)
+    )
+
+    # Create evaluation dataloader with evaluation gradient accumulation setting
     eval_dataloader = dataloader.PipelineDataLoader(
         eval_data,
         pipeline_engine.train_micro_batch_size_per_gpu(),
-        1,
+        eval_gradient_accumulation_steps,
         pipeline_engine.grid.get_data_parallel_world_size(),
         pipeline_engine.grid.get_data_parallel_rank()
     )
@@ -112,6 +119,7 @@ if __name__ == '__main__':
         args=args,
         lora_config=engine.lora_config,
         optimizer=engine.optimizer,
+        eval_gradient_accumulation_steps=eval_gradient_accumulation_steps,
         resume_from_checkpoint=args.resume_from_checkpoint
     )
 

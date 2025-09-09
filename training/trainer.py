@@ -1,3 +1,4 @@
+from huggingface_hub import save_torch_state_dict
 from torch.utils.tensorboard import SummaryWriter
 import deepspeed
 import gc
@@ -6,8 +7,6 @@ import os
 import shutil
 import time
 import torch
-
-from huggingface_hub import save_torch_state_dict
 
 from constants import (
     DEFAULT_CHECKPOINT_INTERVAL_HOURS,
@@ -23,35 +22,37 @@ class Trainer:
 
     Behavior:
     - Runs the main training loop across global steps (epoch is derived from steps)
-    - Evaluates periodically within each epoch
+    - Evaluates periodically within each epoch (using eval_gradient_accumulation_steps)
     - Saves checkpoints (time-based and epoch-boundary) with pruning
     - Saves full model or LoRA adapters
     - Logs metrics to TensorBoard (rank-0 only)
     - Applies optional adapter-specific regularization
 
     Parameters:
-        config                 : Dict-like configuration.
-        pipeline_engine        : DeepSpeed pipeline engine.
-        train_dataloader       : PipelineDataLoader for training.
-        eval_dataloader        : PipelineDataLoader for evaluation (GAS=1 recommended).
-        run_dir                : Directory for checkpoints and logs.
-        pipeline_model         : Model reference for saving/regularization.
-        args                   : Arbitrary arguments namespace.
-        lora_config            : Optional LoRA configuration.
-        optimizer              : Optimizer instance.
-        resume_from_checkpoint : If True, resume from the latest checkpoint.
+        config                           : Dict-like configuration.
+        pipeline_engine                  : DeepSpeed pipeline engine.
+        train_dataloader                 : PipelineDataLoader for training.
+        eval_dataloader                  : PipelineDataLoader for evaluation.
+        run_dir                          : Directory for checkpoints and logs.
+        pipeline_model                   : Model reference for saving/regularization.
+        args                             : Arbitrary arguments namespace.
+        lora_config                      : Optional LoRA configuration.
+        optimizer                        : Optimizer instance.
+        eval_gradient_accumulation_steps : Micro-batches to accumulate per eval step.
+        resume_from_checkpoint           : If True, resume from the latest checkpoint.
 
     Attributes:
-        model_dir                 : Output model directory from config.
-        epochs                    : Total number of training epochs.
-        checkpoint_interval_hours : Minimum hours between checkpoints.
-        max_checkpoints           : Max number of checkpoints retained.
-        tb_writer                 : TensorBoard SummaryWriter (rank-0 only) or None.
-        last_checkpoint_time      : Timestamp of the last checkpoint (rank-0 only) or None.
-        regularizer               : Adapter-specific regularization helper.
-        steps_per_epoch           : Optimizer steps per epoch.
-        total_steps               : Total global training steps across all epochs.
-        eval_step_indices         : Global step indices where evaluation is triggered.
+        model_dir                         : Output model directory from config.
+        epochs                            : Total number of training epochs.
+        checkpoint_interval_hours         : Minimum hours between checkpoints.
+        max_checkpoints                   : Max number of checkpoints retained.
+        tb_writer                         : TensorBoard SummaryWriter (rank-0 only) or None.
+        last_checkpoint_time              : Timestamp of the last checkpoint (rank-0 only) or None.
+        regularizer                       : Adapter-specific regularization helper.
+        steps_per_epoch                   : Optimizer steps per epoch.
+        total_steps                       : Total global training steps across all epochs.
+        eval_step_indices                 : Global step indices where evaluation is triggered.
+        eval_gradient_accumulation_steps  : Micro-batches to accumulate per eval step.
     """
 
     def __init__(
@@ -65,6 +66,7 @@ class Trainer:
         args,
         lora_config,
         optimizer,
+        eval_gradient_accumulation_steps,
         resume_from_checkpoint=False,
     ):
         self.config = config
@@ -76,6 +78,7 @@ class Trainer:
         self.args = args
         self.lora_config = lora_config
         self.optimizer = optimizer
+        self.eval_gradient_accumulation_steps = eval_gradient_accumulation_steps
         self.resume_from_checkpoint = resume_from_checkpoint
 
         self.model_dir = config['model_dir']
@@ -183,11 +186,13 @@ class Trainer:
 
     def evaluate(self, last_loss=None):
         """
-        Run evaluation over the entire eval dataset (GAS=1) and return the average loss.
+        Run evaluation over the entire eval dataset using the configured eval gradient
+        accumulation (eval_gradient_accumulation_steps) and return the average loss.
 
         Behavior:
         - Prints a short status line on rank-0 before and after evaluation
-        - Iterates exactly len(eval_dataloader) micro-batches using pipeline_engine.eval_batch
+        - Iterates exactly len(eval_dataloader) groups using pipeline_engine.eval_batch
+          with num_micro_batches=eval_gradient_accumulation_steps
         - Drops incomplete final batches via the eval dataloader’s internal truncation
         - Resets the eval_dataloader after completion
         - Logs 'eval/loss' to TensorBoard on rank-0
@@ -212,9 +217,11 @@ class Trainer:
 
         losses = []
         for _ in range(eval_steps):
-            # Force single-micro-batch eval to match eval_dataloader GAS=1 without changing engine state
-            # NOTE: This is to avoid losing sequences due to truncation in PipelineDataLoader's DistributedBatchSampler.
-            output = self.pipeline_engine.eval_batch(iterator, num_micro_batches=1)
+            # Use the configured eval micro-batch count to match eval_dataloader without changing engine state
+            output = self.pipeline_engine.eval_batch(
+                iterator,
+                num_micro_batches=self.eval_gradient_accumulation_steps
+            )
             losses.append(output.detach().float().mean().item())
 
         self.eval_dataloader.reset()

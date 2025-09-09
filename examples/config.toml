@@ -67,6 +67,9 @@ pipeline_stages = 1                   # (default: 1)
 # Controls the effective batch size: gradient_accumulation_steps x (world_size / pipeline_stages)
 gradient_accumulation_steps = 32      # (default: 1)
 
+# Setting this lower can help to drop fewer examples when trying to make equal-sized batches 
+eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_steps)
+
 # Set for optimised LoRA training with hybrid data+pipeline parallelism:
 # - Sends high-volume "per token" hidden states over PCIe/NVLink
 # - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand
