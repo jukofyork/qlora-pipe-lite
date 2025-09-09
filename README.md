@@ -1,52 +1,29 @@
 # qlora-pipe-lite
-A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) by [tdrussell](https://github.com/tdrussell), focused on Control Adapter training.
 
-**For full fine-tuning, LoRA, or QLoRA training, please use the original [qlora-pipe](https://github.com/tdrussell/qlora-pipe) repository which is more feature-complete and actively maintained.**
+A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) focused on Control Adapter training.
 
-## About
+**Key Features:**
+- **Pipeline Parallelism**: Train models larger than single GPU memory using DeepSpeed
+- **Supports**: LoRA, QLoRA, full fine-tuning, and Control Adapters.
+- **Memory Optimization**: 4-bit quantization, activation checkpointing, tied weights
+- **Multiple Training Modes**: LoRA, QLoRA, full fine-tuning, and Control Adapters
+- **Production Ready**: Robust checkpointing, distributed training, comprehensive monitoring
+- **Advanced Data Processing**: Flexible dataset handling with sophisticated preprocessing
 
-Control Adapters are a new Parameter-Efficient Fine-Tuning ([PEFT](https://github.com/huggingface/peft)) method that applies multiplicative transformations (and their inverse) to the residual stream of whole (ie: attention + MLP) decoder blocks, enabling the same adapter to both enhance and suppress behaviors through positive and negative training examples.
-
-## Features
-- Pipeline parallel training, for efficiently training large models that cannot fit on one GPU
-- Multi-node training support with improved data-parallel handling via shared network storage
-- Supports Control Adapters (primary focus), QLoRA, LoRA, and full fine tuning
-- Proper decoupled weight decay for LoRA parameters (applies weight decay to the full reconstructed weight matrix)
-- Quantize weights using bitsandbytes
-- Efficient model loading. Each process only loads the layers it needs, and quantizes and moves them to the GPU layer-by-layer. This means you can load a large model on a lot of GPUs even with limited system RAM.
-- Support for "raw text" training using either a structured list of documents in a JSON file, or a single txt file
-- Support for resuming training from a checkpoint, including the dataloader state, to easily allow training in a piecemeal fashion
-- Useful metrics logged to Tensorboard
-- Train on multiple datasets simultaneously, with support for contrastive datasets (eg: `class -1` and `class 1` for Control Adapters)
-- Models currently supported: Llama, Mistral, Mixtral, Qwen, Cohere (Command R), Cohere 2 (Command-A), and Gemma 2
+See [here](docs/ControlAdapters.md) for Control Adapter documentation.
 
 ## Table of Contents
 
-- [About](#about)
-- [Features](#features)
 - [Quick Start](#quick-start)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-  - [Basic Control Adapter Training](#basic-control-adapter-training)
-  - [Quick QLoRA Example](#quick-qlora-example)
-  - [Next Steps](#next-steps)
-- [What are Control Adapters?](#what-are-control-adapters)
-  - [Relationship to Control Vectors](#relationship-to-control-vectors)
-  - [Mathematical Foundation](#mathematical-foundation)
-  - [Weight Decay: Helpful but Optional](#weight-decay-helpful-but-optional)
-  - [Conversion and Compatibility](#conversion-and-compatibility)
-  - [Why Use Control Adapters?](#why-use-control-adapters)
-- [Training](#training)
-  - [Training Modes](#training-modes)
-  - [Configuration Structure](#configuration-structure)
-  - [Parallelism and Scaling](#parallelism-and-scaling)
-  - [Advanced Configuration](#advanced-configuration)
-  - [Example Training Commands](#example-training-commands)
-  - [Monitoring Training](#monitoring-training)
-- [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay)
+- [Training Modes](#training-modes)
+- [Configuration Reference](#configuration-reference)
+- [Pipeline Parallelism](#pipeline-parallelism)
+- [Data Processing](#data-processing)
+- [Utility Tools](#utility-tools)
+- [Monitoring and Analysis](#monitoring-and-analysis)
+- [Advanced Topics](#advanced-topics)
+- [Troubleshooting](#troubleshooting)
 - [Credits](#credits)
-- [Contributing](#contributing)
-- [License](#license)
 
 ## Quick Start
 
@@ -55,606 +32,404 @@ Control Adapters are a new Parameter-Efficient Fine-Tuning ([PEFT](https://githu
 - Python 3.8+
 - PyTorch 2.0+
 - CUDA-capable GPU(s)
-- 24GB+ VRAM recommended (or use QLoRA with `load_in_4bit = true`)
+- DeepSpeed
 
 ### Installation
 
 ```bash
-git clone https://github.com/your-username/qlora-pipe-lite
+git clone https://github.com/jukofyork/qlora-pipe-lite
 cd qlora-pipe-lite
 pip install -r requirements.txt
 ```
 
-### Basic Control Adapter Training
+### Basic LoRA Training
 
 1. **Create a configuration file** (`config.toml`):
 
 ```toml
-# Model and output paths
-model_dir = '/path/to/your/model'  # eg: Llama-3.1-8B
-output_dir = './my_control_adapter'
+# Model and paths
+model_dir = "/path/to/your/model"
+output_dir = "./training_output"
 
-# Control Adapter settings
-use_control_adapters = true
+# LoRA settings
 lora_rank = 16
-
-# For Llama-3.1-8B (32 layers total), skip last 2 layers
-layers_to_transform = '0:29'       # Train layers 0-29 (30 layers total)
+lora_dropout = 0.1
+lora_weight_dtype = "float32"
+lora_weight_decay = 10.0
 
 # Training parameters
 lr = 2e-5
-lora_weight_decay = 10.0
+epochs = 1
 sequence_len = 4096
-gradient_accumulation_steps = 64   # ie: ~250k tokens per step
+gradient_accumulation_steps = 8
 
-# Datasets with class labels
-[[datasets]]
-dataset_path = 'data/positive_examples.json'
-control_class = 1                  # Enhance this behavior
+# Pipeline parallelism
+pipeline_stages = 1
 
+# Dataset
 [[datasets]]
-dataset_path = 'data/negative_examples.json'
-control_class = -1                 # Suppress this behavior
+dataset_path = "data/training_data.jsonl"
 ```
 
-2. **Prepare your data** in JSON format with a "text" field:
-
-```json
-[
-  {"text": "Your training example text here..."},
-  {"text": "Another example..."}
-]
-```
-
-3. **Start training**:
+2. **Start training**:
 
 ```bash
 # Single GPU
-python train.py --config config.toml --num_gpus 1
+deepspeed --num_gpus=1 train.py --config config.toml
 
-# Multi-GPU with pipeline parallelism
-python train.py --config config.toml --num_gpus 4
+# Multi-GPU pipeline parallel
+deepspeed --num_gpus=4 train.py --config config.toml
 
 # Resume from checkpoint
-python train.py --config config.toml --resume_from_checkpoint
+deepspeed --num_gpus=4 train.py --config config.toml --resume_from_checkpoint
 ```
 
-4. **Monitor training** with TensorBoard:
+3. **Monitor progress**:
 
 ```bash
-tensorboard --host 0.0.0.0 --logdir="./my_control_adapter"
+tensorboard --logdir ./training_output
 ```
 
-5. **Convert to standard LoRA format**:
+### Quick Examples
 
-After training completes, you can convert your Control Adapter to standard PEFT-compatible LoRA format:
-
-```bash
-./tools/control_adapter_to_lora.py ./Llama-3.1-8B ./my_control_adapter/epoch1 ./my_lora
+**QLoRA (4-bit quantized LoRA)**:
+```toml
+load_in_4bit = true
+lora_rank = 16
 ```
 
-6. **Merge with base model**:
-
-To create a standalone merged model, use the included merge tool:
-
-```bash
-# Merge LoRA
-./tools/merge_lora.py ./Llama-3.1-8B ./my_lora ./my_merged_model
+**Full Fine-tuning**:
+```toml
+full_fine_tune = true
+target_modules = ["q_proj", "v_proj"]  # Optional: target specific modules
+layers_to_transform = "16:31"          # Optional: target specific layers
 ```
 
-Alternatively, use my [huggingface space](https://huggingface.co/spaces/jukofyork/merge-lora) capable of merging in the cloud and saving on upload bandwidth.
+## Training Modes
 
-7. **Convert to GGUF format** (optional):
+### LoRA (Low-Rank Adaptation)
 
-```bash
-# NOTE: Additive LoRA *ONLY* (multiplicative LoRA cannot be used with llama.cpp!)
-./llama.cpp/convert_lora_to_gguf.py --base ./Llama-3.1-8B --outtype f32 --outfile ./my_lora.gguf ./my_lora
+LoRA adds trainable low-rank matrices to frozen base model weights: `W_new = W_original + BA`
+
+**Configuration**:
+```toml
+lora_rank = 16                    # Adapter rank (bottleneck dimension)
+lora_dropout = 0.1                # Dropout on adapter weights
+lora_weight_dtype = "float32"     # Use float32 for stability with weight decay
+lora_weight_decay = 10.0          # L2 regularization on composite matrix W=BA
+
+# Optional targeting
+target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+layers_to_transform = "0:31"      # Apply to layers 0-31 (inclusive)
 ```
 
-and then run [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) using the `--lora FNAME` option (or `--lora-scaled FNAME SCALE` if you want to adjust the effect of the LoRA).
+**Key Points**:
+- Uses composite matrix regularization: `L = ½||BA||²_F` instead of separate `A`, `B` penalties
+- Requires `float32` precision for effective weight decay (avoids catastrophic cancellation)
+- Default `lora_alpha = lora_rank` (adjust learning rate instead of alpha)
+- If `target_modules` is omitted, it defaults to `"all-linear"`; you may also explicitly set `target_modules = "all-linear"`.
 
-### Quick QLoRA Example
+### QLoRA (Quantized LoRA)
 
-For memory-constrained setups, use 4-bit quantization:
+Combines LoRA with 4-bit quantization for maximum memory efficiency:
 
 ```toml
-# Add to your config.toml
-load_in_4bit = true
+load_in_4bit = true               # Enable 4-bit quantization
+lora_rank = 16
+lora_weight_dtype = "float32"     # LoRA weights remain in float32
 ```
 
-### Next Steps
+**Benefits**:
+- Approximately 75% reduction in model weight memory usage
+- Maintains training quality with float32 adapters
+- Enables training of larger models on limited hardware
 
-- See [Training](#training) for detailed configuration options
-- Check [example configs](examples/) for model-specific settings
-- Read about [What are Control Adapters?](#what-are-control-adapters)
-- Learn about [LoRA Weight Decay](#a-note-on-lora-weight-decay) implementation
+### Full Fine-tuning
 
-## What are Control Adapters?
-
-Control Adapters are a new form of PEFT adapter that simultaneously applies multiplicative (and inverse multiplicative) transformations to the residual stream (ie: the "delta" or change in hidden states) of whole decoder blocks (ie: attention + MLP). Unlike traditional LoRA adapters that add learned parameters directly to specific weight matrices, Control Adapters operate on the decoder layer level residual connections, enabling the same adapter to both enhance and suppress behaviors through positive and negative training examples; making them particularly effective for steering model behavior in specific directions.
-
-**Key Characteristics:**
-- **Residual-based**: Applied to the delta/change produced by each decoder block rather than absolute hidden state values
-- **Multiplicative**: Uses `h' = (I + W) @ h` transformations instead of additive `h' = h + (scale * B @ A) @ h` transformations like normal LoRA adapters
-- **Layer-wide**: Affects the entire residual stream rather than individual weight matrices
-- **Class-aware**: Supports positive (ie: `class 1`) and negative (ie: `class -1`, aka "unlearning") training examples, with negative examples using simple negation `h' = (I - W) @ h` to suppress rather than enhance behaviors
-- **Matrix structure control**: Optional symmetrization or antisymmetrization of the learned transformation matrix
-
-### Relationship to Control Vectors
-
-Control Adapters are conceptually similar to [Control Vectors](https://github.com/jukofyork/control-vectors), which also steer model behavior by intervening in the residual stream. However, there are important differences:
-
-- **Control Vectors**: Compute steering directions analytically using eigenvector analysis to separate behavioral classes, but combine by adding vector directions which can cause interference when multiple vectors are applied simultaneously
-
-- **Control Adapters**: Learn steering transformations through gradient-based training, making them more forgiving and suitable for "fuzzy" criteria like writing style rather than requiring carefully selected behavioral "axes". They can be thought of as having two components: the `A` vectors act as "signed direction detectors" (via dot product), whilst the `B` vectors provide the steering effect. Due to the very high dimensionality of the hidden states, multiple Control Adapters are less likely to interfere when combined.
-
-- **Enhanced expressiveness**: With the new `control_adapter_type` options, Control Adapters can learn constrained matrix structures (symmetric, antisymmetric) that naturally correspond to different types of transformations, making them even more complementary to Control Vectors for achieving full affine transformations.
-
-### Mathematical Foundation
-
-Control Adapters apply multiplicative transformations to the residual stream using a (scaled) rank-decomposed matrix:
-
-```
-W = scale * B @ A, where scale = alpha / rank
-```
-
-The transformation matrix `W` can optionally be constrained using the `control_adapter_type` setting:
-- **"full"** (default): `W` remains unconstrained 
-- **"symmetrise"**: `W' = (W + W^T) / 2` forces symmetric structure
-- **"antisymmetrise"**: `W' = (W - W^T) / 2` forces antisymmetric structure
-
-See [here](https://en.wikipedia.org/wiki/Skew-symmetric_matrix#Vector_space_structure) for more details.
-
-#### For positive examples (`class +1`):
-
-```
-h' = (I + W') @ h
-```
-
-#### For negative examples (`class -1`):
-
-```
-h' = (I - W') @ h
-```
-
-The negative transformation uses simple matrix subtraction rather than matrix inversion. This is mathematically an approximation to the [Neumann series](https://en.wikipedia.org/wiki/Neumann_series) `(I + W)^{-1} ≈ I - W + O(W^2)` when `ρ(A) << 1`, but in practice it is often the case that `ρ(A) > 1` so the link to matrix inversion is quite weak.
-
-### Classical Transformations as Special Cases
-
-Control Adapters can represent several classical transformations, with the new matrix structure options making them much more accessible:
-
-#### Symmetric transformations (using `control_adapter_type = "symmetrise"`):
-
-- **Orthogonal projection onto the null space** (aka: ["Abliteration"](https://www.lesswrong.com/posts/jGuXSZgv6qfdhMCuJ/refusal-in-llms-is-mediated-by-a-single-direction)):
-```
-I - u u^T, when the symmetric part of B @ A ≈ u u^T
-```
-
-- **Householder transformations**:
-```
-I - 2 * u u^T, when the symmetric part of B @ A ≈ 2 * u u^T
-```
-
-#### Antisymmetric transformations (using `control_adapter_type = "antisymmetrise"`):
-
-- **Rotational transformations**: Antisymmetric matrices generate rotations in high-dimensional space
-- **Skew-symmetric projections**: Useful for creating orthogonal steering directions
-
-#### Combined with Control Vectors:
-
-When used together with Control Vectors, Control Adapters can provide the linear transformation component of full [affine transformations](https://en.wikipedia.org/wiki/Affine_transformation), while Control Vectors provide the translation component.
-
-### Weight Decay: Helpful but Optional
-
-Unlike the original mathematical formulation that tried to apply strict norm constraints to keep `ρ(A) << 1`, the simplified negation approach makes weight decay **helpful but not essential**:
-
-- **Still beneficial**: Proper regularization helps control the magnitude of transformations and improves training stability
-- **No longer critical**: The simple negation approach doesn't require convergence guarantees or strict norm bounds
-- **Flexible precision**: Both `float32` (recommended) and `bfloat16` adapter weights are allowed
-
-For typical setups, moderate weight decay values (10-100) can help with training stability, but the system remains robust without it.
-
-### Conversion and Compatibility
-
-Control Adapters can be converted to standard [PEFT](https://github.com/huggingface/peft) compatible LoRAs easily via a SVD-based approximation that converts the multiplicative effect into standard (additive) LoRA format.
-
-This flexibility allows Control Adapters to be used with existing LoRA-compatible inference frameworks while maintaining their unique training advantages.
-
-See the [control_adapter_to_lora.py](tools/control_adapter_to_lora.py) for the conversion script. Note that the Cohere and Mixtral models require the `--cohere` and `--mixtral` command line options respectively, due to their different residual stream writing mechanisms (ie: via `o_proj` and `w2`).
-
-### Why Use Control Adapters?
-
-Control Adapters excel in scenarios where you need:
-- **Precise behavioral steering** with "fuzzy" criteria (eg: writing style, tone) rather than requiring carefully crafted behavioral axes like Control Vectors
-- **Structured transformations** using symmetric/antisymmetric constraints to learn specific types of mathematical operations
-- **Compositional control** - multiple Control Adapters can be combined with minimal interference due to high-dimensional space and the A/B decomposition
-- **Bidirectional training** with positive and negative examples to both enhance and suppress behaviors using the same parameters
-- **Smaller datasets** - more forgiving than traditional methods and are effective with less well-structured data
-- **Mathematical expressiveness** - can easily learn classical transformations like "abliteration" or Householder transforms
-- **Complementary to Control Vectors** - work together to enable full affine transformations of decoder outputs
-
-**Best used for**: Behavioral modification, style transfer, "unlearning" specific behaviors, and learning structured transformations.
-
-**NOTE**: For general fine-tuning tasks like instruction following or domain adaptation, traditional LoRA or QLoRA may be more appropriate. Control Adapters are specifically designed for behavioral steering applications.
-
-## Training
-
-Supports multiple training modes: **Control Adapters**, **LoRA**, **QLoRA**, and **full fine-tuning**. The training system uses **DeepSpeed** for efficient large model training with pipeline parallelism, data parallelism, and memory optimization techniques like 4-bit quantization.
-
-### Training Modes
-
-#### Full Fine-Tuning
-
-Loads and updates all model parameters using `bfloat16`:
+Updates all model parameters with optional targeting:
 
 ```toml
 full_fine_tune = true
+
+# Optional: target specific modules/layers
+target_modules = ["q_proj", "v_proj", "down_proj"]
+layers_to_transform = "16:31"
 ```
 
-**NOTE**: Weight decay is not supported for full fine-tuning due to:
+**Key Points**:
+- Uses `bfloat16` for memory efficiency
+- Supports tied embedding weights with automatic gradient synchronization
+- No weight decay (counterproductive for pretrained weights)
 
-1. **Catastrophic cancellation** with `bfloat16` precision (see [LoRA Weight Decay Implementation](#lora-weight-decay-implementation) below)
-2. **Poor inductive bias** - pulling pretrained weights toward zero is counterproductive (unlike LoRA where a zero Bayesian prior is beneficial)
+## Configuration Reference
 
-#### LoRA (Low-Rank Adaptation)
-
-Trains low-rank adapter matrices on top of frozen base model weights:
+### Core Settings
 
 ```toml
-lora_rank = 64
-lora_alpha = 64                  # Default: sqrt(rank) for rsLoRA scaling (see: https://arxiv.org/abs/2312.03732)
-lora_dropout = 0.05              # Default: 0.0
-lora_weight_decay = 10.0         # Default: 0.0, requires float32 adapters
-lora_weight_decay_type = "l2"    # Default: "nuclear", options: "nuclear", "l2", "l1"
-lora_max_norm = 1.0              # Default: 0.0, Frobenius norm constraint on LoRA weights
-lora_weight_dtype = "float32"    # Default: "float32", use "bfloat16" to save memory (disables weight decay)
+# Model and output paths
+model_dir = "/path/to/model"
+output_dir = "/path/to/output"
+
+# Training parameters
+lr = 2e-5                         # Learning rate
+epochs = 1                        # Number of training epochs
+sequence_len = 4096               # Fixed sequence length (must be multiple of 64)
+gradient_accumulation_steps = 8   # Micro-batches per optimizer step
+
+# Pipeline configuration
+pipeline_stages = 1               # Number of pipeline stages (must divide world_size)
+partition_method = "uniform"      # "uniform", "parameters", or "type:regex"
 ```
 
-**NOTE**: The `lora_weight_dtype` parameter controls the precision of LoRA adapter parameters. When set to its default `float32`, it enables `lora_weight_decay` for proper regularization. When set to `bfloat16`, weight decay is automatically disabled due to catastrophic cancellation (see [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) below).
-
-#### QLoRA (Quantized LoRA)
-
-LoRA (or Control Adapter) training on 4-bit quantized base models for memory efficiency:
+### Advanced Optimizer Settings
 
 ```toml
-load_in_4bit = true
+# Optimizer configuration (uses optimi.Adam with Kahan summation)
+beta1 = 0.9                       # Default: 0.9
+beta2 = 0.99                      # Default: 0.99  
+eps = 1e-6                        # Default: 1e-6
+
+# Note: Uses RMS ratio scheduling: sqrt((1-β₂^t)/(1+β₂^t))
 ```
 
-#### Control Adapters
-
-Contrastive training using LoRA-like (multiplicative) transformations on decoder block outputs:
+### Evaluation and Checkpointing
 
 ```toml
-use_control_adapters = true
+# Evaluation settings
+eval_fraction = 0.01                  # Fraction of data for evaluation
+evals_per_epoch = 10                  # Evaluations per epoch
+eval_gradient_accumulation_steps = 1  # Separate setting for evaluation
+
+# Checkpointing
+checkpoint_interval_hours = 1         # Time-based checkpoint frequency
+max_checkpoints = 3                   # Maximum checkpoints to retain
 ```
 
-Control Adapters support **class-aware training** with positive and negative examples:
+### Memory and Performance Tuning
 
 ```toml
-[[datasets]]
-dataset_path = '/path/to/positive_examples/*.json'
-control_class = 1   # Enhance behaviors (default)
+# Memory optimization
+load_in_4bit = true               # Enable 4-bit quantization
+use_column_major_topology = true  # Optimize for mixed interconnects
 
-[[datasets]]
-dataset_path = '/path/to/negative_examples/*.json'
-control_class = -1  # Suppress/unlearn behaviors
+# Data processing
+max_sequences = 1000000           # Limit total sequences
+drop_tails = false                # Drop incomplete document tails
+mix_datasets = false              # Allow cross-dataset sequence mixing
 ```
 
-### Configuration Structure
+## Pipeline Parallelism
 
-Training configurations use TOML files with the following main sections:
+### Basic Concept
 
-#### Model and Output
+Pipeline parallelism splits the model vertically across GPUs:
+
+```
+GPU 0: [Embedding] → [Decoder Layers 0-7]
+GPU 1: [Decoder Layers 8-15] → [Decoder Layers 16-23]  
+GPU 2: [Decoder Layers 24-31] → [Norm] → [LM Head] → [Loss]
+```
+
+### Configuration
 
 ```toml
-model_dir = '/path/to/model'
-output_dir = '/path/to/output'
+pipeline_stages = 3               # Split model across 3 GPUs
+partition_method = "uniform"      # How to distribute layers
+
+# Alternative partitioning strategies:
+# partition_method = "parameters"           # Balance by parameter count
+# partition_method = "type:decoderlayer"    # Balance by layer type
 ```
 
-**NOTE**: For multi-node training, ensure paths use the same mount point across all nodes.
+### Multi-Node Setup
 
-#### Optimizer Settings
+For multi-node training, ensure:
+1. **Shared filesystem**: All nodes can access the same model and data paths
+2. **Network configuration**: Proper NCCL/MPI setup
+3. **SSH access**: Passwordless SSH between nodes
 
-```toml
-lr = 5e-5
-epochs = 1                       # Default: 1
-beta1 = 0.9                      # Default: 0.9
-beta2 = 0.99                     # Default: 0.99
-eps = 1e-6                       # Default: 1e-6
+```bash
+# Multi-node example
+deepspeed --num_gpus=8 --num_nodes=2 --master_addr=node0.cluster.local train.py --config config.toml
 ```
 
-**NOTE**: Uses the [**optimi Adam optimizer**](https://optimi.benjaminwarner.dev/optimizers/adam/) with [Kahan summation](https://en.wikipedia.org/wiki/Kahan_summation_algorithm) automatically applied for low-precision parameters.
+### Topology Optimization
 
-#### Training Parameters
-
-```toml
-sequence_len = 32768
-gradient_accumulation_steps = 32      # Controls effective batch size
-eval_gradient_accumulation_steps = 1  # Default: same as gradient_accumulation_steps
-pipeline_stages = 1                   # Must evenly divide world_size
-```
-
-**NOTE**: Reducing `eval_gradient_accumulation_steps` can help drop fewer examples when creating equal-sized evaluation batches.
-
-#### Tokenizer Options
-
-```toml
-# Add prefix space when tokenizing (useful for some tokenizers)
-# Controlled via command line: --add-prefix-space
-```
-
-#### Dataset Configuration
-
-Multiple datasets with optional class labels and document processing options:
-
-```toml
-[[datasets]]
-dataset_path = 'raw_text_data/*.txt'
-
-[[datasets]]
-dataset_path = 'structured_data/*.json'
-control_class = 1                        # Default: enhance behavior
-document_suffix = "<EOT>"                # String to append before tokenizing
-
-[[datasets]]
-dataset_path = 'negative_examples/*.json'
-control_class = -1                       # Suppress/unlearn behavior
-document_suffix = ""                     # No additional tokens added
-```
-
-##### Document suffix options (per-dataset, applied during tokenization)
-
-```toml
-                                 # Default: tokenize first, then add tokenizer's EOS token if missing
-# document_suffix = ""           # Empty suffix: no additional tokens added
-# document_suffix = "<EOT>"      # String to append before tokenizing
-# document_suffix = 123          # Single token ID to append after tokenizing
-# document_suffix = [123, 456]   # Multiple token IDs to append after tokenizing
-```
-
-**Supported formats**: `.txt` (raw text), `.json`, `.jsonl`, `.parquet` (structured with "text" field)
-
-**NOTE**: For multi-node training, ensure paths use the same mount point across all nodes. Using shared dataset paths also enables cache reuse, where secondary nodes can load preprocessed data created by the main node instead of reprocessing datasets independently.
-
-### Parallelism and Scaling
-
-#### Pipeline Parallelism
-
-Splits the model across multiple GPUs vertically (by layers):
-
-```toml
-pipeline_stages = 2              # Divide model across 2 GPUs
-```
-
-#### Data Parallelism
-
-Automatically configured based on available GPUs:
-- **Total GPUs**: `world_size`
-- **Data parallel instances**: `world_size / pipeline_stages`
-- **Effective batch size**: `gradient_accumulation_steps × (world_size / pipeline_stages)`
-
-#### Hybrid Parallelism Optimization
-
-For LoRA training with mixed interconnects:
+For mixed interconnect environments (PCIe + InfiniBand):
 
 ```toml
 use_column_major_topology = true
 ```
 
-This optimization:
+This optimization can be useful for LoRAs as it routes:
+- **High-bandwidth activations** over fast PCIe/NVLink
+- **Low-bandwidth gradients** over slower network interconnects
 
-- Sends high-volume hidden states over **PCIe/NVLink**
-- Sends low-volume LoRA gradients over **Ethernet/InfiniBand**
+## Data Processing
 
-#### Pipeline Partitioning
+### Dataset Configuration
 
-Control how layers are split across pipeline stages with `partition_method`
-in your `config.toml` (use lowercase values):
-
-- "uniform"      : balances number of layers per stage (default)
-- "parameters"   : balances trainable parameter counts per stage
-- "type:[regex]" : balances layers whose class names match [regex]
-                   (case-insensitive), matched against Pipeline LayerSpec
-                   class names (e.g., DecoderLayerPipe, EmbeddingPipe)
-
-Examples:
+Support for multiple formats and sophisticated preprocessing:
 
 ```toml
-# Partitioning strategy for pipeline parallelism
-partition_method = "uniform"  # default
+[[datasets]]
+dataset_path = "data/train/*.jsonl"
+max_tokens = 1000000             # Limit dataset size
 
-# Other options:
-# partition_method = "parameters"
-# partition_method = "type:decoderlayer"  # matches DecoderLayerPipe
-# partition_method = "type:(decoderlayerpipe|embeddingpipe|lmheadpipe)"
-# partition_method = "type:^decoderlayerpipe$"  # exact match (case-insensitive)
+[[datasets]]
+dataset_path = "data/validation/*.txt"
 ```
 
-### Advanced Configuration
+### Supported Formats
 
-#### Layer and Module Targeting
+- **Text files** (`.txt`): Raw text, one document per file
+- **JSON/JSONL** (`.json`, `.jsonl`): Structured data with `"text"` field
+- **Parquet** (`.parquet`): Columnar format with `"text"` field
+
+### Advanced Processing Options
 
 ```toml
-# Target specific modules (not available with Control Adapters - they operate per layer)
-target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
+# Sequence initialization
+sequence_prefix = "<BOS>"         # String to encode as prefix tokens
+# sequence_prefix = 123           # Single token ID
+# sequence_prefix = [123, 456]    # Multiple token IDs
 
-# Target specific layers (works with all training types, can combine with target_modules)
-layers_to_transform = '16:31'  # Layers 16-31 (inclusive:inclusive, with first layer = 0 / last layer = n-1)
+# Document suffixes (applied during tokenization)
+document_suffix = "<EOT>"         # String suffix before tokenization
+# document_suffix = 123           # Token ID after tokenization
+# document_suffix = [123, 456]    # Multiple token IDs
+
+# Token masking (sets labels = -100 for loss exclusion)
+mask_tokens = true                # Mask all special tokens
+# mask_tokens = 123               # Mask specific token
+# mask_tokens = [123, 456]        # Mask multiple tokens
 ```
 
-#### Checkpointing
+### Distributed Data Loading
 
-```toml
-checkpoint_interval_hours = 1    # Default: 1
-max_checkpoints = 3              # Default: 3
+The framework implements distributed data loading with per-rank sampling, remainder truncation to ensure complete global batches, stateful iteration for checkpoint/resume support, and memory-efficient pinned memory allocation.
+
+## Utility Tools
+
+### Model Conversion and Merging
+
+**Merge LoRA into base model**:
+```bash
+python merge_lora.py \
+  --input /path/to/base_model \
+  --adapter /path/to/lora_adapter \
+  --output /path/to/merged_model \
+  --scale 1.0
 ```
 
-Use the `--resume_from_checkpoint` flag to continue training from the most recent checkpoint:
+**Convert DeepSpeed checkpoints to LoRA**:
+```bash
+python convert_ds_checkpoint.py \
+  --input /path/to/ds_checkpoint \
+  --config /path/to/config.toml \
+  --output /path/to/lora_adapter
+```
+
+## Monitoring and Analysis
+
+### TensorBoard Metrics
+
+Monitor training progress via TensorBoard:
 
 ```bash
-python train.py --config config.toml --resume_from_checkpoint
+tensorboard --logdir /path/to/output_dir --host 0.0.0.0
 ```
 
-**NOTE**: The system automatically resumes from the latest checkpoint in the output directory, including dataloader state for seamless continuation.
+**Available metrics**:
+- `eval/loss`: Evaluation loss with percentage changes
+- `train/loss`: Training loss progression
+- `train/lr`: Learning rate schedule
+- `train/norms_{avg,min,max}`: LoRA adapter norm statistics
+- `train/weight_decay_{avg,min,max}`: LoRA regularization effectiveness
 
-#### Evaluation
+### Training Progress Monitoring
 
-```toml
-eval_fraction = 0.01             # Default: 0.01
-evals_per_run = 5                # Default: 11 (eg: 1 at start, 1 at end, and 9 more evenly spaced)
+Console output provides real-time metrics:
+
+```
+[2024-01-15 14:30:25.123] [INFO] [qlora-pipe-lite] step: 100 / 1000, loss: 2.3456, lr: 1.95e-05, throughput: 42.3 sequences/s, elapsed: 5m30s, eta: 45m12s
 ```
 
-#### LoRA Weight Decay Implementation
+## Advanced Topics
 
-```toml
-lora_weight_decay = 10.0         # Default: 0.0
-lora_weight_decay_type = "l2"    # Default: "nuclear", options: "nuclear", "l2", "l1"
-lora_max_norm = 1.0              # Default: 0.0, Frobenius norm constraint on LoRA weights
+### Custom Cross-Entropy Kernel
+
+The framework includes [Unsloth](https://github.com/unslothai/unsloth)'s optimized Triton cross-entropy loss kernel (`kernels/cross_entropy_loss.py`) that handles large vocabularies (>65K tokens) via chunking, uses numerically stable LogSumExp implementation, and provides fused forward/backward passes for memory efficiency.
+
+### Memory Optimization Techniques
+
+The framework uses several memory optimization techniques:
+
+**Activation Checkpointing**: Uses [Unsloth](https://github.com/unslothai/unsloth)'s CPU offloading strategy with automatic application to decoder layers. The system patches BitsAndBytes for safe CPU↔GPU transfers when using 4-bit quantization.
+
+**Tied Weight Support**: Implements proper parameter sharing for embedding/output layers using DeepSpeed's `TiedLayerSpec` with automatic gradient synchronization across pipeline stages.
+
+### Custom LoRA Weight Decay Implementation
+
+This framework implements a novel composite matrix regularization that addresses fundamental issues with standard LoRA weight decay:
+
+**The Problem**: Traditional weight decay applied to `A` and `B` separately fails because:
+1. **Catastrophic cancellation**: Tiny decay amounts cancel to zero with `float16`/`bfloat16` precision
+2. **Wrong target**: Should regularize the actual learned transformation `W = scale * B @ A`, not individual matrices
+
+**The Solution**: Custom decoupled weight decay on the composite matrix:
+
+### Regularization Mathematics
+
+**LoRA Weight Decay**:
+The composite matrix regularization prevents the catastrophic cancellation issue:
+
+```
+L_total = L_task + λ/2 ||BA||²_F
+
+∂L/∂A = ∂L_task/∂A + λ B^T(BA)
+∂L/∂B = ∂L_task/∂B + λ (BA)A^T
 ```
 
-See the [A Note on LoRA Weight Decay](#a-note-on-lora-weight-decay) section below.
+This approach:
+- Uses `Adam` (not `AdamW`) for the primary loss
+- Applies SGD-style decay to the composite matrix using the same learning rate
+- **Requires `float32` precision** for adapter weights to avoid cancellation
+- Directly penalizes the transformation that affects model behavior
 
-#### Global sequence processing options (applied to all datasets)
+## Troubleshooting
 
-```toml
-max_sequences = 1000000          # Default: unlimited
-drop_tails = true                # Drop partial sequences at document ends (Default: false)
-mix_datasets = true              # Allow sequences to mix tokens from multiple datasets (Default: false)
-```
+### Common Issues
 
-##### Sequence initialization (applied at start of each sequence)
+**Out of Memory**: Enable 4-bit quantization (`load_in_4bit = true`), reduce sequence length/batch size, or increase pipeline stages.
 
-```toml
-                                 # Default: add BOS token if it exists
-# sequence_prefix = ""           # No prefix tokens
-# sequence_prefix = "<BOS>"      # String to encode as tokens  
-# sequence_prefix = 123          # Single token ID
-# sequence_prefix = [123, 456]   # Multiple token IDs
-```
+**Poor Convergence**: Check learning rate (typical range: `1e-5` to `5e-5`), verify data quality and format, monitor for gradient explosion via sudden loss spikes.
 
-##### Token masking (sets `control_classes = 0` and `labels = -100` for specified tokens)
+**Pipeline Issues**: Ensure `pipeline_stages` divides `world_size` evenly, verify all nodes can access model/data paths, check network connectivity for multi-node setups.
 
-```toml
-                                 # Default: no masking
-# mask_tokens = true             # Mask all special tokens
-# mask_tokens = 123              # Mask specific token ID
-# mask_tokens = [123, 456]       # Mask multiple token IDs
-```
-
-### Example Training Commands
-
+**RTX 4000 Series GPUs** may need one or both of these environment variables setting:
 ```bash
-# Single GPU LoRA Training
-python train.py --config examples/config.toml --num_gpus 1
+export NCCL_P2P_DISABLE="1"
+export NCCL_IB_DISABLE="1"
+deepspeed --num_gpus=4 train.py --config config.toml
 ```
 
-```bash
-# Multi-GPU Pipeline Parallel Training  
-python train.py --config examples/config_qwq.toml --num_gpus 4
-```
+### Validation Steps
 
-```bash
-# Multi-Node Training
-python train.py --config config.toml --num_gpus 8 --master_addr node0.example.com
-```
+**Before training**: Verify dataset format and paths, test configuration with a small dataset, check GPU memory usage with target batch size.
 
-```bash
-# Training with prefix space tokenization
-python train.py --config config.toml --add-prefix-space
-```
+**During training**: Monitor loss convergence, verify checkpoint saving/loading works correctly.
 
-```bash
-# Resume from checkpoint
-python train.py --config config.toml --resume_from_checkpoint
-```
+**After training**: Test inference with merged models, validate outputs on held-out data.
 
-**NOTES**:
+**For LoRA training specifically**: Monitor norm stability (should converge), watch for gradient explosion (sudden loss spikes), verify effective batch size via throughput metrics.
 
-- The `--num_gpus` option may not be required depending on your setup
-- RTX 4000 series GPUs may need `NCCL_P2P_DISABLE="1" NCCL_IB_DISABLE="1"` environment variables setting
-- For multi-node training guidance, see the [Stanford DeepSpeed tutorial](https://nlp.stanford.edu/mistral/tutorials/deepspeed.html) and how to setup [passwordless SSH](https://wiki.debian.org/Setup%20SSH%20Passwordless%20Login)
-- Use `--add-prefix-space` for tokenizers that require prefix spaces (check your tokenizer documentation)
-
-### Monitoring Training
-
-You can use [TensorBoard](https://www.tensorflow.org/tensorboard) to visualize training and evaluation metrics:
-
-```bash
-tensorboard --host 0.0.0.0 --logdir="/path/to/output_dir"
-```
-
-Then open `http://localhost:6006` in your browser.
-
-## A Note on LoRA Weight Decay
-
-Traditional weight decay applied directly to LoRA parameters (`lora_A` and `lora_B`) has significant limitations that this implementation addresses through **decoupled weight decay on the composite matrix**.
-
-### The Problem with standard weight decay
-
-1. **Catastrophic Cancellation**: Standard optimizer weight decay fails with `float16`/`bfloat16` precision because the tiny decay amounts cancel out to zero when applied to the relatively large parameter tensors!
-
-2. **Incorrect Regularization Target**: Applying weight decay to `A` and `B` matrices separately doesn't properly regularize the actual learned transformation `W = scale * B @ A` that affects the model's behavior!
-
-### Solution: Custom 'composite' decoupled weight decay + use `float32` adapters only
-
-#### `lora_weight_decay_type = "nuclear"` (default):
-
-Minimizing the ℓ2-regularized problem in A and B is mathematically equivalent to minimizing the nuclear-norm regularized loss in the product `X = AB^T` subject to a rank constraint (see [this paper](https://arxiv.org/abs/0706.4138) for details):
-
-```
-L' = L + λ · (||A||_F² + ||B||_F²)
-```
-
-```
-∂L'/∂A = 2 · λ · scale · A
-∂L'/∂B = 2 · λ · scale · B
-```
-
-#### `lora_weight_decay_type = "l2"`:
-
-Instead of regularizing `A` and `B` independently, we can also apply decoupled weight decay to the composite matrix `W = scale * B @ A`. This directly penalizes the composite transformation that actually affects model behavior:
-
-```
-L' = L + λ · ½||W||_F²
-```
-
-```
-∂L'/∂A = λ · scale · B^T W
-∂L'/∂B = λ · scale · W A^T
-```
-
-#### `lora_weight_decay_type = "l1"`:
-
-For completeness, we can also apply something akin to ℓ1-regularization:
-
-```
-L' = L + λ · ||W||_F
-```
-
-```
-∂L'/∂A = λ · scale · B^T (W/||W||_F)
-∂L'/∂B = λ · scale · (W/||W||_F) A^T
-```
-
-and then update using [soft thresholding](https://en.wikipedia.org/wiki/Proximal_gradient_methods_for_learning#Solving_for_L1_proximity_operator).
-
-#### General Guidelines:
-
-- Use `Adam` (**NOT** `AdamW`) with the primary loss `L`
-- Use SGD (without momentum) for the regularization term using the same learning rate (ie: decoupled, pseudo-`AdamW`)
-- Always use `float32` precision for `A` and `B` matrices to avoid catastrophic cancellation
-- Use the `lora_weight_decay` parameter in your `config.toml` file to control the regularization strength
-- Use the `lora_weight_decay_type` parameter in your `config.toml` file to control the regularization type
 
 ## Credits
 
-- **[tdrussell](https://github.com/tdrussell)** - Original author of [qlora-pipe](https://github.com/tdrussell/qlora-pipe), which this project is forked from.
-- **[Daniel Han-Chen & the Unsloth team](https://github.com/unslothai/unsloth)** - For [`cross_entropy_loss.py`](kernels/cross_entropy_loss.py) and [`unsloth_checkpoint.py`](utils/unsloth_checkpoint.py).
-
-## Contributing
-
-Contributions to this project are welcome. Please feel free to fork the repository and submit pull requests.
+- **[tdrussell](https://github.com/tdrussell)** - Original author of [qlora-pipe](https://github.com/tdrussell/qlora-pipe)
+- **[Daniel Han-Chen & Unsloth team](https://github.com/unslothai/unsloth)** - Cross-entropy kernel and checkpoint utilities
 
 ## License
 
-This project is licensed under the MIT license - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
