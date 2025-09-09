@@ -75,6 +75,15 @@ eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_
 # - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand
 #use_column_major_topology = true
 
+# Partitioning strategy for pipeline parallelism.
+# - "uniform"      : balances number of layers per stage (default)
+# - "parameters"   : balances trainable parameter counts per stage
+# - "type:[regex]" : balances layers whose class names match [regex] (case-insensitive), eg:
+#                      "type:decoderlayer"        [matches DecoderLayerPipe]
+#                      "type:^decoderlayerpipe$"  [exact match]
+#                      "type:(decoderlayerpipe|embeddingpipe|lmheadpipe)"
+#partition_method = "type:decoderlayerpipe"
+
 # =================================
 # MODULE/LAYER FILTER CONFIGURATION
 # =================================

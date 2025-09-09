@@ -446,6 +446,30 @@ This optimization:
 - Sends high-volume hidden states over **PCIe/NVLink**
 - Sends low-volume LoRA gradients over **Ethernet/InfiniBand**
 
+#### Pipeline Partitioning
+
+Control how layers are split across pipeline stages with `partition_method`
+in your `config.toml` (use lowercase values):
+
+- "uniform"      : balances number of layers per stage (default)
+- "parameters"   : balances trainable parameter counts per stage
+- "type:[regex]" : balances layers whose class names match [regex]
+                   (case-insensitive), matched against Pipeline LayerSpec
+                   class names (e.g., DecoderLayerPipe, EmbeddingPipe)
+
+Examples:
+
+```toml
+# Partitioning strategy for pipeline parallelism
+partition_method = "uniform"  # default
+
+# Other options:
+# partition_method = "parameters"
+# partition_method = "type:decoderlayer"  # matches DecoderLayerPipe
+# partition_method = "type:(decoderlayerpipe|embeddingpipe|lmheadpipe)"
+# partition_method = "type:^decoderlayerpipe$"  # exact match (case-insensitive)
+```
+
 ### Advanced Configuration
 
 #### Layer and Module Targeting

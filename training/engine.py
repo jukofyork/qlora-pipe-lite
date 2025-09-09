@@ -158,8 +158,15 @@ class Engine:
         Create a PipelineModule from a base model for distributed training.
 
         Configuration:
-            - Activation checkpointing of LayerSpec names containing 'decoderlayer' via unsloth_checkpoint (case-insensitive)
-            - Type-balanced partitioning of DecoderLayerPipe via "partition_method='type:decoderlayer'" (case-insensitive)
+            - Activation checkpointing of LayerSpec names containing 'decoderlayer'
+              via unsloth_checkpoint (case-insensitive)
+            - Partitioning controlled by config['partition_method']:
+                * 'uniform'      : balances number of layers per stage (default)
+                * 'parameters'   : balances trainable parameter counts per stage
+                * "type:[regex]" : balances layers whose class names match [regex] (case-insensitive), eg:
+                                     "type:decoderlayer"        [matches DecoderLayerPipe]
+                                     "type:^decoderlayerpipe$"  [exact match]
+                                     "type:(decoderlayerpipe|embeddingpipe|lmheadpipe)"
             - Topology may be column-major or standard using PipeDataParallelTopology
 
         Args:
@@ -195,11 +202,18 @@ class Engine:
         else:
             topology = PipeDataParallelTopology(num_pp=num_stages, num_dp=num_dp)
 
+        # Validate partition_method
+        partition_method = config.get('partition_method', 'uniform')
+        if not isinstance(partition_method, str):
+            raise TypeError("partition_method must be a string")
+        if partition_method not in ('uniform', 'parameters') and not partition_method.startswith('type:'):
+            raise ValueError("Invalid partition_method, expected: 'uniform', 'parameters' or 'type:[regex]'")
+
         pipeline_model = PipelineModule(
             layers=layers,
             num_stages=num_stages,
             topology=topology,
-            partition_method='type:decoderlayer',  # Matched via case-insensitive regex in PipelineModule._find_layer_type()
+            partition_method=partition_method,
             activation_checkpoint_interval=1,
             activation_checkpoint_func=unsloth_checkpoint,
             checkpointable_layers=checkpointable_layers
