@@ -200,7 +200,7 @@ partition_method = "uniform"      # "uniform", "parameters", or "type:regex"
 NOTE:
 
 - The micro-batch size per GPU is fixed internally to 1.
-- Effective batch size = gradient_accumulation_steps × data_parallel_world_size.
+- Effective batch size = `gradient_accumulation_steps` × `data_parallel_world_size`.
 
 ### Advanced Optimiser Settings
 
@@ -209,9 +209,13 @@ NOTE:
 beta1 = 0.9                       # Default: 0.9
 beta2 = 0.99                      # Default: 0.99  
 eps = 1e-6                        # Default: 1e-6
-
-# Note: Uses RMS ratio scheduling: sqrt((1-β₂^t)/(1+β₂^t))
 ```
+
+NOTE:
+
+- We use [optimi's Kahan summation](https://optimi.benjaminwarner.dev/kahan_summation) to make pure low precision training match mixed-precision training.
+- By default, [optimi's Adam optimiser](https://optimi.benjaminwarner.dev/optimizers/adam) will automatically use Kahan summation for any layers training in `bfloat16` or `float16`.
+- The code also uses a custom `beta2`-based learning rate scheduler (see [Custom Learning Rate Scheduling](#custom-learning-rate-scheduling) below).
 
 ### Evaluation and Checkpointing
 

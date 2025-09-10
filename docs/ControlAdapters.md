@@ -300,7 +300,7 @@ Control Adapters employ three regularisation mechanisms:
 
 During training, monitor these metrics via TensorBoard:
 
-- **`train/norms_{avg,min,max}`**: Spectral norms (≈ max |λ|) per layer
+- **`train/norms_{avg,min,max}`**: Spectral norms (≈ `max |λ|`) per layer
 - **`train/orthogonality_{avg,min,max}`**: `‖Q^T Q - I‖_F²` constraint satisfaction
 - **`train/weight_decay_{avg,min,max}`**: Norm reduction from regularisation (if applied)
 
