@@ -240,18 +240,16 @@ def apply_lora_adapters(model, config, lora_config):
 
 def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, config_path, lora_output_dir):
     """
-    Convert pipeline-parallel DeepSpeed checkpoints into a saved LoRA adapter directory.
+    Convert pipeline-parallel DeepSpeed checkpoints into a saved LoRA/control-adapter directory.
 
-    Steps:
-        - Load training config from TOML
-        - Merge per-layer model_states.pt files into a single state dict with HF-compatible keys
-        - Build LoRA config via create_lora_config/parse_layers_to_transform
-        - Write adapter_model.bin and adapter_config.json to output directory
+    Filters out BitsAndBytes 4-bit buffers (absmax/quant_map/quant_state, etc.) and base model weights,
+    keeping only adapter tensors:
+      - LoRA: *.lora_A.weight / *.lora_B.weight (and optional modules_to_save.*)
+      - Control Adapters: control_Q / control_S
 
-    Args:
-        ds_checkpoint_dir (str): Path to DeepSpeed checkpoint directory containing layer_*-model_states.pt files.
-        config_path (str): Path to the training config TOML file used for the run.
-        lora_output_dir (str): Destination directory for the LoRA adapter artifacts.
+    Saved keys are normalized to HF/PEFT-compatible names:
+      - Strips leading 'orig.' indirection introduced by pipeline wrappers
+      - Removes PEFT wrappers '.modules_to_save' and '.default'
     """
     # Load config
     with open(config_path) as f:
@@ -264,9 +262,33 @@ def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, config_path, lora_output_di
             f"No checkpoint files matching 'layer_*-model_states.pt' found in '{ds_checkpoint_dir}'"
         )
 
+    def _wants_key(name: str) -> bool:
+        # Control adapters
+        if 'control_Q' in name or 'control_S' in name:
+            return True
+        # LoRA
+        if '.lora_A.' in name or name.endswith('.lora_A.weight'):
+            return True
+        if '.lora_B.' in name or name.endswith('.lora_B.weight'):
+            return True
+        # Optional PEFT "modules_to_save" items
+        if '.modules_to_save.' in name:
+            return True
+        # Everything else (base weights, bnb buffers) -> ignore
+        return False
+
+    def _normalize_name(name: str) -> str:
+        # Remove the pipeline wrapper indirection
+        if name.startswith('orig.'):
+            name = name[len('orig.'):]
+        # Strip PEFT wrappers to match how we save during training
+        name = name.replace('.default', '').replace('.modules_to_save', '')
+        return name
+
     combined_state_dict = {}
+    kept, dropped = 0, 0
+
     for path in layer_checkpoint_files:
-        # Expect exact 'layer_<N>-model_states.pt' filenames with integer N
         basename = os.path.basename(path)
         match = re.fullmatch(r'layer_(\d+)-model_states\.pt', basename)
         if not match:
@@ -276,16 +298,22 @@ def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, config_path, lora_output_di
             )
         layer_idx = int(match.group(1)) - 2
         state_dict = torch.load(path, weights_only=True)
+
         for name, weight in state_dict.items():
-            converted_name = f'base_model.model.model.layers.{layer_idx}.{name}'
+            if not _wants_key(name):
+                dropped += 1
+                continue
+            kept += 1
+            inner_name = _normalize_name(name)
+            converted_name = f'base_model.model.model.layers.{layer_idx}.{inner_name}'
             combined_state_dict[converted_name] = weight
 
-    # Create LoRA config
+    # Create LoRA config (also used to carry metadata alongside control adapters)
     lora_config = create_lora_config(config)
 
     # Save files
     os.makedirs(lora_output_dir, exist_ok=True)
     torch.save(combined_state_dict, os.path.join(lora_output_dir, 'adapter_model.bin'))
-
-    # Save adapter config (handles set→list conversion internally)
     lora_config.save_pretrained(lora_output_dir)
+
+    print(f"Converted DS checkpoint -> adapter: kept {kept} tensors, dropped {dropped} non-adapter entries")
