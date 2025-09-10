@@ -9,7 +9,7 @@ This document describes Control Adapters as implemented in `qlora-pipe-lite`. Co
 - [Mathematical Foundation](#mathematical-foundation)
 - [Configuration](#configuration)
 - [Data and Classes](#data-and-classes)
-- [Training Behavior](#training-behavior)
+- [Training Behaviour](#training-behaviour)
 - [Analysis and Monitoring](#analysis-and-monitoring)
 - [Conversion to LoRA](#conversion-to-lora)
 - [Best Practices](#best-practices)
@@ -34,15 +34,15 @@ sequence_len = 4096
 # Your datasets with class labels
 [[datasets]]
 dataset_path = "data/positive_examples.jsonl"
-control_class = 1    # Enhance this behavior
+control_class = 1    # Enhance this behaviour
 
 [[datasets]]
 dataset_path = "data/negative_examples.jsonl" 
-control_class = -1   # Suppress this behavior
+control_class = -1   # Suppress this behaviour
 
 [[datasets]]
 dataset_path = "data/neutral_examples.jsonl"
-control_class = 0    # Randomized regularizer (mapped to ±1 during preprocessing)
+control_class = 0    # Randomly assigned ±1 during preprocessing (regularisation technique - see below)
 ```
 
 ### 2. Run Training
@@ -58,7 +58,7 @@ deepspeed --num_gpus=4 train.py --config config.toml
 deepspeed --num_gpus=4 train.py --config config.toml --resume_from_checkpoint
 ```
 
-### 3. Analyze Results
+### 3. Analyse Results
 
 ```bash
 python analyze_control_adapters.py --adapter ./control_adapter_output/epoch0
@@ -83,34 +83,48 @@ python control_adapter_to_lora.py \
 
 ### What are Control Adapters?
 
-Control Adapters are a parameter-efficient fine-tuning method that provides **multiplicative control** over LLM behavior. Unlike additive methods like LoRA that add `W + BA` to weights, Control Adapters apply multiplicative transformations to the residual delta (the change produced by decoder layers) of the form `(I + Q diag(λ) Q^T) × delta` (ie: parameterised as a [spectral decomposition of a real symmetric matrix](https://en.wikipedia.org/wiki/Eigendecomposition_of_a_matrix#Real_symmetric_matrices)).
+Control Adapters are a parameter-efficient fine-tuning method that provides **multiplicative control** over LLM behaviour. Unlike additive methods like LoRA that add `W + BA` to weights, Control Adapters apply multiplicative transformations to the residual delta (the change produced by decoder layers) of the form `(I + Q diag(λ) Q^T) × delta` (ie: parameterised as a [spectral decomposition of a real symmetric matrix](https://en.wikipedia.org/wiki/Eigendecomposition_of_a_matrix#Real_symmetric_matrices)).
+
+### Development and Motivation
+
+Control Adapters evolved through several iterations to address fundamental challenges with multiplicative interventions in language models:
+
+The initial concept was a "multiplicative LoRA" using general transformations `(I + AB^T) × delta`, but this proved too unconstrained and destabilised models. Adding bidirectional control with separate positive/negative classes helped, but using negated gradients for the negative class caused training instability due to the unbounded nature of maximising cross-entropy loss.
+
+Early approaches explored first-order Neumann series approximations `(I - AB^T) × delta` for inverse transformations, but required keeping eigenvalues within a narrow range (`|λ| < 0.3`) for mathematical validity, making regularisation difficult. General factorisations like `Q diag(λ) P^T` offered more flexibility but disrupted critical model behaviours like end-of-line handling.
+
+The current approach using symmetric matrices `Q diag(λ) Q^T` with log-parameterisation `λ = exp(S) - 1` emerged as the solution, balancing expressive power with the constraints necessary for stable language model training.
 
 ### Key Features
 
-- **Bidirectional Control**: Forward transformations (class `+1`) and mathematically principled inverse transformations (class `-1`) using the same parameters
-- **Class-Conditional**: Different behavior based on control classes (`+1`, `-1`); dataset-level `class 0` is a randomized regularizer (mapped to `±1` at preprocessing)
+- **Bidirectional Control**: Forward transformations (class `+1`) and inverse transformations (class `-1`) using the same parameters
+- **Class-Conditional**: Different behaviour based on control classes (`+1`, `-1`)
+- **Randomised Regularisation**: Datasets assigned to class `0` are mapped randomly to class `±1` during preprocessing
 - **Parameter Efficient**: Only `r×(H+1)` parameters per transformed layer (where `H` is hidden size, `r` is rank)
 - **Multiplicative**: Transformations scale proportionally with activation magnitude
 
 ### When to Use Control Adapters
 
 **Ideal for:**
-- Behavioral steering (tone, style, personality, prose)
-- Bidirectional learning (enhance/suppress behaviors using the same model)
-- "Unlearning" specific behaviors
+
+- Behavioural steering (tone, style, personality, prose)
+- Bidirectional learning (enhance/suppress behaviours using the same model)
+- "Unlearning" specific behaviours
 - Scenarios requiring precise control reversal
 
 **Consider alternatives for:**
+
 - General instruction following (use LoRA)
 - Simple domain adaptation (use LoRA)
+- Learning new concepts or knowledge (use full fine-tuning)
 
 ### Relationship to Control Vectors
 
-Control Adapters are conceptually similar to [Control Vectors](https://github.com/jukofyork/control-vectors), which also steer model behavior by intervening in the residual stream. However:
+Control Adapters are conceptually similar to [Control Vectors](https://github.com/jukofyork/control-vectors), which also steer model behaviour by intervening in the residual stream. However:
 
-- **Control Vectors**: Compute steering directions analytically using eigenvector analysis. Multiple vectors can interfere when applied simultaneously.
+- **Control Vectors**: Compute steering directions analytically using eigenvector analysis of the symmetrised cross-covariance matrix. Applied via additive combination, where multiple vectors can interfere when used simultaneously.
 - **Control Adapters**: Learn steering transformations through gradient-based training. More forgiving for "fuzzy" criteria like writing style. The `Q` matrix learns a task-specific subspace while `S` parameters provide per-direction scaling effects.
-- **Complementary usage**: Control Vectors provide (additive) translation components while Control Adapters provide (multiplicative) linear transformation components, enabling full affine transformations when used together.
+- **Complementary usage**: Control Vectors provide additive translation while Control Adapters provide multiplicative scaling along learned directions. Together they enable richer intervention patterns than either method alone.
 
 ## Mathematical Foundation
 
@@ -125,12 +139,13 @@ final_output = layer_output + adapter_output
 ```
 
 Where:
+
 - **`Q ∈ ℝ^{H×r}`**: Semi-orthogonal matrix spanning a learned subspace  
 - **`λ ∈ ℝ^r`**: Per-direction eigenvalue offsets
 - **`r`**: Adapter rank (typically 16-64)
 - **`H`**: Hidden dimension
 
-### Log-Parameterization
+### Log-Parameterisation
 
 Eigenvalues are derived from learnable parameters `S`:
 
@@ -138,10 +153,14 @@ Eigenvalues are derived from learnable parameters `S`:
 λ = exp(S) - 1
 ```
 
-This ensures:
-- **Stability**: `1 + λ = exp(S) > 0` always
-- **Identity initialization**: `S=0 → λ=0` → no change initially
-- **Smooth learning**: Gradients (and regularisation) symmetric and well-behaved in log-space
+This parameterisation provides several key advantages:
+
+- **Mathematical stability**: `1 + λ = exp(S) > 0` always, ensuring well-conditioned transformations
+- **Identity initialisation**: `S=0 → λ=0` → no change initially, allowing gradual learning
+- **Natural inverses**: Exact bidirectionality via `exp(-S) - 1` using the same learned parameters
+- **Smooth regularisation**: Symmetric behaviour in log-space for both forward and inverse directions
+- **Spectral control**: Interpretable eigenvalue-based scaling along learned directions
+- **Unbounded range**: Unlike constrained parameterisations, `S` can take any real value while keeping transformations stable
 
 ### Bidirectional Control
 
@@ -151,15 +170,17 @@ The key innovation is principled inverse transformations:
 - **Inverse (Class `-1`)**: `λ' = exp(-S) - 1 = -λ/(1+λ)`
 
 This provides mathematical guarantees:
+
 - Class `-1` exactly undoes Class `+1` transformations when `Q^T Q = I`
 - Perfect bidirectional control using the same parameters
 - In practice, effects are approximate due to operating on residual deltas and semi-orthogonality
 
 ### Orthogonality Constraint
 
-The method maintains `Q^T Q ≈ I_r` through regularization, ensuring:
+The method maintains `Q^T Q ≈ I_r` through regularisation, ensuring:
+
 - Stable matrix operations
-- Predictable eigenvalue behavior
+- Predictable eigenvalue behaviour
 - Numerical stability during training
 
 ## Configuration
@@ -179,7 +200,7 @@ lora_weight_dtype = "float32"     # Recommended for stability
 ### Advanced Options
 
 ```toml
-# Regularization
+# Regularisation
 lora_weight_decay = 10.0          # L2 decay on S parameters (requires float32)
 control_adapter_gamma = 0.5       # Orthogonality step size (0, 0.5]
 
@@ -200,9 +221,9 @@ layers_to_transform = "0:29"      # Transform layers 0-29 (inclusive)
 
 Each example/document in your training data uses a control class:
 
-- **Class `+1`**: Apply forward transformation (enhance behavior)
-- **Class `-1`**: Apply inverse transformation (suppress behavior)  
-- **Class `0`**: Randomized regularizer. During preprocessing, each example marked `0` is deterministically mapped to `+1` or `-1` (`≈ 50/50`). This injects controlled label noise to reduce overfitting and prevents the model from assuming controls are always active. There is no special “neutral” behavior in training - class `0` becomes `±1` before training.
+- **Class `+1`**: Apply forward transformation (enhance behaviour)
+- **Class `-1`**: Apply inverse transformation (suppress behaviour)  
+- **Class `0`**: Randomised regulariser. During preprocessing, each example marked `0` is deterministically mapped to `+1` or `-1` (`≈ 50/50`). This injects controlled label noise to reduce overfitting and prevents the model from assuming controls are always active. There is no special "neutral" behaviour in training - class `0` becomes `±1` before training.
 
 ### Dataset Configuration
 
@@ -219,13 +240,13 @@ dataset_path = "data/casual_writing.jsonl"  # "Hey! Just wanted to ask about..."
 control_class = -1
 
 [[datasets]]
-dataset_path = "data/neutral_writing.jsonl" # Mixed/uncurated; used as randomized regularizer
+dataset_path = "data/neutral_writing.jsonl" # Mixed/uncurated; used as randomised regulariser
 control_class = 0                           # Will be mapped to ±1 during preprocessing
 ```
 
 ### Why Use Class `0`?
 
-Class `0` is a convenient switch to introduce randomized directionality without curating separate positive/negative datasets. Those examples are converted to `±1` at preprocessing, acting as a regularizer that improves generalisation and helps preserve base model behavior.
+Class `0` is a convenient switch to introduce randomised directionality without curating separate positive/negative datasets. Those examples are converted to `±1` at preprocessing, acting as a regulariser that improves generalisation and helps preserve base model behaviour.
 
 **Recommendation**: Allocate roughly 10–30% of your total training examples as `control_class = 0` sources.
 
@@ -243,10 +264,10 @@ control_class = -1
 
 [[datasets]]
 dataset_path = "data/neutral_reviews.jsonl"   # "This product works as described."
-control_class = 0                             # Randomized regularizer; mapped to ±1 during preprocessing
+control_class = 0                             # Randomised regulariser; mapped to ±1 during preprocessing
 ```
 
-## Training Behavior
+## Training Behaviour
 
 ### Forward Pass Process
 
@@ -262,15 +283,16 @@ For each decoder layer with Control Adapters:
 6. **Add to residual stream**: `final_output = layer_output + adapter_output`
 
 Note on causal alignment:
-- The training pipeline uses causal language modeling. The control signal is shifted one token to align with next-token prediction (same mechanism as label shifting).
+- The training pipeline uses causal language modelling. The control signal is shifted one token to align with next-token prediction (same mechanism as label shifting).
 - The final position in a sequence is padded accordingly.
 
-### Regularization During Training
+### Regularisation During Training
 
-Two regularization mechanisms are automatically applied each training step:
+Control Adapters employ three regularisation mechanisms:
 
-1. **Orthogonality maintenance**: `Q ← Q - γ Q (Q^T Q - I)` with `γ = control_adapter_gamma` (mandatory)
-2. **Eigenvalue shrinkage**: `S ← S - lr * lora_weight_decay * S` (optional; prevents overfitting)
+1. **Orthogonality maintenance**: `Q ← Q - γ Q (Q^T Q - I)` with `γ = control_adapter_gamma` (mandatory analytical regularisation)
+2. **Eigenvalue shrinkage**: `S ← S - lr * lora_weight_decay * S` (optional analytical regularisation; prevents overfitting)
+3. **Class randomisation**: Examples marked `control_class = 0` are randomly assigned `±1` during preprocessing, injecting controlled label noise to improve generalisation and prevent overfitting to always-active controls
 
 ## Analysis and Monitoring
 
@@ -280,7 +302,7 @@ During training, monitor these metrics via TensorBoard:
 
 - **`train/norms_{avg,min,max}`**: Spectral norms (≈ max |λ|) per layer
 - **`train/orthogonality_{avg,min,max}`**: `‖Q^T Q - I‖_F²` constraint satisfaction
-- **`train/weight_decay_{avg,min,max}`**: Norm reduction from regularization (if applied)
+- **`train/weight_decay_{avg,min,max}`**: Norm reduction from regularisation (if applied)
 
 ### Analysis Tool
 
@@ -306,6 +328,7 @@ This provides per-layer metrics including orthogonality errors, effective rank u
 ### Why Convert?
 
 Control Adapters can be converted to standard additive LoRA format for:
+
 - Deployment in existing inference frameworks
 - Compatibility with LoRA merging tools
 - Easier serving infrastructure
@@ -320,8 +343,11 @@ python control_adapter_to_lora.py \
   [--rank N] [--inverse] [--model-specific-flags]
 ```
 
+NOTE: Targets `mlp.down_proj` by default; use `--cohere` or `--mixtral N` to include additional modules.
+
 **Key options:**
-- `--inverse`: Convert inverse branch (class `-1` behavior) instead of forward branch (useful for testing!)
+
+- `--inverse`: Convert inverse branch (class `-1` behaviour) instead of forward branch (useful for testing!)
 - `--rank N`: Override output LoRA rank (useful for compression; monitor "% variance explained" for each layer)
 - `--cohere`: Also target `o_proj` layers (for `Cohere` models only)
 - `--mixtral N`: Target `experts.{0..N-1}.w2` (for `Mixtral` models only)
@@ -332,7 +358,7 @@ The conversion approximates the multiplicative effect as an additive LoRA:
 
 1. **Compute multiplicative effect**: `ΔW = Q diag(λ) Q^T × W_base`
 2. **SVD decomposition**: `ΔW ≈ U Σ V^T`
-3. **LoRA factorization**: `B = U√Σ`, `A = √Σ V^T`
+3. **LoRA factorisation**: `B = U√Σ`, `A = √Σ V^T`
 
 ### Deployment
 
@@ -355,7 +381,7 @@ Alternatively, you can use the [Memory-Efficient LoRA Merge](https://huggingface
 - **Use float32**: Keep `lora_weight_dtype = "float32"` (the default) for numerical stability
 - **Start small**: Begin with rank 16-32; higher ranks need a *lot* more data
 - **Layer selection**: Consider excluding the first (1-2) and last (1-2) layers, as these are more prone to training instabilities
-- **Include randomized regularizer data**: Use 10–30% class `0` examples for stability and generalisation
+- **Include randomised regulariser data**: Use 10–30% class `0` examples for stability and generalisation
 
 ### Training
 
@@ -376,18 +402,21 @@ Alternatively, you can use the [Memory-Efficient LoRA Merge](https://huggingface
 - **Persistent High orthogonality error (>1.0)**: Reduce learning rate or increase `control_adapter_gamma`
 - **Sudden norm spikes**: Check for gradient explosion, reduce learning rate, increase `lora_weight_decay`
 - **Poor effective rank (<50% of adapter rank)**: Try more training data, more diverse training data, or reduce `lora_rank`
-- **High approximation errors (>20%)**: Reduce learning rate and/or increase regularization parameters
+- **High approximation errors (>20%)**: Reduce learning rate and/or increase regularisation parameters
 
 ## Files and Tools
 
 ### Core Implementation
+
 - `training/control_adapters.py`: Main implementation and training logic
-- `training/regularizer.py`: Orthogonality and weight decay regularization
+- `training/regularizer.py`: Orthogonality and weight decay regularisation
 
 ### Analysis Tools
+
 - `analyze_control_adapters.py`: Comprehensive adapter analysis with per-layer metrics
 
 ### Conversion Tools
+
 - `control_adapter_to_lora.py`: Convert to standard LoRA format for deployment
 - `merge_lora.py`: Standard LoRA merging tool (use after conversion)
 
@@ -400,7 +429,7 @@ deepspeed --num_gpus=4 train.py --config config_control_adapter.toml
 # Resume training
 deepspeed --num_gpus=4 train.py --config config_control_adapter.toml --resume_from_checkpoint
 
-# Analyze trained adapter
+# Analyse trained adapter
 python analyze_control_adapters.py --adapter /path/to/adapter
 
 # Convert to LoRA for deployment

@@ -3,14 +3,17 @@
 A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) focused on Control Adapter training.
 
 **Key Features:**
-- **Pipeline Parallelism**: Train models larger than single GPU memory using DeepSpeed
-- **Supports**: LoRA, QLoRA, full fine-tuning, and Control Adapters.
-- **Memory Optimization**: 4-bit quantization, activation checkpointing, tied weights
 - **Multiple Training Modes**: LoRA, QLoRA, full fine-tuning, and Control Adapters
-- **Production Ready**: Robust checkpointing, distributed training, comprehensive monitoring
-- **Advanced Data Processing**: Flexible dataset handling with sophisticated preprocessing
+- **Pipeline Parallelism**: Train models too large for single GPU memory using DeepSpeed
+- **Memory Optimisation**: 4-bit quantisation, activation checkpointing, tied embedding weights
+- **Custom LoRA Regularisation**: Composite matrix weight decay on `W = B·A` instead of separate `A`, `B` penalties
+- **Optimised Kernels**: Triton-based cross-entropy loss with large vocabulary support
+- **Production Features**: Checkpointing, distributed training, monitoring, LoRA merging
+- **Data Processing**: Multiple formats (text/JSON/parquet), tokenisation control, sequence slicing, caching
 
-See [here](docs/ControlAdapters.md) for Control Adapter documentation.
+Read the [Control Adapter documentation](docs/ControlAdapters.md) for implementation details.
+
+Configuration examples for all training modes are available in the [examples](examples) folder.
 
 ## Table of Contents
 
@@ -31,6 +34,7 @@ See [here](docs/ControlAdapters.md) for Control Adapter documentation.
 
 - Python 3.8+
 - PyTorch 2.0+
+- HuggingFace transformers < 4.53.0 (breaking change introduced in [v4.53.0](https://github.com/huggingface/transformers/releases/tag/v4.53.0) via [PR #37866](https://github.com/huggingface/transformers/pull/37866))
 - CUDA-capable GPU(s)
 - DeepSpeed
 
@@ -84,6 +88,12 @@ deepspeed --num_gpus=4 train.py --config config.toml
 deepspeed --num_gpus=4 train.py --config config.toml --resume_from_checkpoint
 ```
 
+Optional CLI flags:
+
+- `--add-prefix-space`: Add a prefix space when tokenising (useful for some tokenisers)
+- `--trust-remote-code`: Allow custom code execution for non-standard architectures
+
+
 3. **Monitor progress**:
 
 ```bash
@@ -92,13 +102,15 @@ tensorboard --logdir ./training_output
 
 ### Quick Examples
 
-**QLoRA (4-bit quantized LoRA)**:
+**QLoRA (4-bit quantised LoRA)**:
+
 ```toml
 load_in_4bit = true
 lora_rank = 16
 ```
 
 **Full Fine-tuning**:
+
 ```toml
 full_fine_tune = true
 target_modules = ["q_proj", "v_proj"]  # Optional: target specific modules
@@ -112,11 +124,12 @@ layers_to_transform = "16:31"          # Optional: target specific layers
 LoRA adds trainable low-rank matrices to frozen base model weights: `W_new = W_original + BA`
 
 **Configuration**:
+
 ```toml
 lora_rank = 16                    # Adapter rank (bottleneck dimension)
 lora_dropout = 0.1                # Dropout on adapter weights
 lora_weight_dtype = "float32"     # Use float32 for stability with weight decay
-lora_weight_decay = 10.0          # L2 regularization on composite matrix W=BA
+lora_weight_decay = 10.0          # L2 regularisation on composite matrix W=BA
 
 # Optional targeting
 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -124,22 +137,24 @@ layers_to_transform = "0:31"      # Apply to layers 0-31 (inclusive)
 ```
 
 **Key Points**:
-- Uses composite matrix regularization: `L = ½||BA||²_F` instead of separate `A`, `B` penalties
+
+- Uses composite matrix regularisation: `L = ½||BA||²_F` instead of separate `A`, `B` penalties
 - Requires `float32` precision for effective weight decay (avoids catastrophic cancellation)
 - Default `lora_alpha = lora_rank` (adjust learning rate instead of alpha)
 - If `target_modules` is omitted, it defaults to `"all-linear"`; you may also explicitly set `target_modules = "all-linear"`.
 
-### QLoRA (Quantized LoRA)
+### QLoRA (Quantised LoRA)
 
-Combines LoRA with 4-bit quantization for maximum memory efficiency:
+Combines LoRA with 4-bit quantisation for maximum memory efficiency:
 
 ```toml
-load_in_4bit = true               # Enable 4-bit quantization
+load_in_4bit = true               # Enable 4-bit quantisation
 lora_rank = 16
 lora_weight_dtype = "float32"     # LoRA weights remain in float32
 ```
 
 **Benefits**:
+
 - Approximately 75% reduction in model weight memory usage
 - Maintains training quality with float32 adapters
 - Enables training of larger models on limited hardware
@@ -157,9 +172,10 @@ layers_to_transform = "16:31"
 ```
 
 **Key Points**:
-- Uses `bfloat16` for memory efficiency
-- Supports tied embedding weights with automatic gradient synchronization
-- No weight decay (counterproductive for pretrained weights)
+
+- Uses `bfloat16` for memory efficiency (`float16` has too many issues with gradient accumulation to be useful for training)
+- No weight decay (would suffer from catastrophic cancellation in `bfloat16` precision, making it ineffective)
+- Supports tied embedding weights with automatic gradient synchronisation via DeepSpeed's `TiedLayerSpec`
 
 ## Configuration Reference
 
@@ -174,17 +190,22 @@ output_dir = "/path/to/output"
 lr = 2e-5                         # Learning rate
 epochs = 1                        # Number of training epochs
 sequence_len = 4096               # Fixed sequence length (must be multiple of 64)
-gradient_accumulation_steps = 8   # Micro-batches per optimizer step
+gradient_accumulation_steps = 8   # Micro-batches per optimiser step
 
 # Pipeline configuration
 pipeline_stages = 1               # Number of pipeline stages (must divide world_size)
 partition_method = "uniform"      # "uniform", "parameters", or "type:regex"
 ```
 
-### Advanced Optimizer Settings
+NOTE:
+
+- The micro-batch size per GPU is fixed internally to 1.
+- Effective batch size = gradient_accumulation_steps × data_parallel_world_size.
+
+### Advanced Optimiser Settings
 
 ```toml
-# Optimizer configuration (uses optimi.Adam with Kahan summation)
+# Optimiser configuration (uses optimi.Adam with Kahan summation)
 beta1 = 0.9                       # Default: 0.9
 beta2 = 0.99                      # Default: 0.99  
 eps = 1e-6                        # Default: 1e-6
@@ -208,9 +229,9 @@ max_checkpoints = 3                   # Maximum checkpoints to retain
 ### Memory and Performance Tuning
 
 ```toml
-# Memory optimization
-load_in_4bit = true               # Enable 4-bit quantization
-use_column_major_topology = true  # Optimize for mixed interconnects
+# Memory optimisation
+load_in_4bit = true               # Enable 4-bit quantisation
+use_column_major_topology = true  # Optimise for mixed interconnects
 
 # Data processing
 max_sequences = 1000000           # Limit total sequences
@@ -253,7 +274,7 @@ For multi-node training, ensure:
 deepspeed --num_gpus=8 --num_nodes=2 --master_addr=node0.cluster.local train.py --config config.toml
 ```
 
-### Topology Optimization
+### Topology Optimisation
 
 For mixed interconnect environments (PCIe + InfiniBand):
 
@@ -261,7 +282,7 @@ For mixed interconnect environments (PCIe + InfiniBand):
 use_column_major_topology = true
 ```
 
-This optimization can be useful for LoRAs as it routes:
+This optimisation can be useful for LoRAs as it routes:
 - **High-bandwidth activations** over fast PCIe/NVLink
 - **Low-bandwidth gradients** over slower network interconnects
 
@@ -289,14 +310,14 @@ dataset_path = "data/validation/*.txt"
 ### Advanced Processing Options
 
 ```toml
-# Sequence initialization
+# Sequence initialisation
 sequence_prefix = "<BOS>"         # String to encode as prefix tokens
 # sequence_prefix = 123           # Single token ID
 # sequence_prefix = [123, 456]    # Multiple token IDs
 
-# Document suffixes (applied during tokenization)
-document_suffix = "<EOT>"         # String suffix before tokenization
-# document_suffix = 123           # Token ID after tokenization
+# Document suffixes (applied during tokenisation)
+document_suffix = "<EOT>"         # String suffix before tokenisation
+# document_suffix = 123           # Token ID after tokenisation
 # document_suffix = [123, 456]    # Multiple token IDs
 
 # Token masking (sets labels = -100 for loss exclusion)
@@ -314,6 +335,7 @@ The framework implements distributed data loading with per-rank sampling, remain
 ### Model Conversion and Merging
 
 **Merge LoRA into base model**:
+
 ```bash
 python merge_lora.py \
   --input /path/to/base_model \
@@ -323,6 +345,7 @@ python merge_lora.py \
 ```
 
 **Convert DeepSpeed checkpoints to LoRA**:
+
 ```bash
 python convert_ds_checkpoint.py \
   --input /path/to/ds_checkpoint \
@@ -340,12 +363,14 @@ Monitor training progress via TensorBoard:
 tensorboard --logdir /path/to/output_dir --host 0.0.0.0
 ```
 
+![TensorBoard Example](docs/tensorboard_example.png)
+
 **Available metrics**:
 - `eval/loss`: Evaluation loss with percentage changes
 - `train/loss`: Training loss progression
 - `train/lr`: Learning rate schedule
 - `train/norms_{avg,min,max}`: LoRA adapter norm statistics
-- `train/weight_decay_{avg,min,max}`: LoRA regularization effectiveness
+- `train/weight_decay_{avg,min,max}`: LoRA regularisation effectiveness
 
 ### Training Progress Monitoring
 
@@ -359,55 +384,136 @@ Console output provides real-time metrics:
 
 ### Custom Cross-Entropy Kernel
 
-The framework includes [Unsloth](https://github.com/unslothai/unsloth)'s optimized Triton cross-entropy loss kernel (`kernels/cross_entropy_loss.py`) that handles large vocabularies (>65K tokens) via chunking, uses numerically stable LogSumExp implementation, and provides fused forward/backward passes for memory efficiency.
+The framework includes [Unsloth](https://github.com/unslothai/unsloth)'s optimised Triton cross-entropy loss kernel (`kernels/cross_entropy_loss.py`) that handles large vocabularies (>65K tokens) via chunking, uses numerically stable LogSumExp implementation, and provides fused forward/backward passes for memory efficiency.
 
-### Memory Optimization Techniques
+### Memory Optimisation Techniques
 
-The framework uses several memory optimization techniques:
+The framework uses several memory optimisation techniques:
 
-**Activation Checkpointing**: Uses [Unsloth](https://github.com/unslothai/unsloth)'s CPU offloading strategy with automatic application to decoder layers. The system patches BitsAndBytes for safe CPU↔GPU transfers when using 4-bit quantization.
+**Activation Checkpointing**: Uses [Unsloth](https://github.com/unslothai/unsloth)'s CPU offloading strategy with automatic application to decoder layers. The system patches BitsAndBytes for safe CPU↔GPU transfers when using 4-bit quantisation.
 
-**Tied Weight Support**: Implements proper parameter sharing for embedding/output layers using DeepSpeed's `TiedLayerSpec` with automatic gradient synchronization across pipeline stages.
+**Tied Weight Support**: Implements proper parameter sharing for embedding/output layers using DeepSpeed's `TiedLayerSpec` with automatic gradient synchronisation across pipeline stages.
 
 ### Custom LoRA Weight Decay Implementation
 
-This framework implements a novel composite matrix regularization that addresses fundamental issues with standard LoRA weight decay:
+This framework addresses two fundamental issues with standard LoRA weight decay:
 
-**The Problem**: Traditional weight decay applied to `A` and `B` separately fails because:
-1. **Catastrophic cancellation**: Tiny decay amounts cancel to zero with `float16`/`bfloat16` precision
-2. **Wrong target**: Should regularize the actual learned transformation `W = scale * B @ A`, not individual matrices
+**The Problems**:
 
-**The Solution**: Custom decoupled weight decay on the composite matrix:
+1. **Catastrophic cancellation**: Tiny weight decay amounts cancel to zero with `float16`/`bfloat16` precision
+2. **Wrong target**: Should regularise the actual learned transformation `W = B @ A`, and **not** the individual `A` and `B` matrices
 
-### Regularization Mathematics
+**The Solutions**:
 
-**LoRA Weight Decay**:
-The composite matrix regularization prevents the catastrophic cancellation issue:
+1. **Use `float32` precision** for numerical stability when `lora_weight_decay > 0`
+
+2. **Composite matrix regularisation**: Instead of penalising `A` and `B` separately, regularise the composite matrix `W = B @ A`:
+
+Use `Adam` (not `AdamW`) for the primary loss gradients, then manually apply decoupled weight-decay updates to target the actual learned transformation:
 
 ```
-L_total = L_task + λ/2 ||BA||²_F
+W = BA
+grad_A = B^T W  
+grad_B = W A^T
 
-∂L/∂A = ∂L_task/∂A + λ B^T(BA)
-∂L/∂B = ∂L_task/∂B + λ (BA)A^T
+A ← A - α λ grad_A
+B ← B - α λ grad_B
 ```
 
-This approach:
-- Uses `Adam` (not `AdamW`) for the primary loss
-- Applies SGD-style decay to the composite matrix using the same learning rate
-- **Requires `float32` precision** for adapter weights to avoid cancellation
-- Directly penalizes the transformation that affects model behavior
+where `α` is the learning rate and `λ` is the weight decay coefficient.
+
+### Custom Learning Rate Scheduling
+
+This framework uses a custom "RMS ratio" learning rate scheduler instead of traditional warmup.
+
+#### The Math
+
+The scheduler applies a scaling factor based on the optimiser's `beta2` parameter:
+
+```
+lr_scale(t) = sqrt((1 - β₂^t) / (1 + β₂^t))
+```
+
+where `t` is the training step and `β₂` is the second moment decay rate (default: `0.99`).
+
+This schedule:
+
+- **Starts low** (0 at step 0) for gradual warmup
+- **Gradually increases** as training progresses  
+- **Converges** to 1.0 in the long term
+
+![Learning Rate Scheduler](docs/learning_rate_scheduler.png)
+
+#### Theoretical Foundation
+
+The mathematical motivation comes from analysing the uncertainty in Adam's second moment estimates. When Adam uses `β₁ = 0`, it becomes similar to bias-corrected RMSprop. Under idealised assumptions (stationary, normally distributed gradients), the [coefficient of variation](https://en.wikipedia.org/wiki/Coefficient_of_variation) of the bias-corrected second moment estimate is:
+
+```
+CV[v̂_t] = sqrt(2(1 + β₂^t)/(1 - β₂^t))
+```
+
+This expression quantifies how the relative uncertainty in our variance estimate changes over time due to the [exponential moving average](https://en.wikipedia.org/wiki/Exponential_smoothing) having fewer samples in its "memory" early in training.
+
+In the limit as `t → ∞`:
+
+```
+CV[v̂_∞] = sqrt(2)
+```
+
+Taking the reciprocal of the coefficient of variation and normalising by `sqrt(2)` gives our learning rate schedule - essentially scaling the learning rate inversely to the uncertainty in our second moment estimates.
+
+#### Why This Approach?
+
+**Inspired by RAdam**: This implements the bias correction from [RAdam](https://arxiv.org/abs/1908.03265) as a learning rate schedule rather than modifying the optimiser directly.
+
+**No Warmup Needed**: The RMS ratio naturally handles early training dynamics without requiring separate warmup phases.
+
+### No Cosine Annealing
+
+We deliberately avoid cosine annealing for two practical reasons:
+
+1. **Limited benefit**: Cosine annealing provides minimal improvement for small-dataset fine-tuning scenarios
+2. **Training flexibility**: Without cosine annealing, you can:
+
+```toml
+epochs = 1  # Start with 1 epoch
+```
+
+Then extend training seamlessly using the `--resume_from_checkpoint` command line option:
+
+```toml
+epochs = 2
+```
+
+```bash
+deepspeed train.py --config config.toml --resume_from_checkpoint
+```
+
+With cosine annealing, the learning rate would reset incorrectly when resuming, breaking the schedule.
+
+#### Configuration
+
+The scheduler automatically uses your optimiser's `beta2` setting:
+
+```toml
+beta2 = 0.99  # Controls the RMS ratio curve (default: 0.99)
+lr = 2e-5     # Base learning rate (gets scaled by the ratio)
+```
+
+No additional scheduler parameters are needed or supported.
 
 ## Troubleshooting
 
 ### Common Issues
 
-**Out of Memory**: Enable 4-bit quantization (`load_in_4bit = true`), reduce sequence length/batch size, or increase pipeline stages.
+**Out of Memory**: Enable 4-bit quantisation (`load_in_4bit = true`), reduce sequence length/batch size, or increase pipeline stages.
 
 **Poor Convergence**: Check learning rate (typical range: `1e-5` to `5e-5`), verify data quality and format, monitor for gradient explosion via sudden loss spikes.
 
 **Pipeline Issues**: Ensure `pipeline_stages` divides `world_size` evenly, verify all nodes can access model/data paths, check network connectivity for multi-node setups.
 
 **RTX 4000 Series GPUs** may need one or both of these environment variables setting:
+
 ```bash
 export NCCL_P2P_DISABLE="1"
 export NCCL_IB_DISABLE="1"

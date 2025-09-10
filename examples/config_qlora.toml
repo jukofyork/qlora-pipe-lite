@@ -1,0 +1,157 @@
+# ==============================
+# MODEL AND OUTPUT CONFIGURATION
+# ==============================
+
+model_dir = '/path/to/your/model'
+output_dir = './qlora_output'
+
+# ===========================
+# TRAINING TYPE CONFIGURATION
+# ===========================
+
+# Set to train a QLoRA on top of a 4-bit quantised model
+load_in_4bit = true              # Enable 4-bit quantization
+
+# =====================
+# ADAPTER CONFIGURATION
+# =====================
+
+# NOTE: We fix lora_alpha = lora_rank, so adjust learning rate to get approximately same effect.
+lora_rank = 16
+
+# NOTE: Can be used with either LoRAs or Control Adapters.
+lora_dropout = 0.1               # (default: 0.0)
+
+# NOTE: To use lora_weight_decay, this must be left as float32.
+lora_weight_dtype = "float32"    # LoRA weights remain float32 (default: "float32")
+
+# L2 weight decay regularization for LoRAs: L2 regularization on composite matrix W = B·A using L = ½||W||_F²
+# NOTE: Requires lora_weight_dtype = "float32" when > 0 for numerical stability
+lora_weight_decay = 10.0         # (default: 0.0)
+
+# =====================
+# OPTIMIZER CONFIGURATION
+# =====================
+
+lr = 2e-5
+
+epochs = 1                # (default: 1)
+
+beta1 = 0.9               # (default: 0.9)
+beta2 = 0.99              # (default: 0.99)
+eps = 1e-6                # (default: 1e-6)
+
+# ========================
+# TRAINING CONFIGURATION
+# ========================
+
+sequence_len = 4096
+
+# The number of pipeline parallel stages (NOTE: must evenly divide world_size)
+pipeline_stages = 1                   # (default: 1)
+
+# Controls the effective batch size: gradient_accumulation_steps x (world_size / pipeline_stages)
+gradient_accumulation_steps = 8       # (default: 1)
+
+# Setting this lower can help to drop fewer examples when trying to make equal-sized batches 
+eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_steps)
+
+# Set for optimised LoRA training with hybrid data+pipeline parallelism:
+# - Sends high-volume "per token" hidden states over PCIe/NVLink
+# - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand
+# Optional: optimize for mixed interconnects (PCIe + InfiniBand)
+#use_column_major_topology = true
+
+# Partitioning strategy for pipeline parallelism.
+# - "uniform"      : balances number of layers per stage (default)
+# - "parameters"   : balances trainable parameter counts per stage
+# - "type:[regex]" : balances layers whose class names match [regex] (case-insensitive), eg:
+#                      "type:decoderlayer"        [matches DecoderLayerPipe]
+#                      "type:^decoderlayerpipe$"  [exact match]
+#                      "type:(decoderlayerpipe|embeddingpipe|lmheadpipe)"
+#partition_method = "type:decoderlayerpipe"
+
+# =================================
+# MODULE/LAYER FILTER CONFIGURATION
+# =================================
+
+# Train only specific modules (defaults to: 'all linear' modules for LoRA)
+# Optional: target specific modules (defaults to all-linear)
+#target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+
+# Train only specific layers (can be combined with target_modules and used with LoRA or full fine-tuning)
+# Format: 'start:end' (inclusive:inclusive, with first layer = 0 / last layer = n-1)
+# Optional: target specific layers (0-indexed, inclusive)
+#layers_to_transform = '0:31'
+
+# ========================
+# EVALUATION CONFIGURATION
+# ========================
+
+eval_fraction = 0.01  # (default: 0.01)
+evals_per_epoch = 10  # (default: 10)
+
+# ========================
+# CHECKPOINT CONFIGURATION
+# ========================
+
+checkpoint_interval_hours = 1  # (default: 1)
+max_checkpoints = 3            # (default: 3)
+
+# =======================================
+# GLOBAL SEQUENCE PROCESSING CONFIGURATION
+# =======================================
+
+# Maximum number of sequences to create across all datasets (default: unlimited)
+#max_sequences = 1000000
+
+# Drop partial sequences at document ends to ensure each sequence begins with a fresh document (default: false)
+#drop_tails = true
+
+# Allow sequences to mix tokens from multiple datasets (default: false)
+#mix_datasets = true
+
+# Sequence initialization (applied at start of each sequence):
+# - None: add BOS token if it exists (default)
+# - "": no prefix tokens
+# - "<BOS>": string to encode as tokens  
+# - 123: single token ID
+# - [123, 456]: multiple token IDs
+#sequence_prefix = None
+
+# Token masking (sets control_classes = 0 and labels = -100 for specified tokens):
+# - None/false: no masking (default)
+# - true: mask all special tokens from tokenizer.all_special_ids
+# - 123: mask specific token ID
+# - [123, 456]: mask multiple token IDs
+#mask_tokens = None
+
+# Document suffix (applied during tokenization to all datasets):
+# - None: tokenize first, then add tokenizer's EOS token if missing (default)
+# - "": empty suffix, no additional tokens added
+# - "<EOT>": string to append before tokenizing
+# - 123: single token ID to append after tokenizing
+# - [123, 456]: multiple token IDs to append after tokenizing
+#document_suffix = None
+
+# =====================
+# DATASET CONFIGURATION
+# =====================
+
+[[datasets]]
+dataset_path = 'data/training_data.jsonl'
+
+[[datasets]]
+dataset_path = 'data/more_data/*.txt'
+max_tokens = 10000000              # Limit this dataset to 10M tokens
+
+# Per-dataset configuration options:
+# - max_tokens: Maximum number of tokens to keep from this dataset after shuffling (default: unlimited)
+
+# Notes:
+# - Text files (.txt) are read as raw training data
+# - Structured formats (.json/.jsonl/.parquet) must have a "text" field
+# - The HuggingFace dataset cache will be created below the dataset paths and is shared between nodes
+# - For multi-node training, ensure all paths use the same mount point across nodes
+# - max_tokens pruning happens after shuffling but before dataset concatenation
+# - Supported file patterns: single files or glob patterns with wildcards

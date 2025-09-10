@@ -1,0 +1,190 @@
+# ==============================
+# MODEL AND OUTPUT CONFIGURATION
+# ==============================
+
+model_dir = '/path/to/your/model'
+output_dir = './control_adapter_output'
+
+# ===========================
+# TRAINING TYPE CONFIGURATION
+# ===========================
+
+# Set to train Control Adapters "per layer" instead of LoRAs "per module" (precludes target_modules option)
+use_control_adapters = true
+
+# Set to train a Control adapter on top of a 4-bit quantised model
+load_in_4bit = true                # Enable 4-bit quantization
+
+# =====================
+# ADAPTER CONFIGURATION
+# =====================
+
+# NOTE: We fix lora_alpha = lora_rank, so adjust learning rate to get approximately same effect.
+lora_rank = 16                     # Control Adapter rank
+
+# NOTE: Can be used with either LoRAs or Control Adapters.
+lora_dropout = 0.0                 # Dropout on residual delta (default: 0.0)
+
+# NOTE: To use lora_weight_decay, this must be left as float32.
+lora_weight_dtype = "float32"      # Required for numerical stability (default: "float32")
+
+# L2 weight decay regularization for Control Adapters: L2 regularization on log-eigenvalue vector S using L = ½||S||²
+# NOTE: Requires lora_weight_dtype = "float32" when > 0 for numerical stability
+# NOTE: When using Control Adapters, increase lora_weight_decay to 100-500+ for mathematical stability
+lora_weight_decay = 100.0          # L2 regularization on log-eigenvalues S (higher for Control Adapters) (default: 0.0)
+
+# (** Control Adapters only **): Orthogonality regularization step size for Q
+# Controls Newton-style step: Q ← Q − γ·Q·(Q^T Q − I) to maintain Q^T Q ≈ I
+# NOTE: Allowed range (0, 0.5], as values > 0.5 may cause divergence
+# NOTE: Recommend lora_weight_dtype = "float32" for numerical stability, but should still work with bfloat16.
+control_adapter_gamma = 0.5        # Range (0, 0.5], controls Q^T Q ≈ I maintenance (default: 0.5 = full Newton step)
+
+# =====================
+# OPTIMIZER CONFIGURATION
+# =====================
+
+lr = 2e-4                 # Slightly higher LR often works better (dual-class data reduces gradient variance)
+
+epochs = 1                # (default: 1)
+
+beta1 = 0.9               # (default: 0.9)
+beta2 = 0.99              # (default: 0.99)
+eps = 1e-6                # (default: 1e-6)
+
+# ========================
+# TRAINING CONFIGURATION
+# ========================
+
+sequence_len = 4096
+
+# The number of pipeline parallel stages (NOTE: must evenly divide world_size)
+pipeline_stages = 1                   # (default: 1)
+
+# Controls the effective batch size: gradient_accumulation_steps x (world_size / pipeline_stages)
+gradient_accumulation_steps = 8       # (default: 1)
+
+# Setting this lower can help to drop fewer examples when trying to make equal-sized batches 
+eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_steps)
+
+# Partitioning strategy for pipeline parallelism.
+# - "uniform"      : balances number of layers per stage (default)
+# - "parameters"   : balances trainable parameter counts per stage
+# - "type:[regex]" : balances layers whose class names match [regex] (case-insensitive), eg:
+#                      "type:decoderlayer"        [matches DecoderLayerPipe]
+#                      "type:^decoderlayerpipe$"  [exact match]
+#                      "type:(decoderlayerpipe|embeddingpipe|lmheadpipe)"
+#partition_method = "type:decoderlayerpipe"
+
+# =================================
+# LAYER FILTER CONFIGURATION
+# =================================
+
+# Train only specific layers (used with Control adapters)
+# Format: 'start:end' (inclusive:inclusive, with first layer = 0 / last layer = n-1)
+# Optional: target specific layers (0-indexed, inclusive)
+# Note: Control Adapters operate per-layer, not per-module (target_modules not available)
+#layers_to_transform = '2:29'       # Exclude first/last few layers for stability
+
+# ========================
+# EVALUATION CONFIGURATION
+# ========================
+
+eval_fraction = 0.01  # (default: 0.01)
+evals_per_epoch = 10  # (default: 10)
+
+# ========================
+# CHECKPOINT CONFIGURATION
+# ========================
+
+checkpoint_interval_hours = 1  # (default: 1)
+max_checkpoints = 3            # (default: 3)
+
+# =======================================
+# GLOBAL SEQUENCE PROCESSING CONFIGURATION
+# =======================================
+
+# Maximum number of sequences to create across all datasets (default: unlimited)
+#max_sequences = 1000000
+
+# Drop partial sequences at document ends to ensure each sequence begins with a fresh document (default: false)
+#drop_tails = true
+
+# Allow sequences to mix tokens from multiple datasets (default: false)
+#mix_datasets = true
+
+# Sequence initialization (applied at start of each sequence):
+# - None: add BOS token if it exists (default)
+# - "": no prefix tokens
+# - "<BOS>": string to encode as tokens  
+# - 123: single token ID
+# - [123, 456]: multiple token IDs
+#sequence_prefix = None
+
+# Token masking (sets control_classes = 0 and labels = -100 for specified tokens):
+# - None/false: no masking (default)
+# - true: mask all special tokens from tokenizer.all_special_ids
+# - 123: mask specific token ID
+# - [123, 456]: mask multiple token IDs
+#mask_tokens = None
+
+# Document suffix (applied during tokenization to all datasets):
+# - None: tokenize first, then add tokenizer's EOS token if missing (default)
+# - "": empty suffix, no additional tokens added
+# - "<EOT>": string to append before tokenizing
+# - 123: single token ID to append after tokenizing
+# - [123, 456]: multiple token IDs to append after tokenizing
+#document_suffix = None
+
+# =====================
+# DATASET CONFIGURATION
+# =====================
+
+# -------------------
+# POSITIVE CLASS DATA
+# -------------------
+
+# Positive examples - enhance this behavior
+[[datasets]]
+dataset_path = 'data/positive_examples.jsonl'
+control_class = 1                  # Enhance this behavior (default)
+max_tokens = 2000000               # Limit positive examples to 2M tokens
+
+# -------------------
+# NEGATIVE CLASS DATA
+# -------------------
+
+# Negative examples - suppress this behavior  
+[[datasets]]
+dataset_path = 'data/negative_examples.jsonl'
+control_class = -1                 # Suppress/unlearn this behavior
+max_tokens = 2000000               # Limit negative examples to 2M tokens
+
+# ------------------
+# NEUTRAL CLASS DATA
+# ------------------
+
+[[datasets]]
+dataset_path = 'data/neutral_examples.jsonl'
+control_class = 0                  # Randomized regularizer (mapped to ±1)
+max_tokens = 500000
+
+# Additional datasets can be added as needed
+#[[datasets]]
+#dataset_path = 'data/more_positive/*.txt'
+#control_class = 1
+
+# Per-dataset configuration options:
+# - max_tokens: Maximum number of tokens to keep from this dataset after shuffling (default: unlimited)
+# - control_class: Must be -1, 0, or 1 (only used with Control Adapters)
+#   * control_class = 1: Apply forward transformation (enhance behavior)
+#   * control_class = -1: Apply inverse transformation (suppress behavior)
+#   * control_class = 0: Randomized regularizer (deterministically mapped to ±1 during preprocessing)
+
+# Notes:
+# - Text files (.txt) are read as raw training data
+# - Structured formats (.json/.jsonl/.parquet) must have a "text" field
+# - The HuggingFace dataset cache will be created below the dataset paths and is shared between nodes
+# - For multi-node training, ensure all paths use the same mount point across nodes
+# - control_class must be -1, 0, or 1 (only used with Control Adapters)
+# - max_tokens pruning happens after shuffling but before dataset concatenation
+# - Supported file patterns: single files or glob patterns with wildcards

@@ -2,52 +2,21 @@
 # MODEL AND OUTPUT CONFIGURATION
 # ==============================
 
-model_dir = '/data2/models/Meta-Llama-3.1-8B'
-output_dir = '/data/training_runs/llama3_8b_example'
+model_dir = '/path/to/your/model'
+output_dir = './full_finetune_output'
 
 # ===========================
 # TRAINING TYPE CONFIGURATION
 # ===========================
 
 # Set to perform full fine-tuning instead of training a LoRA/Control adapter
-#full_fine_tune = true
-
-# Set to train Control Adapters "per layer" instead of LoRAs "per module" (precludes target_modules option)
-#use_control_adapters = true
-
-# Set to train a LoRA/Control adapter on top of a 4-bit quantised model (ie: a "QLoRA")
-load_in_4bit = true
+full_fine_tune = true
 
 # =====================
-# ADAPTER CONFIGURATION
-# =====================
-
-# NOTE: To use lora_weight_decay, this must be left as float32.
-#lora_weight_dtype = "bfloat16"  # (default: "float32")
-
-# NOTE: We fix lora_alpha = lora_rank, so adjust learning rate to get approximately same effect.
-lora_rank = 64
-
-# NOTE: Can be used with either LoRAs or Control Adapters.
-lora_dropout = 0.05              # (default: 0.0)
-
-# L2 weight decay regularization (works with both LoRAs and Control Adapters):
-# - LoRAs: L2 regularization on composite matrix W = B·A using L = ½||W||_F²
-# - Control Adapters: L2 regularization on log-eigenvalue vector S using L = ½||S||²
-# NOTE: Requires lora_weight_dtype = "float32" when > 0 for numerical stability
-lora_weight_decay = 10.0         # (default: 0.0)
-
-# (** Control Adapters only **): Orthogonality regularization step size for Q
-# Controls Newton-style step: Q ← Q − γ·Q·(Q^T Q − I) to maintain Q^T Q ≈ I
-# NOTE: Allowed range (0, 0.5], as values > 0.5 may cause divergence
-# NOTE: Recommend lora_weight_dtype = "float32" for numerical stability, but should still work with bfloat16.
-#control_adapter_gamma = 0.1     # (default: 0.5 = full Newton step)
-
-# =======================
 # OPTIMIZER CONFIGURATION
-# =======================
+# =====================
 
-lr = 5e-5
+lr = 2e-5
 
 epochs = 1                # (default: 1)
 
@@ -59,21 +28,16 @@ eps = 1e-6                # (default: 1e-6)
 # TRAINING CONFIGURATION
 # ========================
 
-sequence_len = 32768
+sequence_len = 4096
 
 # The number of pipeline parallel stages (NOTE: must evenly divide world_size)
 pipeline_stages = 1                   # (default: 1)
 
 # Controls the effective batch size: gradient_accumulation_steps x (world_size / pipeline_stages)
-gradient_accumulation_steps = 32      # (default: 1)
+gradient_accumulation_steps = 8       # (default: 1)
 
 # Setting this lower can help to drop fewer examples when trying to make equal-sized batches 
 eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_steps)
-
-# Set for optimised LoRA training with hybrid data+pipeline parallelism:
-# - Sends high-volume "per token" hidden states over PCIe/NVLink
-# - Sends lower-volume "per step" LoRA gradient reductions over Ethernet/InfiniBand
-#use_column_major_topology = true
 
 # Partitioning strategy for pipeline parallelism.
 # - "uniform"      : balances number of layers per stage (default)
@@ -88,12 +52,13 @@ eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_
 # MODULE/LAYER FILTER CONFIGURATION
 # =================================
 
-# Train only specific modules (defaults to: 'all linear' modules for LoRA, or all modules for full fine-tuning)
-# NOTE: Not available with Control Adapters - they operate per layer
+# Train only specific modules (defaults to all modules for full fine-tuning)
+# Optional: target specific modules
 #target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
 
-# Train only specific layers (can be combined with target_modules and used with LoRA/Control adapters or full fine-tuning)
+# Train only specific layers (can be combined with target_modules)
 # Format: 'start:end' (inclusive:inclusive, with first layer = 0 / last layer = n-1)
+# Optional: target specific layers (0-indexed, inclusive)
 #layers_to_transform = '16:31'
 
 # ========================
@@ -101,7 +66,7 @@ eval_gradient_accumulation_steps = 1  # (default: same as gradient_accumulation_
 # ========================
 
 eval_fraction = 0.01  # (default: 0.01)
-evals_per_epoch = 5   # (default: 10)
+evals_per_epoch = 10  # (default: 10)
 
 # ========================
 # CHECKPOINT CONFIGURATION
@@ -150,34 +115,12 @@ max_checkpoints = 3            # (default: 3)
 # DATASET CONFIGURATION
 # =====================
 
-# Basic datasets (for standard LoRA/QLoRA training)
 [[datasets]]
-dataset_path = 'raw_text_data/*.txt'
+dataset_path = 'data/training_data.jsonl'
 
 [[datasets]]
-dataset_path = 'structured_data/*.json'
+dataset_path = 'data/more_data/*.txt'
 max_tokens = 10000000              # Limit this dataset to 10M tokens
-
-[[datasets]]
-dataset_path = 'more_structured_data/*.jsonl'
-max_tokens = 5000000               # Limit this dataset to 5M tokens
-
-[[datasets]]
-dataset_path = 'parquet_data/*.parquet'
-
-# Example Control Adapter datasets (uncomment and modify for Control Adapter training)
-# NOTE: When using Control Adapters, increase lora_weight_decay to 100-500+ for mathematical stability
-# Positive examples - enhance this behavior
-#[[datasets]]
-#dataset_path = 'data/positive_examples.json'
-#control_class = 1                  # Enhance this behavior (default)
-#max_tokens = 2000000               # Limit positive examples to 2M tokens
-
-# Negative examples - suppress this behavior  
-#[[datasets]]
-#dataset_path = 'data/negative_examples.json'
-#control_class = -1                 # Suppress/unlearn this behavior
-#max_tokens = 1000000               # Limit negative examples to 1M tokens
 
 # Per-dataset configuration options:
 # - max_tokens: Maximum number of tokens to keep from this dataset after shuffling (default: unlimited)
@@ -187,6 +130,5 @@ dataset_path = 'parquet_data/*.parquet'
 # - Structured formats (.json/.jsonl/.parquet) must have a "text" field
 # - The HuggingFace dataset cache will be created below the dataset paths and is shared between nodes
 # - For multi-node training, ensure all paths use the same mount point across nodes
-# - control_class must be -1 or 1 (only used with Control Adapters)
 # - max_tokens pruning happens after shuffling but before dataset concatenation
 # - Supported file patterns: single files or glob patterns with wildcards
