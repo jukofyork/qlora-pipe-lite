@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Convert Control Adapters to an approximate additive LoRA by computing the
-multiplicative effect on model weights, then approximating the delta via SVD.
+Convert Control Adapters to an exact additive LoRA.
+
+We exploit the low-rank structure:
+  DeltaW = (Q diag(lambda) Q^T) @ W = (Q diag(lambda)) @ (Q^T W)
+So LoRA B = Q diag(lambda), LoRA A = Q^T W, retaining the original adapter rank.
 
 USAGE:
     python control_adapter_to_lora.py --base /path/to/base_model --adapter /path/to/control_adapter --output /path/to/out_dir
-                                      [--rank N] [--inverse] [--no-gpu] [--cohere | --mixtral N]
+                                      [--inverse] [--cohere | --mixtral N]
 """
 
 from pathlib import Path
@@ -15,7 +18,6 @@ import safetensors.torch
 import torch
 
 from training.control_adapters import (
-    apply_control_adapter_transform,
     load_control_adapter_weights,
     parse_control_adapter_keys,
     copy_and_patch_adapter_config,
@@ -25,12 +27,11 @@ from training.control_adapters import (
 )
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert Control Adapters to Additive LoRA format via SVD")
+    parser = argparse.ArgumentParser(description="Convert Control Adapters to exact Additive LoRA (no SVD)")
     parser.add_argument("--base", required=True, type=str, help="Path to the base model directory")
     parser.add_argument("--adapter", required=True, type=str, help="Path to the Control Adapter directory")
     parser.add_argument("--output", required=True, type=str, help="Path to the output LoRA directory")
-    parser.add_argument("--rank", type=int, help="Override rank for SVD truncation (default: use original rank)")
-    parser.add_argument("--no-gpu", action="store_true", help="Use CPU for SVD computation")
+    parser.add_argument("--no-gpu", action="store_true", help="Use CPU for computation")
     parser.add_argument("--inverse", action="store_true", help="Use exact inverse delta: (I + W)^{-1} - I")
     model_group = parser.add_mutually_exclusive_group()
     model_group.add_argument("--cohere", action="store_true", help="Also target o_proj for Cohere models")
@@ -46,7 +47,7 @@ if __name__ == "__main__":
     output_path = Path(args.output)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    target_rank = copy_and_patch_adapter_config(control_adapter_path, output_path, args)
+    copy_and_patch_adapter_config(control_adapter_path, output_path, args)
 
     control_keys, control_state_dict = load_control_adapter_weights(control_adapter_path)
     model_weights = load_model_weights(base_model_path)
@@ -67,9 +68,19 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             old_type = Q.dtype
+            m, r = Q.shape
 
-            # Choose forward or exact inverse delta via flag
-            lora_delta = apply_control_adapter_transform(Q, S, device=device, inverse=args.inverse)
+            # Move to device as float32 for compute
+            Q_d = Q.to(device=device, dtype=torch.float32)
+            S_d = S.to(device=device, dtype=torch.float32)
+
+            # Forward or exact inverse delta coefficients
+            # forward:  lambda = exp(S) - 1
+            # inverse:  lambda' = exp(-S) - 1 = -lambda/(1+lambda)
+            coeff = torch.expm1(-S_d) if args.inverse else torch.expm1(S_d)  # [r]
+
+            # Common B factor per layer: B = Q diag(coeff)  => scale columns of Q by coeff
+            B_common = Q_d * coeff.unsqueeze(0)  # [m, r]
 
             target_keys = generate_model_weight_keys(layer_idx, args)
 
@@ -77,31 +88,22 @@ if __name__ == "__main__":
                 if target_key not in model_weights:
                     continue
 
-                weight = model_weights[target_key].to(device=device, dtype=torch.float32)
-                multiplicative_effect = lora_delta @ weight
+                # Load base weight and compute A = Q^T W
+                W = model_weights[target_key].to(device=device, dtype=torch.float32)  # [m, n]
+                A = Q_d.T @ W  # [r, n]
 
-                U, svals, Vt = torch.linalg.svd(multiplicative_effect, full_matrices=False)
-                U, svals, Vt = U.cpu(), svals.cpu(), Vt.cpu()
-
-                # Truncate to target rank
-                if target_rank > len(svals):
-                    raise ValueError(f"Requested rank {target_rank} exceeds maximum available rank {len(svals)} from SVD")
-                sqrt_svals = torch.sqrt(svals[:target_rank])
-                A_approx = torch.diag(sqrt_svals) @ Vt[:target_rank,:]
-                B_approx = U[:,:target_rank] @ torch.diag(sqrt_svals)
-
-                A_approx = A_approx.to(old_type)
-                B_approx = B_approx.to(old_type)
+                # Cast back to original dtype and CPU for saving
+                A_out = A.to(dtype=old_type, device='cpu')
+                B_out = B_common.to(dtype=old_type, device='cpu')
 
                 a_key = generate_lora_key(layer_idx, target_key, 'A', args)
                 b_key = generate_lora_key(layer_idx, target_key, 'B', args)
-                lora_state_dict[a_key] = A_approx
-                lora_state_dict[b_key] = B_approx
+                lora_state_dict[a_key] = A_out
+                lora_state_dict[b_key] = B_out
 
                 base_key = f"base_model.model.model.layers.{layer_idx}"
                 print()
-                print(f"- Layer {layer_idx}, SVD rank {target_rank}/{len(svals)}, "
-                      f"{100 * torch.sum(svals[:target_rank] ** 2) / torch.sum(svals ** 2):.1f}% of variance explained:")
+                print(f"- Layer {layer_idx}, retained rank {r}")
                 print(f"  -- '{base_key}.control_Q' + '{base_key}.control_S'")
                 print(f"  -> '{a_key}' + '{b_key}'")
 

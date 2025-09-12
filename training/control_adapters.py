@@ -232,16 +232,13 @@ def parse_control_adapter_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[int,
     return control_adapters
 
 def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args):
-    """Copy adapter config, patch target_modules based on model type, and optionally patch rank/alpha."""
+    """Copy adapter config and patch target_modules based on model type"""
     config_file = input_path / 'adapter_config.json'
     if not config_file.exists():
         raise FileNotFoundError(f"adapter_config.json not found in {input_path}")
 
     with open(config_file, 'r') as f:
         config = json.load(f)
-
-    # Use custom target rank if asked (allows exceeding original rank)
-    target_rank = args.rank if args.rank is not None else config['r']
 
     # Set target modules based on model type
     if getattr(args, 'mixtral', None):
@@ -251,15 +248,9 @@ def copy_and_patch_adapter_config(input_path: Path, output_path: Path, args):
     else:
         config['target_modules'] = ["down_proj"]
 
-    # Update rank and alpha if different from original
-    config['r'] = target_rank
-    config['lora_alpha'] = target_rank  # NOTE: We fix lora_alpha = lora_rank and then just adjust learning rate...
-
     with open(output_path / 'adapter_config.json', 'w') as f:
         json.dump(config, f, indent=2)
     print("Updated and copied 'adapter_config.json'")
-
-    return target_rank
 
 def generate_model_weight_keys(layer_idx: int, args) -> List[str]:
     """Generate model weight keys for a given layer based on model type."""
