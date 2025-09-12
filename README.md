@@ -234,13 +234,13 @@ max_checkpoints = 3                   # Maximum checkpoints to retain
 
 ```toml
 # Memory optimisation
-load_in_4bit = true               # Enable 4-bit quantisation
-use_column_major_topology = true  # Optimise for mixed interconnects
+load_in_4bit = true                   # Enable 4-bit quantisation
+use_column_major_topology = true      # Optimise for mixed interconnects
 
 # Data processing
-max_sequences = 1000000           # Limit total sequences
-drop_tails = false                # Drop incomplete document tails
-mix_datasets = false              # Allow cross-dataset sequence mixing
+max_sequences = 1000000               # Limit total sequences
+drop_tails = false                    # Drop incomplete document tails
+mix_datasets = false                  # Allow cross-dataset sequence mixing
 ```
 
 ## Pipeline Parallelism
@@ -258,20 +258,23 @@ GPU 2: [Decoder Layers 24-31] → [Norm] → [LM Head] → [Loss]
 ### Configuration
 
 ```toml
-pipeline_stages = 3               # Split model across 3 GPUs
-partition_method = "uniform"      # How to distribute layers
+pipeline_stages = 3                       # Split model across 3 GPUs
+partition_method = "uniform"              # How to distribute layers
 
-# Alternative partitioning strategies:
-# partition_method = "parameters"           # Balance by parameter count
-# partition_method = "type:decoderlayer"    # Balance by layer type
+# Partitioning strategies:
+# partition_method = "uniform"            # Balance number of layers per stage (default)
+# partition_method = "parameters"         # Balance number of trainable parameters per stage
+# partition_method = "type:decoderlayer"  # Balance layers whose class names match regex
 ```
 
 ### Multi-Node Setup
 
 For multi-node training, ensure:
-1. **Shared filesystem**: All nodes can access the same model and data paths
-2. **Network configuration**: Proper NCCL/MPI setup
-3. **SSH access**: Passwordless SSH between nodes
+
+1. **Shared filesystem**: All nodes need access to the same model, dataset and output paths
+2. **SSH access**: Passwordless SSH between nodes needs to be set up (see [this guide](https://www.strongdm.com/blog/ssh-passwordless-login))
+
+See [Training On Multiple Nodes With DeepSpeed](https://nlp.stanford.edu/mistral/tutorials/deepspeed.html) for details on how to setup `/job/hostfile` on the `"master"` node.
 
 ```bash
 # Multi-node example
@@ -298,11 +301,11 @@ Support for multiple formats and sophisticated preprocessing:
 
 ```toml
 [[datasets]]
-dataset_path = "data/train/*.jsonl"
-max_tokens = 1000000             # Limit dataset size
+dataset_path = "data/train/*.json"
+max_tokens = 1000000               # Limit dataset size
 
 [[datasets]]
-dataset_path = "data/validation/*.txt"
+dataset_path = "data/text/*.txt"
 ```
 
 ### Supported Formats
@@ -472,7 +475,7 @@ Taking the reciprocal of the coefficient of variation and normalising by `sqrt(2
 
 **No Warmup Needed**: The RMS ratio naturally handles early training dynamics without requiring separate warmup phases.
 
-### No Cosine Annealing
+#### No Cosine Annealing
 
 We deliberately avoid cosine annealing for two practical reasons:
 
