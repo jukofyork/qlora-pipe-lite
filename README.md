@@ -10,6 +10,7 @@ A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) focu
 - **Optimised Kernels**: Triton-based cross-entropy loss with large vocabulary support
 - **Production Features**: Checkpointing, distributed training, monitoring, LoRA merging
 - **Data Processing**: Multiple formats (text/JSON/parquet), tokenisation control, sequence slicing, caching
+- **Deployment Tools**: Merge LoRA into base models or export adapters to GGUF for [llama.cpp](https://github.com/ggml-org/llama.cpp)
 
 Read the [Control Adapter documentation](docs/ControlAdapters.md) for implementation details.
 
@@ -339,7 +340,7 @@ The framework implements distributed data loading with per-rank sampling, remain
 
 ## Utility Tools
 
-### Model Conversion and Merging
+### Model Conversion, Export and Merging
 
 **Merge LoRA into base model**:
 
@@ -359,6 +360,18 @@ python convert_ds_checkpoint.py \
   --config /path/to/config.toml \
   --output /path/to/lora_adapter
 ```
+
+**Export LoRA adapter to GGUF (llama.cpp)**:
+
+```bash
+python lora_to_gguf.py \
+  --input /path/to/lora_adapter \
+  --output /path/to/adapter.gguf \
+  [--arch llama] \
+  [--outtype F32]
+```
+
+NOTE: Mixtral is not yet supported by `lora_to_gguf.py` - use [convert_lora_to_gguf.py](https://github.com/ggml-org/llama.cpp/blob/master/convert_lora_to_gguf.py) instead.
 
 ## Monitoring and Analysis
 

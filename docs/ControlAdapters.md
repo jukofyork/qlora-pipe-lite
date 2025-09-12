@@ -79,6 +79,16 @@ python control_adapter_to_lora.py \
   --output ./converted_lora
 ```
 
+### 6. Optional: Export LoRA to GGUF (llama.cpp)
+
+```bash
+python lora_to_gguf.py \
+  --input ./converted_lora \
+  --output ./adapter.gguf \
+  [--arch llama] \
+  [--outtype F32]
+```
+
 ## Overview
 
 ### What are Control Adapters?
@@ -340,7 +350,7 @@ python control_adapter_to_lora.py \
   --base /path/to/base_model \
   --adapter /path/to/control_adapter \
   --output /path/to/lora_output \
-  [--rank N] [--inverse] [--model-specific-flags]
+  [--inverse] [--model-specific-flags]
 ```
 
 NOTE: Targets `mlp.down_proj` by default; use `--cohere` or `--mixtral N` to include additional modules.
@@ -348,19 +358,23 @@ NOTE: Targets `mlp.down_proj` by default; use `--cohere` or `--mixtral N` to inc
 **Key options:**
 
 - `--inverse`: Convert inverse branch (class `-1` behaviour) instead of forward branch (useful for testing!)
-- `--rank N`: Override output LoRA rank (useful for compression; monitor "% variance explained" for each layer)
 - `--cohere`: Also target `o_proj` layers (for `Cohere` models only)
 - `--mixtral N`: Target `experts.{0..N-1}.w2` (for `Mixtral` models only)
 
 ### Conversion Math
 
-The conversion approximates the multiplicative effect as an additive LoRA:
+The conversion uses an exact low-rank mapping to an additive LoRA:
 
-1. **Compute multiplicative effect**: `ΔW = Q diag(λ) Q^T × W_base`
-2. **SVD decomposition**: `ΔW ≈ U Σ V^T`
-3. **LoRA factorisation**: `B = U√Σ`, `A = √Σ V^T`
+1. Compute eigenvalue offsets: `λ = exp(S) - 1` (or `λ' = exp(-S) - 1` for `--inverse`)
+2. Compute delta to base weight: `ΔW = (Q diag(λ) Q^T) @ W_base`
+3. Exact LoRA factorisation:
+   - `B = Q diag(λ)`  (shape `[H, r]`)
+   - `A = Q^T W_base` (shape `[r, N]`)
+   - Then `ΔW = B @ A` exactly, with rank `r` preserved (no SVD, no truncation).
 
 ### Deployment
+
+**Merge LoRA into base model**:
 
 Once conversion is complete, you can merge the LoRA using any standard LoRA-merging tool or the included `merge_lora.py` script:
 
@@ -373,6 +387,18 @@ python merge_lora.py \
 ```
 
 Alternatively, you can use the [Memory-Efficient LoRA Merge](https://huggingface.co/spaces/jukofyork/merge-lora) Hugging Face space (useful for users with limited upload bandwidth who want to share their models publicly!).
+
+**Export LoRA adapter to GGUF (llama.cpp)**:
+
+```bash
+python lora_to_gguf.py \
+  --input /path/to/lora_output \
+  --output /path/to/adapter.gguf \
+  [--arch llama] \
+  [--outtype F16]
+```
+
+NOTE: Mixtral is not yet supported by `lora_to_gguf.py` - use [convert_lora_to_gguf.py](https://github.com/ggml-org/llama.cpp/blob/master/convert_lora_to_gguf.py) instead.
 
 ## Best Practices
 
@@ -419,6 +445,7 @@ Alternatively, you can use the [Memory-Efficient LoRA Merge](https://huggingface
 
 - `control_adapter_to_lora.py`: Convert to standard LoRA format for deployment
 - `merge_lora.py`: Standard LoRA merging tool (use after conversion)
+- `lora_to_gguf.py`: Export a LoRA adapter to GGUF for [llama.cpp](https://github.com/ggml-org/llama.cpp)
 
 ### Usage Summary
 
@@ -437,4 +464,7 @@ python control_adapter_to_lora.py --base /path/to/model --adapter /path/to/adapt
 
 # Merge LoRA into base model
 python merge_lora.py --input /path/to/model --adapter /path/to/lora --output /path/to/merged
+
+# Export LoRA to GGUF for llama.cpp
+python lora_to_gguf.py --input /path/to/lora --output /path/to/adapter.gguf
 ```
