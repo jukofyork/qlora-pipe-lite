@@ -3,7 +3,9 @@ bitsandbytes
 datasets
 deepspeed
 flash-attn
+gguf
 huggingface-hub
+numpy
 peft
 pyarrow
 safetensors

@@ -10,7 +10,9 @@ Provides functions to:
 - Convert DeepSpeed pipeline checkpoints to a LoRA adapter (utility)
 """
 from glob import glob
+from pathlib import Path
 from peft import LoraConfig, get_peft_model
+from typing import Dict, List, Tuple
 import json
 import os
 import re
@@ -31,6 +33,9 @@ from models.causal_lm import (
     Qwen3ForCausalLmPipe,
 )
 from utils.utils import DTYPE_MAP
+import gguf
+import numpy as np
+import safetensors.torch
 
 def create_model(config, trust_remote_code=False):
     """
@@ -212,6 +217,51 @@ def create_lora_config(config):
 
     return lora_config
 
+def load_lora_config(adapter_dir: Path) -> Dict:
+    """
+    Load and validate LoRA adapter configuration from adapter_config.json.
+
+    Args:
+        adapter_dir (Path): Directory containing the adapter configuration file.
+
+    Returns:
+        Dict: Configuration dictionary containing 'lora_alpha' and 'r' keys.
+
+    Raises:
+        FileNotFoundError: If adapter_config.json is missing.
+        ValueError: If required keys are missing from configuration.
+    """
+    cfg_path = adapter_dir / "adapter_config.json"
+    if not cfg_path.is_file():
+        raise FileNotFoundError(f"Missing adapter_config.json in: {adapter_dir}")
+    with open(cfg_path, "r") as f:
+        cfg = json.load(f)
+    if "lora_alpha" not in cfg or "r" not in cfg:
+        raise ValueError("adapter_config.json must contain 'lora_alpha' and 'r'")
+    return cfg
+
+def load_lora_state(adapter_dir: Path) -> Dict[str, torch.Tensor]:
+    """
+    Load LoRA adapter weights from either safetensors or PyTorch format.
+
+    Args:
+        adapter_dir (Path): Directory containing adapter model files.
+
+    Returns:
+        Dict[str, torch.Tensor]: State dictionary with LoRA weights loaded to CPU.
+
+    Raises:
+        FileNotFoundError: If neither adapter_model.safetensors nor adapter_model.bin exist.
+    """
+    st_path = adapter_dir / "adapter_model.safetensors"
+    pt_path = adapter_dir / "adapter_model.bin"
+    if st_path.is_file():
+        return safetensors.torch.load_file(st_path, device="cpu")
+    if pt_path.is_file():
+        # weights_only supported on recent torch; keep simple and CPU-map
+        return torch.load(pt_path, map_location="cpu")
+    raise FileNotFoundError(f"Neither adapter_model.safetensors nor adapter_model.bin found in: {adapter_dir}")
+
 def apply_lora_adapters(model, config, lora_config):
     """
     Apply LoRA configuration to the base HF model via PEFT and fix trainable dtypes.
@@ -237,6 +287,67 @@ def apply_lora_adapters(model, config, lora_config):
     lora_model.model.config.use_cache = False
     for name, p in lora_model.named_parameters():
         p.original_name = name
+
+def find_lora_weights(key: str, lora_state: Dict[str, torch.Tensor]):
+    """
+    Find corresponding LoRA A and B weight tensors for a given base model key.
+
+    Args:
+        key (str): Base model weight key (e.g., "model.layers.0.self_attn.q_proj.weight").
+        lora_state (Dict[str, torch.Tensor]): LoRA state dictionary.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: LoRA A and B tensors, or (None, None) if not found.
+
+    Raises:
+        AssertionError: If only one of LoRA A/B is found (mismatched pair).
+    """
+    base = key.removesuffix('.weight')
+    a_key = f"base_model.{base}.lora_A.weight"
+    b_key = f"base_model.{base}.lora_B.weight"
+    lora_A = lora_state.get(a_key, None)
+    lora_B = lora_state.get(b_key, None)
+    assert not ((lora_A is None) ^ (lora_B is None)), \
+        f"Only one of LoRA A/B found for {key} (A={a_key in lora_state}, B={b_key in lora_state})"
+    return lora_A, lora_B
+
+def export_lora_gguf(
+    path: os.PathLike[str] | str,
+    tensors: List[Tuple[str, torch.Tensor]],
+    alpha: int | float,
+    quant_type: gguf.GGMLQuantizationType,
+    architecture: str,
+) -> None:
+    """
+    Export LoRA tensors to GGUF format for llama.cpp compatibility.
+
+    Args:
+        path: Output file path for the GGUF file.
+        tensors: List of (name, tensor) pairs to write.
+        alpha: LoRA alpha scaling factor.
+        quant_type: GGUF quantization type (F32, F16, BF16, Q8_0).
+        architecture: Target model architecture name.
+    """
+    writer = gguf.GGUFWriter(path, architecture)
+    writer.add_string("general.type", "adapter")
+    writer.add_string("adapter.type", "lora")
+    writer.add_float32("adapter.lora.alpha", float(alpha))
+
+    for name, tensor in tensors:
+        t_cpu = tensor.detach().cpu()
+        if quant_type in (gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
+            dtype = np.float32 if quant_type == gguf.GGMLQuantizationType.F32 else np.float16
+            writer.add_tensor(name, t_cpu.numpy().astype(dtype, copy=False))
+        else:
+            # BF16 / Q8_0
+            # gguf.quants.quantize expects float32 input
+            quant_tensor = gguf.quants.quantize(t_cpu.to(torch.float32).numpy(), quant_type)
+            writer.add_tensor(name, quant_tensor, raw_shape=quant_tensor.shape, raw_dtype=quant_type)
+
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
 
 def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, config_path, lora_output_dir):
     """

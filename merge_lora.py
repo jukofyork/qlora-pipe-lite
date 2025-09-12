@@ -17,15 +17,7 @@ import safetensors.torch
 import shutil
 import torch
 
-def find_lora_weights(key: str):
-    base = key.removesuffix('.weight')
-    a_key = f"base_model.{base}.lora_A.weight"
-    b_key = f"base_model.{base}.lora_B.weight"
-    lora_A = lora_state.get(a_key, None)
-    lora_B = lora_state.get(b_key, None)
-    assert not ((lora_A is None) ^ (lora_B is None)), \
-        f"Only one of LoRA A/B found for {key} (A={a_key in lora_state}, B={b_key in lora_state})"
-    return lora_A, lora_B
+from training.model_factory import find_lora_weights
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Merge LoRA adapter weights into base model shards")
@@ -85,7 +77,7 @@ if __name__ == "__main__":
             metadata = f.metadata()
             for key in f.keys():
                 tensor = f.get_tensor(key)
-                lora_A, lora_B = find_lora_weights(key)
+                lora_A, lora_B = find_lora_weights(key, lora_state)
                 if lora_A is not None:
                     pbar.set_description(f'found lora weights for {key}: {tuple(lora_A.size())}, {tuple(lora_B.size())}')
                     old_type = tensor.dtype
