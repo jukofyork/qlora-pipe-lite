@@ -13,7 +13,7 @@ class DatasetBuilder:
 
     Behavior:
     - Loads text/json/jsonl/parquet sources via HF datasets
-    - Tokenizes with optional document suffix per source
+    - Tokenizes with optional document prefix/suffix per source
     - Optionally randomizes control classes when control_class=0
     - Shuffles per-source, optionally again after concatenation, and shuffles the
       train/eval split (deterministic with seed=42)
@@ -56,6 +56,7 @@ class DatasetBuilder:
         self.mix_datasets = config.get('mix_datasets', False)
         self.sequence_prefix = config.get('sequence_prefix', None)  # None --> add BOS if exists
         self.mask_tokens = config.get('mask_tokens', None)  # None --> no masking
+        self.document_prefix = config.get('document_prefix', None)  # None --> do nothing
         self.document_suffix = config.get('document_suffix', None)  # None --> add EOS if exists
         self.datasets_cfg = config['datasets']
 
@@ -82,6 +83,7 @@ class DatasetBuilder:
                     ds = self._load_single_dataset(
                         dataset_path=dataset_config['dataset_path'],
                         control_class=control_class,
+                        document_prefix=self.document_prefix,
                         document_suffix=self.document_suffix,
                         max_tokens=max_tokens
                     )
@@ -129,9 +131,9 @@ class DatasetBuilder:
         train_dataset.save_to_disk(self.train_subdir)
         eval_dataset.save_to_disk(self.eval_subdir)
 
-    def _load_single_dataset(self, dataset_path, control_class=1, document_suffix=None, max_tokens=sys.maxsize):
+    def _load_single_dataset(self, dataset_path, control_class=1, document_prefix=None, document_suffix=None, max_tokens=sys.maxsize):
         """
-        Load one dataset file/pattern, tokenize, assign control class, shuffle, prune to max_tokens.
+        Load one dataset file/pattern, tokenize (with optional document prefix/suffix), assign control class, shuffle, prune to max_tokens.
         """
         base_dir = os.path.dirname(dataset_path.split("*", 1)[0])
         cache_dir = os.path.join(base_dir, "hf_cache")
@@ -162,7 +164,7 @@ class DatasetBuilder:
             raise NotImplementedError()
 
         ds = ds.map(
-            lambda x: self._tokenize(x, self.tokenizer, control_class, document_suffix),
+            lambda x: self._tokenize(x, self.tokenizer, control_class, document_prefix, document_suffix),
             batched=True,
             batch_size=DATASET_MAP_BATCH_SIZE,
             remove_columns=ds.column_names,
@@ -190,34 +192,70 @@ class DatasetBuilder:
         return ds
 
     @staticmethod
-    def _tokenize(batch, tokenizer, control_class=1, document_suffix=None):
+    def _tokenize(batch, tokenizer, control_class=1, document_prefix=None, document_suffix=None):
         """
-        Tokenizes a batch of text and assigns control class to each document.
-        Mirrors previous tokenize() behavior.
+        Tokenizes a batch of text with optional document prefix/suffix and assigns control class.
+        Mirrors previous tokenize() behavior with the addition of document_prefix.
+
+        document_prefix:
+            - None          -> do nothing
+            - "" (empty str)-> do nothing
+            - str           -> prepend string before tokenization
+            - int/list[int] -> prepend token id(s) after tokenization
+
+        document_suffix (unchanged behavior):
+            - None          -> append EOS if tokenizer.eos_token_id exists
+            - "" (empty str)-> do nothing
+            - str           -> append string before tokenization
+            - int/list[int] -> append token id(s) after tokenization
         """
         result = {'input_ids': []}
 
-        if isinstance(document_suffix, str) and document_suffix != "":
-            for text in batch['text']:
-                tokens = tokenizer.encode(text + document_suffix, add_special_tokens=False)
-                if len(tokens) > 0:
-                    result['input_ids'].append(tokens)
-        else:
-            if document_suffix is None:
-                suffix_tokens = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
-            elif isinstance(document_suffix, str) and document_suffix == "":
-                suffix_tokens = []
-            elif isinstance(document_suffix, int):
-                suffix_tokens = [document_suffix]
-            elif isinstance(document_suffix, list):
-                suffix_tokens = document_suffix
-            else:
-                raise ValueError(f"Invalid document_suffix type: {type(document_suffix)}. Must be None, str, int, or list of ints.")
+        # String-based parts for pre/post text
+        prefix_str = document_prefix if (isinstance(document_prefix, str) and document_prefix != "") else None
+        suffix_str = document_suffix if (isinstance(document_suffix, str) and document_suffix != "") else None
 
-            for text in batch['text']:
-                tokens = tokenizer.encode(text, add_special_tokens=False) + suffix_tokens
-                if len(tokens) > 0:
-                    result['input_ids'].append(tokens)
+        # Token-based prefix determination
+        if document_prefix is None or (isinstance(document_prefix, str) and document_prefix == ""):
+            prefix_tokens = []
+        elif isinstance(document_prefix, int):
+            prefix_tokens = [document_prefix]
+        elif isinstance(document_prefix, list):
+            prefix_tokens = document_prefix
+        elif isinstance(document_prefix, str):  # non-empty handled via prefix_str
+            prefix_tokens = []
+        else:
+            raise ValueError(f"Invalid document_prefix type: {type(document_prefix)}. Must be None, str, int, or list of ints.")
+
+        # Token-based suffix determination (preserve previous default EOS behavior)
+        if document_suffix is None:
+            suffix_tokens = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
+        elif isinstance(document_suffix, str) and document_suffix == "":
+            suffix_tokens = []
+        elif isinstance(document_suffix, int):
+            suffix_tokens = [document_suffix]
+        elif isinstance(document_suffix, list):
+            suffix_tokens = document_suffix
+        elif isinstance(document_suffix, str):  # non-empty handled via suffix_str
+            suffix_tokens = []
+        else:
+            raise ValueError(f"Invalid document_suffix type: {type(document_suffix)}. Must be None, str, int, or list of ints.")
+
+        for text in batch['text']:
+            composed = text
+            if prefix_str is not None:
+                composed = prefix_str + composed
+            if suffix_str is not None:
+                composed = composed + suffix_str
+
+            tokens = tokenizer.encode(composed, add_special_tokens=False)
+            if prefix_tokens:
+                tokens = prefix_tokens + tokens
+            if suffix_tokens:
+                tokens = tokens + suffix_tokens
+
+            if len(tokens) > 0:
+                result['input_ids'].append(tokens)
 
         result['control_class'] = [control_class] * len(result['input_ids'])
         return result

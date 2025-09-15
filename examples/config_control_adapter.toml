@@ -127,6 +127,14 @@ max_checkpoints = 3            # (default: 3)
 # - [123, 456]: mask multiple token IDs
 #mask_tokens = None
 
+# Document prefix (applied during tokenization to all datasets):
+# - None: no additional tokens added (default)
+# - "": empty prefix, no additional tokens added
+# - "<SOT>": string to prepend before tokenizing
+# - 123: single token ID to prepend after tokenizing
+# - [123, 456]: multiple token IDs to prepend after tokenizing
+#document_prefix = None
+
 # Document suffix (applied during tokenization to all datasets):
 # - None: tokenize first, then add tokenizer's EOS token if missing (default)
 # - "": empty suffix, no additional tokens added

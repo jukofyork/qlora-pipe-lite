@@ -9,7 +9,7 @@ A streamlined fork of [qlora-pipe](https://github.com/tdrussell/qlora-pipe) focu
 - **Custom LoRA Regularisation**: Composite matrix weight decay on `W = B·A` instead of separate `A`, `B` penalties
 - **Optimised Kernels**: Triton-based cross-entropy loss with large vocabulary support
 - **Production Features**: Checkpointing, distributed training, monitoring, LoRA merging
-- **Data Processing**: Multiple formats (text/JSON/parquet), tokenisation control, sequence slicing, caching
+- **Data Processing**: Multiple formats (text/JSON/parquet), tokenisation control (document prefix/suffix), sequence slicing, caching
 - **Deployment Tools**: Merge LoRA into base models or export adapters to GGUF for [llama.cpp](https://github.com/ggml-org/llama.cpp)
 
 Read the [Control Adapter documentation](docs/ControlAdapters.md) for implementation details.
@@ -318,17 +318,22 @@ dataset_path = "data/text/*.txt"
 ### Advanced Processing Options
 
 ```toml
-# Sequence initialisation
+# Sequence initialisation (default: None -> add BOS token if tokenizer.bos_token_id exists)
 sequence_prefix = "<BOS>"         # String to encode as prefix tokens
 # sequence_prefix = 123           # Single token ID
 # sequence_prefix = [123, 456]    # Multiple token IDs
 
-# Document suffixes (applied during tokenisation)
+# Document prefixes (applied during tokenisation; default: None -> no additional tokens added)
+document_prefix = "<SOT>"         # String prefix before tokenisation
+# document_prefix = 123           # Token ID after tokenisation
+# document_prefix = [123, 456]    # Multiple token IDs
+
+# Document suffixes (applied during tokenisation; default: None -> append EOS token if tokenizer.eos_token_id exists)
 document_suffix = "<EOT>"         # String suffix before tokenisation
 # document_suffix = 123           # Token ID after tokenisation
 # document_suffix = [123, 456]    # Multiple token IDs
 
-# Token masking (sets labels = -100 for loss exclusion)
+# Token masking (sets labels = -100 for loss exclusion; default: None/false -> no masking)
 mask_tokens = true                # Mask all special tokens
 # mask_tokens = 123               # Mask specific token
 # mask_tokens = [123, 456]        # Mask multiple tokens
