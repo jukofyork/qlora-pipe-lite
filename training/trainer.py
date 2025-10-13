@@ -523,11 +523,15 @@ class Trainer:
         return state_dict
 
     def _copy_model_files(self, model_dir, save_dir):
-        """Copy additional model files (tokenizer, config, etc.) to save directory."""
+        """Copy additional model files (tokenizer, chat template, config, etc.) to save directory."""
         # Copy all JSON files
         for path in glob.glob(os.path.join(model_dir, '*.json')):
             shutil.copy(path, save_dir)
-        # Also copy tokenizer.model if present
+        # Copy 'chat_template.jinja' if present
+        chat_template_path = os.path.join(model_dir, 'chat_template.jinja')
+        if os.path.exists(chat_template_path):
+            shutil.copy(chat_template_path, save_dir)
+        # Copy 'tokenizer.model' if present
         tok_model_path = os.path.join(model_dir, 'tokenizer.model')
         if os.path.exists(tok_model_path):
             shutil.copy(tok_model_path, save_dir)

@@ -16,9 +16,11 @@ from typing import Dict, List, Tuple
 import json
 import os
 import re
+import safetensors.torch
 import toml
 import torch
 
+import gguf
 import transformers
 
 from models.causal_lm import (
@@ -33,9 +35,7 @@ from models.causal_lm import (
     Qwen3ForCausalLmPipe,
 )
 from utils.utils import DTYPE_MAP
-import gguf
 import numpy as np
-import safetensors.torch
 
 def create_model(config, trust_remote_code=False):
     """
@@ -86,10 +86,10 @@ def parse_layers_to_transform(config):
     Parse a compact 'layers_to_transform' string into a list of layer indices.
 
     Supported formats:
-        - Ranges: "start1:stop1,start2:stop2,..."
-          e.g., "0:3,10:12" -> [0,1,2,3,10,11,12]
-        - Singles: "1,2,3" -> [1,2,3]
-        - Mixed: "0:2, 5, 7:8" -> [0,1,2,5,7,8]
+        - Single : "1" -> [1]
+        - List   : "1,2,3" -> [1,2,3]
+        - Range  : "0:3" -> [0,1,2,3]
+        - Mixed  : "0:2, 5, 7:8" -> [0,1,2,5,7,8]
 
     Args:
         config (dict): Configuration with optional 'layers_to_transform' string.
@@ -98,7 +98,9 @@ def parse_layers_to_transform(config):
         list[int]: Expanded list of layer indices (possibly empty).
     """
     layers_to_transform = []
-    if layers_spec := config.get('layers_to_transform', None):
+    if (layers_spec := config.get('layers_to_transform', None)) is not None:
+        if isinstance(layers_spec, int) and not isinstance(layers_spec, bool):
+            return [layers_spec]
         for part in layers_spec.split(','):
             token = part.strip()
             if not token:
@@ -116,62 +118,39 @@ def configure_full_fine_tuning(model, config):
     """
     Set requires_grad for parameters to enable full fine-tuning with optional scoping.
 
+    NOTE: This must be done *BEFORE* building the pipeline!!!
+
     Behavior:
-        - Assign 'original_name' to parameters that don't have it (preserve HF names if present)
+        - Assign 'original_name' to parameters to preserve HF names
         - Enable training for all parameters by default
         - If target_modules is provided, only parameters whose names contain any target string are trained
         - If layers_to_transform is provided, restrict to selected transformer layers
 
     Args:
-        model (torch.nn.Module): Pipeline model whose parameters to mark as trainable.
+        model (torch.nn.Module): Model whose parameters to mark as trainable.
         config (dict): Training configuration containing optional 'target_modules'
                        and 'layers_to_transform'.
     """
     target_modules = config.get('target_modules', None)
+    assert (
+        target_modules is None or (
+            isinstance(target_modules, list) and all(isinstance(t, str) and t for t in target_modules)
+        )
+    ), "'target_modules' must be a list of non-empty strings (e.g., ['q_proj', 'k_proj'])"
+
     layers_to_transform = parse_layers_to_transform(config)
 
-    # Preserve existing original_name (from HF) if present; set only when missing
     for name, p in model.named_parameters():
-        if not hasattr(p, 'original_name'):
-            p.original_name = name
-
-    for name, p in model.named_parameters():
-        should_train = True
+        p.original_name = name
+        p.requires_grad = True
         if target_modules and not any(target in name for target in target_modules):
-            should_train = False
+            p.requires_grad = False
             # log_all(f'not training {name} because it is not present in target_modules')
-        elif layers_to_transform and 'model.layers.' in name:
+        if layers_to_transform and 'model.layers.' in name:
             layer_idx = int(name.split('model.layers.')[1].split('.')[0])
             if layer_idx not in layers_to_transform:
-                should_train = False
+                p.requires_grad = False
                 # log_all(f'not training {name} because layer {layer_idx} is not in layers_to_transform')
-        p.requires_grad = should_train
-
-    # Fail-fast validation: if using tied layers (FFT with tied embeddings), both ends must be trainable.
-    # DeepSpeed will all_reduce weight.grad for tied parameters; a frozen end (grad=None) would crash.
-    tied_param_ids = set()
-    # PipelineModule sets these only if TiedLayerSpec was used
-    has_ties = hasattr(model, 'tied_modules') and hasattr(model, 'tied_weight_attrs') and len(model.tied_modules) > 0
-    if has_ties:
-        # Gather tied parameters present on this stage
-        for key, tied_module in model.tied_modules.items():
-            weight_attrs = model.tied_weight_attrs.get(key, [])
-            for attr_name in weight_attrs:
-                try:
-                    # Recursive getattr matches DS internal logic
-                    tied_param = model._recursive_getattr(tied_module, attr_name)
-                    tied_param_ids.add(id(tied_param))
-                except Exception:
-                    pass
-
-        # Validate that all tied params are trainable on this stage
-        for pname, p in model.named_parameters():
-            if id(p) in tied_param_ids and not p.requires_grad:
-                raise ValueError(
-                    f'Full fine-tuning with tied embeddings requires training all tied weights. '
-                    f'Parameter "{pname}" is frozen by your target_modules/layers_to_transform selection. '
-                    f'Please include both the embedding and the lm_head in training or remove the restriction.'
-                )
 
 def create_lora_config(config):
     """

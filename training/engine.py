@@ -63,8 +63,8 @@ class Engine:
 
         if config.get('full_fine_tune', False):
             lora_config = None
+            configure_full_fine_tuning(model, config)  # Must be done before building the pipeline!!!
             pipeline_model = self._create_pipeline_model(model, config)
-            configure_full_fine_tuning(pipeline_model, config)
         elif config.get('use_control_adapters', False):
             lora_config = create_lora_config(config)
             pipeline_model = self._create_pipeline_model(model, config)
