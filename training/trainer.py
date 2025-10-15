@@ -509,6 +509,9 @@ class Trainer:
                     continue
                 param_name = p.original_name.replace('.default', '').replace('.modules_to_save', '')
             else:
+                if not hasattr(p, 'original_name'):
+                    log(f'WARNING: parameter {name} does not have original_name. Not saving it.')
+                    continue
                 param_name = p.original_name
             partial_state_dict[param_name] = p.detach()
         torch.save(partial_state_dict, os.path.join(tmp_dir, f'state_dict_{stage_id}.bin'))
