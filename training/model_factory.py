@@ -118,7 +118,7 @@ def configure_full_fine_tuning(model, config):
     """
     Set requires_grad for parameters to enable full fine-tuning with optional scoping.
 
-    NOTE: This must be done *BEFORE* building the pipeline!!!
+    NOTE: This must be done *AFTER* building the pipeline!!!
 
     Behavior:
         - Assign 'original_name' to parameters to preserve HF names
