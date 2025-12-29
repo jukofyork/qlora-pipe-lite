@@ -335,7 +335,7 @@ def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, config_path, lora_output_di
     Filters out BitsAndBytes 4-bit buffers (absmax/quant_map/quant_state, etc.) and base model weights,
     keeping only adapter tensors:
       - LoRA: *.lora_A.weight / *.lora_B.weight (and optional modules_to_save.*)
-      - Control Adapters: control_Q / control_S
+      - Control Adapters: control_A.weight / control_B.weight
 
     Saved keys are normalized to HF/PEFT-compatible names:
       - Strips leading 'orig.' indirection introduced by pipeline wrappers
@@ -354,12 +354,10 @@ def convert_ds_checkpoint_to_lora(ds_checkpoint_dir, config_path, lora_output_di
 
     def _wants_key(name: str) -> bool:
         # Control adapters
-        if 'control_Q' in name or 'control_S' in name:
+        if 'control_A' in name or 'control_B' in name:
             return True
         # LoRA
-        if '.lora_A.' in name or name.endswith('.lora_A.weight'):
-            return True
-        if '.lora_B.' in name or name.endswith('.lora_B.weight'):
+        if 'lora_A' in name or 'lora_B' in name:
             return True
         # Optional PEFT "modules_to_save" items
         if '.modules_to_save.' in name:
