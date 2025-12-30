@@ -19,6 +19,8 @@ import re
 import safetensors.torch
 import torch
 
+from constants import NEUMANN_SERIES_ORDER
+
 def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dropout, adapter_dtype=torch.float32):
     """
     Inject Control Adapter parameters into decoder layers and patch their forward method.
@@ -47,11 +49,6 @@ def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dro
         - Sets original_name for saving compatibility
         - Sets requires_grad True for control_A/control_B and False for other parameters
     """
-
-    # For the inverse approximation (I + W)^{-1}, when ‖W‖₂ ≲ 0.2–0.3, the 1st-order truncation
-    # error O(‖W‖₂²) ≤ 1–2%. Going to order 2 halves the error (O(‖W‖₂³)) but doubles the matmul cost.
-    # Order 3+ yields less than 0.1% improvement in the intended ‖W‖₂ norm range.
-    INVERSE_APPROXIMATION_SERIES_ORDER = 1
 
     # The Neumann series for matrix inverse: (I + W)^{-1} = I - W + W^2 - W^3 + ...
     # converges when ρ(W) < 1, where ρ(W) is the spectral radius (max |eigenvalue|).
@@ -117,7 +114,7 @@ def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dro
             # For positive samples: Add adapter_output as normal
             # For negative samples: Apply kth-order Neumann series approximation of (I + W)^{-1}
             negate_mask = (shift_control_classes == -1).unsqueeze(-1)  # broadcast to (batch_size, seq_len, 1)
-            if INVERSE_APPROXIMATION_SERIES_ORDER == 1:
+            if NEUMANN_SERIES_ORDER == 1:
                 # Simple 1st-order case: (I + W)^{-1} ≈ I - W, so just negate the output
                 adapter_output = torch.where(negate_mask, -adapter_output, adapter_output)
             else:
@@ -125,7 +122,7 @@ def apply_control_adapters(model, layers_to_transform, adapter_rank, adapter_dro
                 neumann_sum = adapter_output  # Start with W^1 term
                 current_power = adapter_output
 
-                for k in range(1, INVERSE_APPROXIMATION_SERIES_ORDER):
+                for k in range(1, NEUMANN_SERIES_ORDER):
                     # Compute next power: W^(k+1) (no dropout on higher order terms)
                     current_power = module.control_B(module.control_A(current_power))
 

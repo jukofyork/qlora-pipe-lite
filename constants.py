@@ -14,3 +14,8 @@ DEFAULT_MAX_CHECKPOINTS = 3
 # Misc constants
 DEEPSPEED_TIMEOUT_HOURS = 6
 DATASET_MAP_BATCH_SIZE = 10
+
+# For the inverse approximation (I + W)^{-1}, when ‖W‖₂ ≲ 0.2–0.3, the 1st-order truncation
+# error O(‖W‖₂²) ≤ 1–2%. Going to order 2 halves the error (O(‖W‖₂³)) but doubles the matmul cost.
+# Order 3+ yields less than 0.1% improvement in the intended ‖W‖₂ norm range.
+NEUMANN_SERIES_ORDER = 2
