@@ -237,8 +237,19 @@ class Engine:
         Returns:
             torch.optim.Optimizer: The initialized optimizer instance.
         """
+        params = list(model_parameters)
+
+        # Handle pipeline stages with no trainable layers (e.g., when layers_to_transform
+        # targets specific layers that all landed on other stages with uniform partitioning).
+        # This creates a dummy parameter to satisfy the optimizer initialization without
+        # affecting training, allowing the stage to participate in forward/backward only.
+        if len(params) == 0:
+            device = torch.device(f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu")
+            dummy = torch.nn.Parameter(torch.zeros(1, device=device), requires_grad=True)
+            params = [dummy]
+
         optimizer_kwargs = {
-            "params": model_parameters,
+            "params": params,
             "lr": config['lr'],
             "betas": (config.get('beta1', DEFAULT_BETA1), config.get('beta2', DEFAULT_BETA2)),
             "eps": config.get('eps', DEFAULT_EPS)
