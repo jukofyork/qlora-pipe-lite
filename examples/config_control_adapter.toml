@@ -28,16 +28,10 @@ lora_dropout = 0.0                 # Dropout on residual delta (default: 0.0)
 # NOTE: To use lora_weight_decay, this must be left as float32.
 lora_weight_dtype = "float32"      # Required for numerical stability (default: "float32")
 
-# L2 weight decay regularization for Control Adapters: L2 regularization on log-eigenvalue vector S using L = ½||S||²
+# L2 weight decay regularization for composite matrix W = BA
 # NOTE: Requires lora_weight_dtype = "float32" when > 0 for numerical stability
-# NOTE: When using Control Adapters, increase lora_weight_decay to 100-500+ for mathematical stability
-lora_weight_decay = 100.0          # L2 regularization on log-eigenvalues S (higher for Control Adapters) (default: 0.0)
-
-# (** Control Adapters only **): Orthogonality regularization step size for Q
-# Controls Newton-style step: Q ← Q − γ·Q·(Q^T Q − I) to maintain Q^T Q ≈ I
-# NOTE: Allowed range (0, 0.5], as values > 0.5 may cause divergence
-# NOTE: Recommend lora_weight_dtype = "float32" for numerical stability, but should still work with bfloat16.
-control_adapter_gamma = 0.5        # Range (0, 0.5], controls Q^T Q ≈ I maintenance (default: 0.5 = full Newton step)
+# NOTE: For Control Adapters, use moderate values (1.0-20.0) to maintain spectral norm bounds
+lora_weight_decay = 10.0           # L2 regularization on composite W = BA (default: 0.0)
 
 # =====================
 # OPTIMIZER CONFIGURATION
@@ -185,7 +179,7 @@ max_tokens = 500000
 # - max_tokens: Maximum number of tokens to keep from this dataset after shuffling (default: unlimited)
 # - control_class: Must be -1, 0, or 1 (only used with Control Adapters)
 #   * control_class = 1: Apply forward transformation (enhance behavior)
-#   * control_class = -1: Apply inverse transformation (suppress behavior)
+#   * control_class = -1: Apply inverse approximation (suppress behavior)
 #   * control_class = 0: Randomized regularizer (deterministically mapped to ±1 during preprocessing)
 
 # Notes:

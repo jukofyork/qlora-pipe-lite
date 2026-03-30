@@ -82,6 +82,16 @@ class Engine:
 
         parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
+        # Handle pipeline stages with no trainable layers (e.g., when layers_to_transform
+        # targets specific layers that all landed on other stages with uniform partitioning).
+        # Register a dummy parameter directly on the model so it appears in model.parameters()
+        # for DeepSpeed's gradient clipping and optimizer step.
+        if len(parameters_to_train) == 0:
+            device = torch.device(f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu")
+            dummy = torch.nn.Parameter(torch.zeros(1, device=device), requires_grad=True)
+            pipeline_model.register_parameter('ds_dummy_param', dummy)
+            parameters_to_train = [dummy]
+
         # Initialize DeepSpeed engine
         assert pipeline_model is not None, "deepspeed.initialize requires a model"
 

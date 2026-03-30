@@ -3,9 +3,6 @@ DEFAULT_BETA1 = 0.9
 DEFAULT_BETA2 = 0.99
 DEFAULT_EPS = 1e-6
 
-# NOTE: This must be > 0 to maintain semi-orthogonality, and <= 0.5 to avoid overshooting (see code comment).
-DEFAULT_CONTROL_ADAPTER_GAMMA = 0.5
-
 # Evaluation defaults
 DEFAULT_EVALS_PER_EPOCH = 10
 DEFAULT_EVAL_FRACTION = 0.01
@@ -17,3 +14,8 @@ DEFAULT_MAX_CHECKPOINTS = 3
 # Misc constants
 DEEPSPEED_TIMEOUT_HOURS = 6
 DATASET_MAP_BATCH_SIZE = 10
+
+# For the inverse approximation (I + W)^{-1}, when ‖W‖₂ ≲ 0.2–0.3, the 1st-order truncation
+# error O(‖W‖₂²) ≤ 1–2%. Going to order 2 halves the error (O(‖W‖₂³)) but doubles the matmul cost.
+# Order 3+ yields less than 0.1% improvement in the intended ‖W‖₂ norm range.
+NEUMANN_SERIES_ORDER = 1

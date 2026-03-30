@@ -93,7 +93,7 @@ python lora_to_gguf.py \
 
 ### What are Control Adapters?
 
-Control Adapters are a parameter-efficient fine-tuning method that provides **multiplicative control** over LLM behaviour. Unlike additive methods like LoRA that add `W + BA` to weights, Control Adapters apply multiplicative transformations to the residual delta (the change produced by decoder layers) of the form `(I + Q diag(λ) Q^T) × delta` (ie: parameterised as a [spectral decomposition of a real symmetric matrix](https://en.wikipedia.org/wiki/Eigendecomposition_of_a_matrix#Real_symmetric_matrices)).
+Control Adapters are a parameter-efficient fine-tuning method that provides **multiplicative control** over LLM behaviour. Unlike additive methods like LoRA that add `W + BA` to weights, Control Adapters apply multiplicative transformations to the residual delta (the change produced by decoder layers) of the form `(I + W) × delta`, where `W = BA` is a low-rank matrix similar to LoRA.
 
 ### Development and Motivation
 
@@ -101,17 +101,18 @@ Control Adapters evolved through several iterations to address fundamental chall
 
 The initial concept was a "multiplicative LoRA" using general transformations `(I + AB^T) × delta`, but this proved too unconstrained and destabilised models. Adding bidirectional control with separate positive/negative classes helped, but using negated gradients for the negative class caused training instability due to the unbounded nature of maximising cross-entropy loss.
 
-Early approaches explored first-order Neumann series approximations `(I - AB^T) × delta` for inverse transformations, but required keeping eigenvalues within a narrow range (`|λ| < 0.3`) for mathematical validity, making regularisation difficult. General factorisations like `Q diag(λ) P^T` offered more flexibility but disrupted critical model behaviours like end-of-line handling.
+Early approaches explored first-order Neumann series approximations `(I - AB^T) × delta` for inverse transformations, but required keeping spectral norms within a narrow range (`‖W‖₂ < 0.3`) for mathematical validity, making regularisation difficult. Attempts to use spectral decompositions `Q diag(λ) Q^T` with log-parameterisation provided exact inverses but required complex orthogonality constraints and disrupted critical model behaviours.
 
-The current approach using symmetric matrices `Q diag(λ) Q^T` with log-parameterisation `λ = exp(S) - 1` emerged as the solution, balancing expressive power with the constraints necessary for stable language model training.
+The current approach using standard LoRA-like factorisation `W = BA` with Neumann series inverse approximation emerged as the solution, balancing expressive power with the constraints necessary for stable language model training while maintaining simple, familiar parameterisation.
 
 ### Key Features
 
-- **Bidirectional Control**: Forward transformations (class `+1`) and inverse transformations (class `-1`) using the same parameters
+- **Bidirectional Control**: Forward transformations (class `+1`) and inverse approximations (class `-1`) using the same parameters
 - **Class-Conditional**: Different behaviour based on control classes (`+1`, `-1`)
 - **Randomised Regularisation**: Datasets assigned to class `0` are mapped randomly to class `±1` during preprocessing
-- **Parameter Efficient**: Only `r×(H+1)` parameters per transformed layer (where `H` is hidden size, `r` is rank)
+- **Parameter Efficient**: Only `r×(H×2)` parameters per transformed layer (where `H` is hidden size, `r` is rank)
 - **Multiplicative**: Transformations scale proportionally with activation magnitude
+- **LoRA-Compatible**: Uses standard LoRA factorisation structure (BA) for easy adaptation of existing code
 
 ### When to Use Control Adapters
 
@@ -120,7 +121,7 @@ The current approach using symmetric matrices `Q diag(λ) Q^T` with log-paramete
 - Behavioural steering (tone, style, personality, prose)
 - Bidirectional learning (enhance/suppress behaviours using the same model)
 - "Unlearning" specific behaviours
-- Scenarios requiring precise control reversal
+- Scenarios requiring control reversal
 
 **Consider alternatives for:**
 
@@ -133,7 +134,7 @@ The current approach using symmetric matrices `Q diag(λ) Q^T` with log-paramete
 Control Adapters are conceptually similar to [Control Vectors](https://github.com/jukofyork/control-vectors), which also steer model behaviour by intervening in the residual stream. However:
 
 - **Control Vectors**: Compute steering directions analytically using eigenvector analysis of the symmetrised cross-covariance matrix. Applied via additive combination, where multiple vectors can interfere when used simultaneously.
-- **Control Adapters**: Learn steering transformations through gradient-based training. More forgiving for "fuzzy" criteria like writing style. The `Q` matrix learns a task-specific subspace while `S` parameters provide per-direction scaling effects.
+- **Control Adapters**: Learn steering transformations through gradient-based training. More forgiving for "fuzzy" criteria like writing style. The low-rank structure provides task-specific directional control with learned scaling.
 - **Complementary usage**: Control Vectors provide additive translation while Control Adapters provide multiplicative scaling along learned directions. Together they enable richer intervention patterns than either method alone.
 
 ## Mathematical Foundation
@@ -144,54 +145,54 @@ Control Adapters apply multiplicative transformations to the residual delta prod
 
 ```
 layer_delta = layer_output - input_hidden_states
-adapter_output = Q diag(λ) Q^T @ layer_delta
+adapter_output = B @ A @ dropout(layer_delta)
 final_output = layer_output + adapter_output
 ```
 
 Where:
 
-- **`Q ∈ ℝ^{H×r}`**: Semi-orthogonal matrix spanning a learned subspace  
-- **`λ ∈ ℝ^r`**: Per-direction eigenvalue offsets
+- **`A ∈ ℝ^{r×H}`**: Down-projection matrix (hidden_size → adapter_rank)
+- **`B ∈ ℝ^{H×r}`**: Up-projection matrix (adapter_rank → hidden_size)
+- **`W = BA ∈ ℝ^{H×H}`**: Composite low-rank transformation matrix
 - **`r`**: Adapter rank (typically 16-64)
 - **`H`**: Hidden dimension
 
-### Log-Parameterisation
+This structure is identical to standard LoRA, but applied multiplicatively to residual deltas rather than additively to weights.
 
-Eigenvalues are derived from learnable parameters `S`:
+### Neumann Series Inverse Approximation
+
+For bidirectional control, we need to approximate `(I + W)^{-1}` for negative examples. The Neumann series provides:
 
 ```
-λ = exp(S) - 1
+(I + W)^{-1} = I - W + W² - W³ + ...
 ```
 
-This parameterisation provides several key advantages:
+This series converges when the spectral norm `‖W‖₂ < 1`. Control Adapters use a **1st-order approximation**:
 
-- **Mathematical stability**: `1 + λ = exp(S) > 0` always, ensuring well-conditioned transformations
-- **Identity initialisation**: `S=0 → λ=0` → no change initially, allowing gradual learning
-- **Natural inverses**: Exact bidirectionality via `exp(-S) - 1` using the same learned parameters
-- **Smooth regularisation**: Symmetric behaviour in log-space for both forward and inverse directions
-- **Spectral control**: Interpretable eigenvalue-based scaling along learned directions
-- **Unbounded range**: Unlike constrained parameterisations, `S` can take any real value while keeping transformations stable
+- **Forward (Class `+1`)**: Apply `W` directly: `(I + W) × delta ≈ delta + W × delta`
+- **Inverse (Class `-1`)**: Apply `-W` for 1st-order inverse: `(I + W)^{-1} × delta ≈ delta - W × delta`
 
-### Bidirectional Control
+**Convergence and Accuracy:**
 
-The key innovation is principled inverse transformations:
+When `‖W‖₂ ≲ 0.25`, the 1st-order truncation error is `O(‖W‖₂²) ≤ 1-2%`. The training regularisation maintains this spectral norm bound to ensure:
 
-- **Forward (Class `+1`)**: `λ = exp(S) - 1`
-- **Inverse (Class `-1`)**: `λ' = exp(-S) - 1 = -λ/(1+λ)`
+- Convergence guarantee (`‖W‖₂ < 1`)
+- Acceptable approximation error (`‖W‖₂ < 0.25`)
 
-This provides mathematical guarantees:
+**Scalar Intuition:**
 
-- Class `-1` exactly undoes Class `+1` transformations when `Q^T Q = I`
-- Perfect bidirectional control using the same parameters
-- In practice, effects are approximate due to operating on residual deltas and semi-orthogonality
+For scalar `δ` with `|δ| < 1`:
+- True inverse: `1/(1 + δ)`
+- 1st order: `1 - δ` (error ≈ `δ²`)
+- Example with `δ = 0.1`: `1/1.1 ≈ 0.9091` vs `1 - 0.1 = 0.9000` (≈1% error)
 
-### Orthogonality Constraint
+### Norm Monitoring
 
-The method maintains `Q^T Q ≈ I_r` through regularisation, ensuring:
+Since computing `‖W‖₂` directly is expensive, we monitor the **Frobenius norm** `‖W‖_F` instead:
 
-- Stable matrix operations
-- Predictable eigenvalue behaviour
-- Numerical stability during training
+- For rank-`r` matrices: `‖W‖₂ ≤ ‖W‖_F ≤ √r · ‖W‖₂`
+- Target: `‖W‖_F < 0.25√r` ensures `‖W‖₂ ≲ 0.25` with balanced singular values
+- Regularisation maintains this bound via L2 weight decay on the composite matrix
 
 ## Configuration
 
@@ -211,8 +212,7 @@ lora_weight_dtype = "float32"     # Recommended for stability
 
 ```toml
 # Regularisation
-lora_weight_decay = 10.0          # L2 decay on S parameters (requires float32)
-control_adapter_gamma = 0.5       # Orthogonality step size (0, 0.5]
+lora_weight_decay = 10.0          # L2 decay on composite W = BA (requires float32)
 
 # Layer targeting
 layers_to_transform = "0:29"      # Transform layers 0-29 (inclusive)
@@ -222,8 +222,8 @@ layers_to_transform = "0:29"      # Transform layers 0-29 (inclusive)
 ### Important Notes
 
 - **Float32 required**: If using `lora_weight_decay > 0`, you *must* set `lora_weight_dtype = "float32"`
-- **Gamma bounds**: `control_adapter_gamma` must be in range `(0, 0.5]` for numerical stability
 - **Layer selection**: Can target specific layers; omit `layers_to_transform` to use all
+- **Weight decay range**: Typical values 1.0-20.0; higher values enforce stricter norm bounds
 
 ## Data and Classes
 
@@ -232,7 +232,7 @@ layers_to_transform = "0:29"      # Transform layers 0-29 (inclusive)
 Each example/document in your training data uses a control class:
 
 - **Class `+1`**: Apply forward transformation (enhance behaviour)
-- **Class `-1`**: Apply inverse transformation (suppress behaviour)  
+- **Class `-1`**: Apply inverse approximation (suppress behaviour)  
 - **Class `0`**: Randomised regulariser. During preprocessing, each example marked `0` is deterministically mapped to `+1` or `-1` (`≈ 50/50`). This injects controlled label noise to reduce overfitting and prevents the model from assuming controls are always active. There is no special "neutral" behaviour in training - class `0` becomes `±1` before training.
 
 ### Dataset Configuration
@@ -285,12 +285,14 @@ For each decoder layer with Control Adapters:
 
 1. **Compute residual delta**: `layer_delta = layer_output - input_hidden_states`
 2. **Apply dropout** (if configured) and cast to adapter dtype
-3. **Project to subspace**: `x_q = layer_delta @ Q`  
+3. **Apply control adapter**: `adapter_output = B(A(dropout(layer_delta)))`
 4. **Class-conditional transformation**:
-   - Class `+1`: `λ = exp(S) - 1`
-   - Class `-1`: `λ' = exp(-S) - 1`
-5. **Reconstruct**: `adapter_output = (x_q * λ) @ Q^T`
-6. **Add to residual stream**: `final_output = layer_output + adapter_output`
+   - **Class `+1`**: Add `adapter_output` to apply forward transformation `(I + W) × delta`
+   - **Class `-1`**: Apply Neumann series inverse approximation `(I + W)^{-1} × delta`:
+     - **1st-order** (default): Negate `adapter_output`, giving `(I - W) × delta`
+     - **Higher orders**: Compute `I - W + W² - W³ + ...` up to `INVERSE_APPROXIMATION_SERIES_ORDER`
+   - **Class `0`**: Zero out (padding tokens; labels = -100)
+5. **Add to residual stream**: `final_output = layer_output + adapter_output`
 
 Note on causal alignment:
 - The training pipeline uses causal language modelling. The control signal is shifted one token to align with next-token prediction (same mechanism as label shifting).
@@ -298,11 +300,10 @@ Note on causal alignment:
 
 ### Regularisation During Training
 
-Control Adapters employ three regularisation mechanisms:
+Control Adapters employ two regularisation mechanisms:
 
-1. **Orthogonality maintenance**: `Q ← Q - γ Q (Q^T Q - I)` with `γ = control_adapter_gamma` (mandatory analytical regularisation)
-2. **Eigenvalue shrinkage**: `S ← S - lr * lora_weight_decay * S` (optional analytical regularisation; prevents overfitting)
-3. **Class randomisation**: Examples marked `control_class = 0` are randomly assigned `±1` during preprocessing, injecting controlled label noise to improve generalisation and prevent overfitting to always-active controls
+1. **Weight decay**: L2 regularisation on composite matrix `W = BA` using `L = ½‖W‖_F²` (optional analytical regularisation; maintains spectral norm bounds for convergence)
+2. **Class randomisation**: Examples marked `control_class = 0` are randomly assigned `±1` during preprocessing, injecting controlled label noise to improve generalisation and prevent overfitting to always-active controls
 
 ## Analysis and Monitoring
 
@@ -310,8 +311,7 @@ Control Adapters employ three regularisation mechanisms:
 
 During training, monitor these metrics via TensorBoard:
 
-- **`train/norms_{avg,min,max}`**: Spectral norms (≈ `max |λ|`) per layer
-- **`train/orthogonality_{avg,min,max}`**: `‖Q^T Q - I‖_F²` constraint satisfaction
+- **`train/norms_{avg,min,max}`**: Frobenius norms `‖W‖_F` per layer
 - **`train/weight_decay_{avg,min,max}`**: Norm reduction from regularisation (if applied)
 
 ### Analysis Tool
@@ -322,16 +322,21 @@ Use the analysis tool for detailed post-training evaluation:
 python analyze_control_adapters.py --adapter /path/to/adapter [--no-gpu]
 ```
 
-This provides per-layer metrics including orthogonality errors, effective rank usage, and approximation quality.
+This provides per-layer metrics including spectral norms, Frobenius norms, effective rank, condition numbers, and convergence status.
 
 ### Interpreting Key Metrics
 
-| Metric | Good Values | What It Means |
-|--------|-------------|---------------|
-| Orthogonality error | < 1.0 (excellent < 0.5) | `Q` matrix maintains good subspace properties |
+| Metric | Target Values | What It Means |
+|--------|---------------|---------------|
+| Spectral norm (`‖W‖₂`) | < 0.25 (must be < 1) | Ensures convergence and low approximation error |
+| Frobenius norm (`‖W‖_F`) | < 0.25√r | Proxy for spectral norm (cheaper to compute during training) |
 | Effective rank | Close to adapter rank | Adapter is using its full capacity |
-| Approximation errors | < 5% (poor > 20%) | Orthogonality assumption holds well |
 | Condition number | < 100 (poor > 1000) | Numerically stable transformations |
+
+**Warning indicators:**
+- `‖W‖₂ ≥ 1`: Neumann series may diverge (critical!)
+- `‖W‖₂ ≥ 0.25`: Approximation error exceeds 1-2% target
+- Low effective rank: Potential rank collapse or underutilisation
 
 ## Conversion to LoRA
 
@@ -350,7 +355,7 @@ python control_adapter_to_lora.py \
   --base /path/to/base_model \
   --adapter /path/to/control_adapter \
   --output /path/to/lora_output \
-  [--inverse] [--model-specific-flags]
+  [--inverse] [--rank R] [--model-specific-flags]
 ```
 
 NOTE: Targets `mlp.down_proj` by default; use `--cohere` or `--mixtral N` to include additional modules.
@@ -358,19 +363,29 @@ NOTE: Targets `mlp.down_proj` by default; use `--cohere` or `--mixtral N` to inc
 **Key options:**
 
 - `--inverse`: Convert inverse branch (class `-1` behaviour) instead of forward branch (useful for testing!)
+- `--rank R`: Override output rank (default: use adapter rank)
 - `--cohere`: Also target `o_proj` layers (for `Cohere` models only)
 - `--mixtral N`: Target `experts.{0..N-1}.w2` (for `Mixtral` models only)
 
 ### Conversion Math
 
-The conversion uses an exact low-rank mapping to an additive LoRA:
+The conversion computes the effect on model weights and approximates via SVD:
 
-1. Compute eigenvalue offsets: `λ = exp(S) - 1` (or `λ' = exp(-S) - 1` for `--inverse`)
-2. Compute delta to base weight: `ΔW = (Q diag(λ) Q^T) @ W_base`
-3. Exact LoRA factorisation:
-   - `B = Q diag(λ)`  (shape `[H, r]`)
-   - `A = Q^T W_base` (shape `[r, N]`)
-   - Then `ΔW = B @ A` exactly, with rank `r` preserved (no SVD, no truncation).
+1. **Compute effect on weights**: 
+   - Forward: `delta = W @ weight` where `W = BA`
+   - Inverse: `delta = ((I + W)^{-1} - I) @ weight` (exact inverse)
+
+2. **SVD approximation**: `delta ≈ U @ diag(√S) @ V^T`
+
+3. **LoRA factorisation**:
+   - `A_lora = diag(√S) @ V^T` (shape `[rank, output_size]`)
+   - `B_lora = U @ diag(√S)` (shape `[hidden_size, rank]`)
+   - Result: `delta ≈ B_lora @ A_lora` with specified rank
+
+**Rank Selection:**
+- Default: Uses original adapter rank
+- Override with `--rank R` to reduce/increase rank
+- Tool reports variance explained by chosen rank
 
 ### Deployment
 
@@ -412,8 +427,8 @@ NOTE: Mixtral is not yet supported by `lora_to_gguf.py` - use [convert_lora_to_g
 ### Training
 
 - **Learning rate**: Start with `2e-4`, typical range is `1e-5` to `1e-3`
-- **Weight decay**: Use moderate values (`1.0`-`20.0`) when using `float32`
-- **Monitor orthogonality**: Keep orthogonality error well below `1.0` during training
+- **Weight decay**: Use moderate values (`1.0`-`20.0`) to maintain norm bounds
+- **Monitor norms**: Keep spectral norm well below `0.25` during training (ideally `0.15-0.20`)
 - **Check both directions**: Test that forward/inverse behaviours work as expected via the `--inverse` option (see above)
 
 ### Data Preparation
@@ -425,25 +440,25 @@ NOTE: Mixtral is not yet supported by `lora_to_gguf.py` - use [convert_lora_to_g
 
 ### Debugging Common Issues
 
-- **Persistent High orthogonality error (>1.0)**: Reduce learning rate or increase `control_adapter_gamma`
-- **Sudden norm spikes**: Check for gradient explosion, reduce learning rate, increase `lora_weight_decay`
+- **High spectral norms (>0.25)**: Increase `lora_weight_decay` or reduce learning rate
+- **Norm spikes**: Check for gradient explosion, reduce learning rate, increase `lora_weight_decay`
 - **Poor effective rank (<50% of adapter rank)**: Try more training data, more diverse training data, or reduce `lora_rank`
-- **High approximation errors (>20%)**: Reduce learning rate and/or increase regularisation parameters
+- **Convergence warnings (‖W‖₂ ≥ 1)**: Critical issue - increase weight decay significantly or reduce learning rate
 
 ## Files and Tools
 
 ### Core Implementation
 
 - `training/control_adapters.py`: Main implementation and training logic
-- `training/regularizer.py`: Orthogonality and weight decay regularisation
+- `training/regularizer.py`: Weight decay regularisation for composite matrices
 
 ### Analysis Tools
 
-- `analyze_control_adapters.py`: Comprehensive adapter analysis with per-layer metrics
+- `analyze_control_adapters.py`: Comprehensive adapter analysis with per-layer metrics and convergence status
 
 ### Conversion Tools
 
-- `control_adapter_to_lora.py`: Convert to standard LoRA format for deployment
+- `control_adapter_to_lora.py`: Convert to standard LoRA format via SVD approximation
 - `merge_lora.py`: Standard LoRA merging tool (use after conversion)
 - `lora_to_gguf.py`: Export a LoRA adapter to GGUF for [llama.cpp](https://github.com/ggml-org/llama.cpp)
 
